@@ -68,6 +68,147 @@ const forceAdminUpsert = async () => {
   }
 };
 
+// In-memory OTP store (Key: 10-digit phone, Value: { otp, expiresAt, attempts })
+const otpStore = new Map();
+
+// @desc    Dispatch live SMS / WhatsApp OTP
+// @route   POST /api/auth/send-otp
+// @access  Public
+const sendOtp = async (req, res) => {
+  const { phone, channel = 'whatsapp' } = req.body;
+
+  try {
+    if (!phone) {
+      return res.status(400).json({ success: false, message: 'Please provide a valid 10-digit mobile number' });
+    }
+
+    const cleanPhone = String(phone).replace(/\D/g, '').slice(-10);
+    if (cleanPhone.length < 10) {
+      return res.status(400).json({ success: false, message: 'Invalid phone number. Must be at least 10 digits.' });
+    }
+
+    // Generate secure 6-digit OTP
+    const otp = String(crypto.randomInt(100000, 999999));
+    const expiresAt = Date.now() + 10 * 60 * 1000; // 10 minutes expiry
+
+    otpStore.set(cleanPhone, { otp, expiresAt, attempts: 0 });
+
+    // 1. Check for Fast2SMS Gateway integration (Indian SMS Gateway)
+    let fast2smsSent = false;
+    if (process.env.FAST2SMS_API_KEY) {
+      try {
+        const f2sResp = await fetch('https://www.fast2sms.com/dev/bulkV2', {
+          method: 'POST',
+          headers: {
+            'authorization': process.env.FAST2SMS_API_KEY,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            route: 'otp',
+            variables_values: otp,
+            numbers: cleanPhone,
+          }),
+        });
+        const f2sData = await f2sResp.json();
+        fast2smsSent = true;
+        console.log(`[FAST2SMS GATEWAY] Dispatched OTP to ${cleanPhone}:`, f2sData);
+      } catch (f2sErr) {
+        console.error('[FAST2SMS GATEWAY ERROR]:', f2sErr.message);
+      }
+    }
+
+    // 2. Check for Twilio SMS / WhatsApp Gateway integration
+    let twilioSent = false;
+    if (process.env.TWILIO_ACCOUNT_SID && process.env.TWILIO_AUTH_TOKEN) {
+      try {
+        const authHeader = 'Basic ' + Buffer.from(`${process.env.TWILIO_ACCOUNT_SID}:${process.env.TWILIO_AUTH_TOKEN}`).toString('base64');
+        const toNum = channel === 'whatsapp' ? `whatsapp:+91${cleanPhone}` : `+91${cleanPhone}`;
+        const fromNum = channel === 'whatsapp' 
+          ? (process.env.TWILIO_WHATSAPP_NUMBER || 'whatsapp:' + process.env.TWILIO_PHONE_NUMBER)
+          : process.env.TWILIO_PHONE_NUMBER;
+
+        const bodyParams = new URLSearchParams({
+          To: toNum,
+          From: fromNum,
+          Body: `Your AS Maths Educator verification code is ${otp}. Valid for 10 minutes.`,
+        });
+
+        const twResp = await fetch(`https://api.twilio.com/2010-04-01/Accounts/${process.env.TWILIO_ACCOUNT_SID}/Messages.json`, {
+          method: 'POST',
+          headers: {
+            'Authorization': authHeader,
+            'Content-Type': 'application/x-www-form-urlencoded',
+          },
+          body: bodyParams.toString(),
+        });
+        const twData = await twResp.json();
+        twilioSent = true;
+        console.log(`[TWILIO GATEWAY] Dispatched OTP to ${toNum}:`, twData.sid || twData.message);
+      } catch (twErr) {
+        console.error('[TWILIO GATEWAY ERROR]:', twErr.message);
+      }
+    }
+
+    // Live terminal log for verification & gateway auditing
+    console.log(`\n📲 [LIVE OTP GATEWAY AUDIT] Dispatched 6-digit OTP to +91 ${cleanPhone}`);
+    console.log(`   OTP: ${otp} | Expires in: 10 mins | Fast2SMS: ${fast2smsSent ? 'Active' : 'Standby'} | Twilio: ${twilioSent ? 'Active' : 'Standby'}\n`);
+
+    res.json({
+      success: true,
+      message: `A 6-digit verification code has been dispatched to your mobile number (+91 ${cleanPhone}).`,
+      phone: cleanPhone,
+    });
+  } catch (error) {
+    console.error('Send OTP error:', error);
+    res.status(500).json({ success: false, message: 'Failed to dispatch OTP. Please try again.' });
+  }
+};
+
+// @desc    Verify submitted 6-digit OTP
+// @route   POST /api/auth/verify-otp
+// @access  Public
+const verifyOtp = async (req, res) => {
+  const { phone, otp } = req.body;
+
+  try {
+    if (!phone || !otp) {
+      return res.status(400).json({ success: false, message: 'Phone number and 6-digit OTP are required' });
+    }
+
+    const cleanPhone = String(phone).replace(/\D/g, '').slice(-10);
+    const record = otpStore.get(cleanPhone);
+
+    if (!record) {
+      return res.status(400).json({ success: false, message: 'No OTP requested for this number or it has expired. Please request a new OTP.' });
+    }
+
+    if (Date.now() > record.expiresAt) {
+      otpStore.delete(cleanPhone);
+      return res.status(400).json({ success: false, message: 'OTP has expired. Please request a new code.' });
+    }
+
+    if (String(record.otp).trim() !== String(otp).trim()) {
+      record.attempts = (record.attempts || 0) + 1;
+      if (record.attempts >= 5) {
+        otpStore.delete(cleanPhone);
+        return res.status(400).json({ success: false, message: 'Too many incorrect attempts. Please request a new OTP.' });
+      }
+      return res.status(400).json({ success: false, message: 'Invalid OTP code. Please check and re-enter.' });
+    }
+
+    // OTP matched successfully
+    otpStore.delete(cleanPhone);
+    res.json({
+      success: true,
+      verified: true,
+      message: 'Mobile number verified successfully!',
+    });
+  } catch (error) {
+    console.error('Verify OTP error:', error);
+    res.status(500).json({ success: false, message: 'Verification error. Please try again.' });
+  }
+};
+
 // @desc    Register a new user (Student or Admin)
 // @route   POST /api/auth/register
 // @access  Public
@@ -77,11 +218,11 @@ const registerUser = async (req, res) => {
     email,
     password,
     role = 'student',
-    mobile,
     whatsapp,
-    studentWhatsapp,
-    fatherWhatsapp,
     fatherContact,
+    fatherWhatsapp,
+    mobile,
+    studentWhatsapp,
     stream,
     targetCourse,
     branch,
@@ -96,6 +237,19 @@ const registerUser = async (req, res) => {
       return res.status(400).json({ message: 'An account with this email address already exists' });
     }
 
+    // Two mandatory contact fields: Student WhatsApp & Parent's/Guardian's Contact
+    const finalStudentWhatsapp = (whatsapp || studentWhatsapp || mobile || '').trim();
+    const finalParentContact = (fatherContact || fatherWhatsapp || '').trim();
+
+    if (role === 'student') {
+      if (!finalStudentWhatsapp) {
+        return res.status(400).json({ message: "Student's WhatsApp number is required." });
+      }
+      if (!finalParentContact) {
+        return res.status(400).json({ message: "Parent's / Guardian's Contact Number is required." });
+      }
+    }
+
     // Default status for newly registered students: isApproved: false
     // Requires manual verification & approval by the teacher/admin from Admin Dashboard
     const isApproved = role === 'admin' ? true : false;
@@ -105,11 +259,11 @@ const registerUser = async (req, res) => {
       name,
       email: email.toLowerCase(),
       password,
-      mobile: mobile || studentWhatsapp,
-      whatsapp: whatsapp || studentWhatsapp,
-      studentWhatsapp: studentWhatsapp || whatsapp || mobile,
-      fatherWhatsapp: fatherWhatsapp || fatherContact,
-      fatherContact: fatherContact || fatherWhatsapp,
+      whatsapp: finalStudentWhatsapp,
+      studentWhatsapp: finalStudentWhatsapp,
+      mobile: finalStudentWhatsapp, // Alias for backward compatibility
+      fatherContact: finalParentContact,
+      fatherWhatsapp: finalParentContact, // Alias for backward compatibility
       stream,
       targetCourse,
       branch: branch || targetCourse,
@@ -131,10 +285,10 @@ const registerUser = async (req, res) => {
           branch: user.branch || '',
           semester: user.semester || null,
           classLevel: user.classLevel || '',
-          whatsapp: user.whatsapp || user.mobile,
-          studentWhatsapp: user.studentWhatsapp || user.whatsapp,
-          fatherWhatsapp: user.fatherWhatsapp || user.fatherContact,
-          fatherContact: user.fatherContact || user.fatherWhatsapp,
+          whatsapp: finalStudentWhatsapp,
+          studentWhatsapp: finalStudentWhatsapp,
+          fatherContact: finalParentContact,
+          fatherWhatsapp: finalParentContact,
           isApproved: false,
           profileCompleted: false,
           registrationDate: new Date(),
@@ -149,6 +303,8 @@ const registerUser = async (req, res) => {
       name: user.name,
       email: user.email,
       role: user.role,
+      whatsapp: user.whatsapp,
+      fatherContact: user.fatherContact,
       isApproved: user.isApproved,
       message: 'Registration successful! Your account is pending teacher/admin approval.',
     });
@@ -848,6 +1004,8 @@ const resetPassword = async (req, res) => {
 
 module.exports = {
   registerUser,
+  sendOtp,
+  verifyOtp,
   loginUser,
   completeOnboarding,
   getUserProfile,

@@ -2,6 +2,8 @@ const express = require('express');
 const router = express.Router();
 const {
   registerUser,
+  sendOtp,
+  verifyOtp,
   loginUser,
   getUserProfile,
   getAllUsers,
@@ -17,6 +19,8 @@ const {
 const { protect } = require('../middleware/authMiddleware');
 
 router.post('/register', registerUser);
+router.post('/send-otp', sendOtp);
+router.post('/verify-otp', verifyOtp);
 router.post('/login', loginUser);
 router.post('/onboarding', completeOnboarding);
 router.put('/onboarding', completeOnboarding);

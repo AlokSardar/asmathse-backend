@@ -7,12 +7,12 @@ const userSchema = new mongoose.Schema({
   email: { type: String, required: true, unique: true },
   password: { type: String, required: true },
   
-  // Student contact & parent details
-  mobile: { type: String },
-  whatsapp: { type: String },
-  studentWhatsapp: { type: String },
+  // Student contact & parent details (Two primary contact fields)
+  whatsapp: { type: String }, // Student's WhatsApp Number (Mandatory for students)
+  fatherContact: { type: String }, // Parent's / Guardian's Contact Number (Mandatory for students)
   fatherWhatsapp: { type: String },
-  fatherContact: { type: String },
+  studentWhatsapp: { type: String },
+  mobile: { type: String }, // Legacy/alias mirror of whatsapp
 
   // Academic classification
   stream: { type: String },
