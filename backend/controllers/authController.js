@@ -311,8 +311,7 @@ const registerUser = async (req, res) => {
       return res.status(400).json({ message: 'An account with this email address already exists' });
     }
 
-    const cleanPhone = (phone || mobile || whatsapp || '').trim();
-    const finalStudentWhatsapp = (whatsapp || studentWhatsapp || phone || mobile || '').trim();
+    const finalStudentWhatsapp = (whatsapp || studentWhatsapp || mobile || phone || '').trim();
     const finalParentContact = (fatherContact || fatherWhatsapp || '').trim();
 
     if (role === 'student') {
@@ -336,10 +335,10 @@ const registerUser = async (req, res) => {
       name,
       email: email.toLowerCase(),
       password,
-      phone: cleanPhone,
+      phone: finalStudentWhatsapp,
       whatsapp: finalStudentWhatsapp,
       studentWhatsapp: finalStudentWhatsapp,
-      mobile: cleanPhone || finalStudentWhatsapp,
+      mobile: finalStudentWhatsapp,
       fatherContact: finalParentContact,
       fatherWhatsapp: finalParentContact,
       stream: stream || 'Engineering',
@@ -362,7 +361,7 @@ const registerUser = async (req, res) => {
           userId: user._id,
           name: user.name,
           email: user.email,
-          phone: cleanPhone,
+          phone: finalStudentWhatsapp,
           stream: user.stream || 'Engineering',
           targetCourse: user.targetCourse || '',
           branch: user.branch || '',
@@ -391,7 +390,7 @@ const registerUser = async (req, res) => {
       name: user.name,
       email: user.email,
       role: user.role,
-      phone: user.phone || cleanPhone,
+      phone: user.phone || finalStudentWhatsapp,
       whatsapp: user.whatsapp,
       fatherContact: user.fatherContact,
       stream: user.stream,
