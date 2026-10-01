@@ -22,6 +22,7 @@ const userSchema = new mongoose.Schema({
   semester: { type: mongoose.Schema.Types.Mixed },
   classLevel: { type: String },
   subject: { type: String },
+  bscType: { type: String },
   academicYear: { type: String },
   
   // Mandatory Student Onboarding Tracking & Admin Approval

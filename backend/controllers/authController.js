@@ -324,8 +324,12 @@ const registerUser = async (req, res) => {
       }
     }
 
-    // Streamlined Registration: Instant verification bypass & instant approval
-    const isApproved = true;
+    // Stream / Category fields
+    const { subject, bscType } = req.body;
+
+    // Mandatory Admin Approval process:
+    // New student registrations remain pending (isApproved: false) until explicitly approved by the admin.
+    const isApproved = role === 'admin' ? true : false;
 
     const user = await User.create({
       role,
@@ -339,11 +343,13 @@ const registerUser = async (req, res) => {
       fatherContact: finalParentContact,
       fatherWhatsapp: finalParentContact,
       stream: stream || 'Engineering',
-      targetCourse: targetCourse || 'Mathematics',
+      targetCourse: targetCourse || '',
       branch: branch || targetCourse || '',
-      semester: semester || 1,
-      classLevel: classLevel || 'Class 10',
-      isApproved: true,
+      semester: semester ? Number(semester) : 1,
+      classLevel: classLevel || '',
+      subject: subject || targetCourse || 'Mathematics',
+      bscType: bscType || '',
+      isApproved,
       profileCompleted: true,
       isProfileComplete: true,
       registrationDate: new Date(),
@@ -358,15 +364,17 @@ const registerUser = async (req, res) => {
           email: user.email,
           phone: cleanPhone,
           stream: user.stream || 'Engineering',
-          targetCourse: user.targetCourse || 'Mathematics',
+          targetCourse: user.targetCourse || '',
           branch: user.branch || '',
           semester: user.semester || 1,
-          classLevel: user.classLevel || 'Class 10',
+          classLevel: user.classLevel || '',
+          subject: user.subject || 'Mathematics',
+          bscType: bscType || '',
           whatsapp: finalStudentWhatsapp,
           studentWhatsapp: finalStudentWhatsapp,
           fatherContact: finalParentContact,
           fatherWhatsapp: finalParentContact,
-          isApproved: true,
+          isApproved: false,
           profileCompleted: true,
           isProfileComplete: true,
           registrationDate: new Date(),
@@ -375,7 +383,7 @@ const registerUser = async (req, res) => {
       ).catch(() => {});
     }
 
-    const token = generateToken(user._id);
+    const token = role === 'admin' ? generateToken(user._id) : null;
 
     res.status(201).json({
       _id: user._id,
@@ -387,12 +395,18 @@ const registerUser = async (req, res) => {
       whatsapp: user.whatsapp,
       fatherContact: user.fatherContact,
       stream: user.stream,
+      branch: user.branch,
+      semester: user.semester,
+      classLevel: user.classLevel,
+      subject: user.subject,
       targetCourse: user.targetCourse,
-      isApproved: true,
+      isApproved: user.isApproved,
       profileCompleted: true,
       isProfileComplete: true,
       token,
-      message: 'Registration successful! Instant verification bypass active.',
+      message: role === 'student'
+        ? 'Registration submitted! Your account is pending teacher/admin approval.'
+        : 'Faculty account registered and active.',
     });
   } catch (error) {
     console.error('Registration error:', error);
