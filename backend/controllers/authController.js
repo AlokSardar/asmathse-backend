@@ -291,6 +291,7 @@ const registerUser = async (req, res) => {
     email,
     password,
     role = 'student',
+    phone,
     whatsapp,
     fatherContact,
     fatherWhatsapp,
@@ -310,8 +311,8 @@ const registerUser = async (req, res) => {
       return res.status(400).json({ message: 'An account with this email address already exists' });
     }
 
-    // Two mandatory contact fields: Student WhatsApp & Parent's/Guardian's Contact
-    const finalStudentWhatsapp = (whatsapp || studentWhatsapp || mobile || '').trim();
+    const cleanPhone = (phone || mobile || whatsapp || '').trim();
+    const finalStudentWhatsapp = (whatsapp || studentWhatsapp || phone || mobile || '').trim();
     const finalParentContact = (fatherContact || fatherWhatsapp || '').trim();
 
     if (role === 'student') {
@@ -323,27 +324,28 @@ const registerUser = async (req, res) => {
       }
     }
 
-    // Default status for newly registered students: isApproved: false
-    // Requires manual verification & approval by the teacher/admin from Admin Dashboard
-    const isApproved = role === 'admin' ? true : false;
+    // Streamlined Registration: Instant verification bypass & instant approval
+    const isApproved = true;
 
     const user = await User.create({
       role,
       name,
       email: email.toLowerCase(),
       password,
+      phone: cleanPhone,
       whatsapp: finalStudentWhatsapp,
       studentWhatsapp: finalStudentWhatsapp,
-      mobile: finalStudentWhatsapp, // Alias for backward compatibility
+      mobile: cleanPhone || finalStudentWhatsapp,
       fatherContact: finalParentContact,
-      fatherWhatsapp: finalParentContact, // Alias for backward compatibility
-      stream,
-      targetCourse,
-      branch: branch || targetCourse,
-      semester,
-      classLevel,
-      isApproved,
-      profileCompleted: false,
+      fatherWhatsapp: finalParentContact,
+      stream: stream || 'Engineering',
+      targetCourse: targetCourse || 'Mathematics',
+      branch: branch || targetCourse || '',
+      semester: semester || 1,
+      classLevel: classLevel || 'Class 10',
+      isApproved: true,
+      profileCompleted: true,
+      isProfileComplete: true,
       registrationDate: new Date(),
     });
 
@@ -354,21 +356,26 @@ const registerUser = async (req, res) => {
           userId: user._id,
           name: user.name,
           email: user.email,
+          phone: cleanPhone,
           stream: user.stream || 'Engineering',
+          targetCourse: user.targetCourse || 'Mathematics',
           branch: user.branch || '',
-          semester: user.semester || null,
-          classLevel: user.classLevel || '',
+          semester: user.semester || 1,
+          classLevel: user.classLevel || 'Class 10',
           whatsapp: finalStudentWhatsapp,
           studentWhatsapp: finalStudentWhatsapp,
           fatherContact: finalParentContact,
           fatherWhatsapp: finalParentContact,
-          isApproved: false,
-          profileCompleted: false,
+          isApproved: true,
+          profileCompleted: true,
+          isProfileComplete: true,
           registrationDate: new Date(),
         },
         { upsert: true, new: true }
       ).catch(() => {});
     }
+
+    const token = generateToken(user._id);
 
     res.status(201).json({
       _id: user._id,
@@ -376,10 +383,16 @@ const registerUser = async (req, res) => {
       name: user.name,
       email: user.email,
       role: user.role,
+      phone: user.phone || cleanPhone,
       whatsapp: user.whatsapp,
       fatherContact: user.fatherContact,
-      isApproved: user.isApproved,
-      message: 'Registration successful! Your account is pending teacher/admin approval.',
+      stream: user.stream,
+      targetCourse: user.targetCourse,
+      isApproved: true,
+      profileCompleted: true,
+      isProfileComplete: true,
+      token,
+      message: 'Registration successful! Instant verification bypass active.',
     });
   } catch (error) {
     console.error('Registration error:', error);

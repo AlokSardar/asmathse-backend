@@ -8,6 +8,7 @@ const userSchema = new mongoose.Schema({
   password: { type: String, required: true },
   
   // Student contact & parent details (Two primary contact fields)
+  phone: { type: String }, // Phone Number
   whatsapp: { type: String }, // Student's WhatsApp Number (Mandatory for students)
   fatherContact: { type: String }, // Parent's / Guardian's Contact Number (Mandatory for students)
   fatherWhatsapp: { type: String },
