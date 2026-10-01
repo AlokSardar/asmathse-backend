@@ -27,6 +27,11 @@ const extractYouTubeVideoId = (url) => {
   return (match && match[1]) ? match[1] : null;
 };
 
+const escapeRegex = (str) => {
+  if (typeof str !== 'string') return '';
+  return str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+};
+
 // @desc    Get all academic content (with optional filters)
 // @route   GET /api/content
 // @access  Public
@@ -35,12 +40,34 @@ const getAllContent = async (req, res) => {
     const { course, branch, semester, classLevel, subject, type, resourceType } = req.query;
     const query = {};
 
-    if (course) query.course = new RegExp(`^${course}$`, 'i');
-    if (branch) query.branch = new RegExp(`^${branch}$`, 'i');
-    if (semester) query.semester = semester;
-    if (classLevel) query.classLevel = new RegExp(`^${classLevel}$`, 'i');
-    if (subject) query.subject = new RegExp(`^${subject}$`, 'i');
-    if (type) query.type = new RegExp(`^${type}$`, 'i');
+    if (course) {
+      query.course = new RegExp(`^${escapeRegex(course)}$`, 'i');
+    }
+
+    if (branch) {
+      if (course === 'bsc') {
+        const isHonours = /honour|major/i.test(branch);
+        query.branch = isHonours ? /honour|major/i : /general|pass/i;
+      } else if (course === 'jee') {
+        // Unified JEE matches all JEE materials
+      } else {
+        query.branch = new RegExp(`^${escapeRegex(branch)}$`, 'i');
+      }
+    }
+
+    if (semester !== undefined && semester !== null && semester !== '') {
+      query.semester = { $in: [Number(semester), String(semester)] };
+    }
+
+    if (classLevel && course !== 'jee') {
+      query.classLevel = new RegExp(`^${escapeRegex(classLevel)}$`, 'i');
+    }
+
+    if (subject && course !== 'jee') {
+      query.subject = new RegExp(`^${escapeRegex(subject)}$`, 'i');
+    }
+
+    if (type) query.type = new RegExp(`^${escapeRegex(type)}$`, 'i');
     if (resourceType) query.resourceType = resourceType;
 
     const items = await Content.find(query).sort({ uploadedAt: -1, createdAt: -1 });

@@ -13,12 +13,39 @@ exports.createTest = async (req, res) => {
 
 exports.getTests = async (req, res) => {
   try {
-    const { stream, semester } = req.query;
+    const { stream, semester, branch, course, classLevel, subject } = req.query;
     const query = {};
-    if (stream) query.stream = stream;
-    if (semester) query.semester = semester;
+
+    if (course) {
+      query.course = new RegExp(`^${course}$`, 'i');
+    }
+
+    if (branch) {
+      if (course === 'bsc') {
+        const isHonours = /honour|major/i.test(branch);
+        query.branch = isHonours ? /honour|major/i : /general|pass/i;
+      } else if (course === 'jee') {
+        // Unified JEE matches all JEE tests
+      } else {
+        query.branch = new RegExp(`^${branch}$`, 'i');
+      }
+    } else if (stream) {
+      query.$or = [{ stream }, { course: stream }, { branch: stream }];
+    }
+
+    if (semester !== undefined && semester !== null && semester !== '') {
+      query.semester = { $in: [Number(semester), String(semester)] };
+    }
+
+    if (classLevel && course !== 'jee') {
+      query.classLevel = new RegExp(`^${classLevel}$`, 'i');
+    }
+
+    if (subject && course !== 'jee') {
+      query.subject = new RegExp(`^${subject}$`, 'i');
+    }
     
-    const tests = await ClassTest.find(query);
+    const tests = await ClassTest.find(query).sort({ examDate: -1, createdAt: -1 });
     res.status(200).json({ success: true, data: tests });
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
