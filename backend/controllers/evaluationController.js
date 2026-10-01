@@ -99,22 +99,33 @@ const evaluateHandwrittenAnswerSheet = async (req, res) => {
     // Persist file to local disk if base64 to allow direct URL downloads
     let persistentUrl = '';
     let savedFileName = fileName;
-    if (file && typeof file === 'string' && file.startsWith('data:')) {
+    if (file && typeof file === 'string') {
       try {
-        const matches = file.match(/^data:([A-Za-z-+\/]+);base64,(.+)$/);
-        if (matches && matches.length === 3) {
-          const extension = matches[1].includes('pdf') ? 'pdf' : matches[1].includes('png') ? 'png' : 'jpg';
+        if (file.startsWith('data:')) {
+          const matches = file.match(/^data:([A-Za-z-+\/]+);base64,(.+)$/);
+          if (matches && matches.length === 3) {
+            const extension = matches[1].includes('pdf') ? 'pdf' : matches[1].includes('png') ? 'png' : 'jpg';
+            savedFileName = `eval_${Date.now()}_${Math.random().toString(36).substr(2, 5)}.${extension}`;
+            const filePath = path.join(uploadsDir, savedFileName);
+            const buffer = Buffer.from(matches[2], 'base64');
+            fs.writeFileSync(filePath, buffer);
+            persistentUrl = `/uploads/${savedFileName}`;
+          }
+        } else if (!file.startsWith('http') && !file.startsWith('/uploads') && file.length > 100) {
+          const isPdf = file.startsWith('JVBERi');
+          const isPng = file.startsWith('iVBORw');
+          const extension = isPdf ? 'pdf' : isPng ? 'png' : 'jpg';
           savedFileName = `eval_${Date.now()}_${Math.random().toString(36).substr(2, 5)}.${extension}`;
           const filePath = path.join(uploadsDir, savedFileName);
-          const buffer = Buffer.from(matches[2], 'base64');
+          const buffer = Buffer.from(file, 'base64');
           fs.writeFileSync(filePath, buffer);
           persistentUrl = `/uploads/${savedFileName}`;
+        } else {
+          persistentUrl = file;
         }
       } catch (saveErr) {
         console.warn('Failed to write uploaded answer sheet to disk:', saveErr.message);
       }
-    } else if (file && typeof file === 'string') {
-      persistentUrl = file;
     }
 
     // Handle Anti-Cheat disqualification if flagged

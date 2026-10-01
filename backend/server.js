@@ -20,8 +20,9 @@ if (!fs.existsSync(uploadsDir)) {
   fs.mkdirSync(uploadsDir, { recursive: true });
 }
 
-// Serve uploaded files statically
+// Serve uploaded files statically (both /uploads and /api/uploads paths supported)
 app.use('/uploads', express.static(uploadsDir));
+app.use('/api/uploads', express.static(uploadsDir));
 
 // High-capacity body parser for base64 documents (PDFs, question sheets, diagrams)
 app.use(express.json({ limit: '50mb' }));
