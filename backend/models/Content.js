@@ -46,11 +46,23 @@ const contentSchema = new mongoose.Schema({
   qType: { type: String },
 
   // Assignment & Test Specifics
+  testId: { type: String, index: true }, // Unique Test_ID isolating test data
   deadline: { type: String },
   examDate: { type: String },
   duration: { type: mongoose.Schema.Types.Mixed },
   aiScore: { type: String },
   aiFeedback: { type: String },
+
+  // Pre-Computed LaTeX Answer Key & Review Hub
+  answerKey: {
+    generatedBy: { type: String, default: 'Google Gemini API' },
+    status: { type: String, enum: ['draft', 'locked'], default: 'draft' },
+    solutionSet: { type: mongoose.Schema.Types.Mixed, default: [] },
+    fullLatexDocument: { type: String },
+    lockedAt: { type: Date },
+    updatedAt: { type: Date },
+  },
+  publishedResults: { type: Boolean, default: false },
 
   // Upload metadata
   uploadedBy: { type: mongoose.Schema.Types.Mixed },

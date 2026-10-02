@@ -34,6 +34,9 @@ const evaluationSchema = new mongoose.Schema({
   hints: { type: String },
   metrics: { type: mongoose.Schema.Types.Mixed, default: [] },
   cheated: { type: Boolean, default: false },
+  published: { type: Boolean, default: false, index: true },
+  publishedAt: { type: Date },
+  answerKeySnapshot: { type: mongoose.Schema.Types.Mixed },
   submittedAt: { type: Date, default: Date.now, index: true },
 }, { 
   timestamps: true,

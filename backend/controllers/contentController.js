@@ -4,6 +4,7 @@ const fs = require('fs');
 const path = require('path');
 const Content = require('../models/Content');
 const Notification = require('../models/Notification');
+const { generateAnswerKeyForQuestionPaper } = require('../services/geminiService');
 
 // Ensure uploads directory exists
 const uploadsDir = path.join(__dirname, '..', 'uploads');
@@ -103,7 +104,14 @@ const saveContent = async (req, res) => {
       return res.status(400).json({ message: 'Title is required' });
     }
 
-    const id = itemData.id || `up_${Date.now()}_${Math.random().toString(36).substr(2, 6)}`;
+    const isClassTest = itemData.type === 'classtest' || itemData.type === 'classtests';
+    const isAssignment = itemData.type === 'assignment' || itemData.type === 'assignments';
+    const isTestItem = isClassTest || isAssignment;
+
+    // Unique Test_ID to strictly isolate test submissions, question papers, and answer keys
+    const testId = itemData.testId || (isTestItem ? `TEST_${Date.now()}_${Math.random().toString(36).substr(2, 6).toUpperCase()}` : (itemData.id || `up_${Date.now()}_${Math.random().toString(36).substr(2, 6)}`));
+    const id = itemData.id || testId;
+
     let fileHash = itemData.fileHash || null;
     let fileUrl = itemData.fileUrl || null;
     let filePath = itemData.filePath || null;
@@ -111,6 +119,10 @@ const saveContent = async (req, res) => {
     let videoUrl = itemData.videoUrl || null;
     let videoId = itemData.videoId || null;
     let thumbnailUrl = itemData.thumbnailUrl || null;
+
+    let uploadedBuffer = null;
+    let uploadedMime = 'application/pdf';
+    let uploadedDiskPath = null;
 
     // ── 1. YouTube Video Resource Handling ─────────────────────────────
     if (resourceType === 'youtube' || videoUrl) {
@@ -133,13 +145,14 @@ const saveContent = async (req, res) => {
         const commaIndex = itemData.fileDataUrl.indexOf(',');
         const base64Data = commaIndex !== -1 ? itemData.fileDataUrl.substring(commaIndex + 1) : itemData.fileDataUrl;
         const fileBuffer = Buffer.from(base64Data, 'base64');
+        uploadedBuffer = fileBuffer;
 
         // Calculate SHA-256 hash of the uploaded file
         fileHash = crypto.createHash('sha256').update(fileBuffer).digest('hex');
 
         // Check MongoDB for exact duplicate hash
         const duplicateItem = await Content.findOne({ fileHash });
-        if (duplicateItem && duplicateItem.id !== id) {
+        if (duplicateItem && duplicateItem.id !== id && duplicateItem.testId !== testId) {
           console.warn(`[UPLOAD ABORTED] Duplicate file detected. Hash: ${fileHash}, Existing: ${duplicateItem.title}`);
           return res.status(409).json({
             message: 'Error: This content already exists / Already uploaded!',
@@ -157,10 +170,13 @@ const saveContent = async (req, res) => {
         const lowerExt = ext.toLowerCase();
         if (lowerExt === '.pdf') {
           resourceType = 'pdf';
+          uploadedMime = 'application/pdf';
         } else if (lowerExt === '.doc' || lowerExt === '.docx') {
           resourceType = 'docx';
+          uploadedMime = 'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
         } else if (['.png', '.jpg', '.jpeg', '.webp'].includes(lowerExt)) {
           resourceType = 'image';
+          uploadedMime = lowerExt === '.png' ? 'image/png' : 'image/jpeg';
         } else {
           resourceType = 'document';
         }
@@ -168,6 +184,7 @@ const saveContent = async (req, res) => {
         const safeDiskName = `${Date.now()}_${fileHash.substring(0, 10)}${ext}`;
         const diskPath = path.join(uploadsDir, safeDiskName);
         fs.writeFileSync(diskPath, fileBuffer);
+        uploadedDiskPath = diskPath;
 
         filePath = safeDiskName;
         fileUrl = `/uploads/${safeDiskName}`;
@@ -186,6 +203,7 @@ const saveContent = async (req, res) => {
     const payload = {
       ...itemData,
       id,
+      testId: isTestItem ? testId : (itemData.testId || null),
       resourceType,
       videoUrl,
       videoId,
@@ -198,16 +216,37 @@ const saveContent = async (req, res) => {
     };
 
     // Check if this is an update vs new creation
-    const existingRecord = await Content.findOne({ id });
+    const existingRecord = await Content.findOne({ $or: [{ id }, ...(testId ? [{ testId }] : [])] });
 
-    // Upsert by custom id
+    // ── Pre-Computed Step-by-Step LaTeX Answer Key (Google Gemini API) ──
+    if (isTestItem && (!existingRecord || !existingRecord.answerKey || !existingRecord.answerKey.solutionSet?.length)) {
+      try {
+        const generatedKey = await generateAnswerKeyForQuestionPaper({
+          title: itemData.title,
+          course: itemData.course,
+          branch: itemData.branch,
+          classLevel: itemData.classLevel,
+          subject: itemData.subject || 'Mathematics',
+          marks: itemData.marks || itemData.fullMarks || 50,
+          fileBuffer: uploadedBuffer,
+          fileMime: uploadedMime,
+          textContent: itemData.questionText || itemData.description || '',
+          localPath: uploadedDiskPath,
+        });
+        payload.answerKey = generatedKey;
+      } catch (keyErr) {
+        console.warn('Answer key generation notice:', keyErr.message);
+      }
+    }
+
+    // Upsert by custom id or testId
     const saved = await Content.findOneAndUpdate(
-      { id },
+      { $or: [{ id }, ...(testId ? [{ testId }] : [])] },
       { $set: payload },
       { new: true, upsert: true, runValidators: false }
     );
 
-    // ── 3. Automatic Notification Generation for Students ─────────────
+    // ── 3. Automatic Real-Time Notification for Students ─────────────
     if (!existingRecord) {
       try {
         const typeLabels = {
@@ -220,10 +259,17 @@ const saveContent = async (req, res) => {
         const label = typeLabels[saved.type] || 'Academic Update';
         const streamInfo = saved.branch || saved.classLevel || saved.course?.toUpperCase() || 'All Batches';
 
+        const notifTitle = isClassTest
+          ? 'New Question Paper Uploaded'
+          : `New ${label} Published`;
+        const notifMsg = isClassTest
+          ? `New Question Paper Uploaded for ${saved.title}`
+          : `"${saved.title}" is now available for ${streamInfo}${saved.semester ? ` (Sem ${saved.semester})` : ''}.`;
+
         await Notification.create({
           id: `notif_${Date.now()}_${Math.random().toString(36).substr(2, 5)}`,
-          title: `New ${label} Published`,
-          message: `"${saved.title}" is now available for ${streamInfo}${saved.semester ? ` (Sem ${saved.semester})` : ''}.`,
+          title: notifTitle,
+          message: notifMsg,
           type: saved.type,
           resourceType: saved.resourceType,
           course: saved.course,
@@ -231,8 +277,9 @@ const saveContent = async (req, res) => {
           semester: saved.semester,
           classLevel: saved.classLevel,
           subject: saved.subject,
-          contentId: saved.id,
+          contentId: saved.testId || saved.id,
         });
+        console.log(`📢 [REAL-TIME NOTIFICATION DISPATCHED]: "${notifTitle}: ${notifMsg}"`);
       } catch (notifErr) {
         console.warn('Auto notification generation notice:', notifErr.message);
       }
@@ -332,6 +379,60 @@ const clearAllContent = async (req, res) => {
   }
 };
 
+// @desc    Get pre-computed LaTeX answer key for a test
+// @route   GET /api/content/:id/answer-key
+// @access  Public
+const getAnswerKey = async (req, res) => {
+  try {
+    const targetId = req.params.id;
+    const item = await Content.findOne(buildIdQuery(targetId));
+    if (!item) {
+      return res.status(404).json({ message: 'Test not found' });
+    }
+    res.json({
+      testId: item.testId || item.id,
+      title: item.title,
+      marks: item.marks || item.fullMarks || 50,
+      answerKey: item.answerKey || { solutionSet: [], status: 'draft' },
+    });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+};
+
+// @desc    Update or lock LaTeX answer key
+// @route   PUT /api/content/:id/answer-key
+// @access  Public
+const updateAnswerKey = async (req, res) => {
+  try {
+    const targetId = req.params.id;
+    const { solutionSet, fullLatexDocument, status } = req.body;
+    const item = await Content.findOne(buildIdQuery(targetId));
+    if (!item) {
+      return res.status(404).json({ message: 'Test not found' });
+    }
+
+    const currentKey = item.answerKey || {};
+    const updatedKey = {
+      ...currentKey,
+      generatedBy: currentKey.generatedBy || 'Google Gemini API',
+      solutionSet: solutionSet || currentKey.solutionSet || [],
+      fullLatexDocument: fullLatexDocument !== undefined ? fullLatexDocument : currentKey.fullLatexDocument,
+      status: status || currentKey.status || 'draft',
+      lockedAt: status === 'locked' ? new Date() : (status === 'draft' ? null : currentKey.lockedAt),
+      updatedAt: new Date(),
+    };
+
+    item.answerKey = updatedKey;
+    await item.save();
+
+    console.log(`🔒 [ANSWER KEY UPDATED]: Test "${item.title}" (Status: ${updatedKey.status}, Questions: ${updatedKey.solutionSet.length})`);
+    res.json({ success: true, answerKey: item.answerKey });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+};
+
 module.exports = {
   getAllContent,
   getContentById,
@@ -339,4 +440,6 @@ module.exports = {
   batchSyncContent,
   deleteContent,
   clearAllContent,
+  getAnswerKey,
+  updateAnswerKey,
 };

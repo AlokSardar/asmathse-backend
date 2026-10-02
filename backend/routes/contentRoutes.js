@@ -7,12 +7,16 @@ const {
   batchSyncContent,
   deleteContent,
   clearAllContent,
+  getAnswerKey,
+  updateAnswerKey,
 } = require('../controllers/contentController');
 
 router.get('/', getAllContent);
 router.post('/', saveContent);
 router.post('/batch', batchSyncContent);
 router.delete('/', clearAllContent);
+router.get('/:id/answer-key', getAnswerKey);
+router.put('/:id/answer-key', updateAnswerKey);
 router.get('/:id', getContentById);
 router.delete('/:id', deleteContent);
 
