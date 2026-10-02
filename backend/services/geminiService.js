@@ -228,7 +228,8 @@ Respond ONLY with valid, raw, parseable JSON matching this exact schema — no m
       const parts = [];
 
       // Multimodal payload (supported on gemini-1.5-pro, gemini-1.5-flash*, gemini-2.0*)
-      const isMultimodalSupported = !modelName.endsWith('-pro') || modelName.includes('1.5');
+      // Only bare 'gemini-pro' does NOT support inline_data
+      const isMultimodalSupported = modelName !== 'gemini-pro';
       if (fileBuffer && isMultimodalSupported) {
         parts.push({
           inline_data: {
