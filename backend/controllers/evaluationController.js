@@ -297,8 +297,7 @@ You are evaluating a student's handwritten mathematics answer sheet for ${testTi
 ${resolvedQuestionDoc ? 'You have also been supplied with the Teacher\'s Official Question Paper document as the primary reference.' : ''}
 ${resolvedAnswerKey ? `
 TEACHER'S PRE-COMPUTED / LOCKED LATEX ANSWER KEY & RUBRIC:
-${resolvedAnswerKey.fullLatexDocument ? resolvedAnswerKey.fullLatexDocument.substring(0, 1500) : ''}
-${Array.isArray(resolvedAnswerKey.solutionSet) ? resolvedAnswerKey.solutionSet.map(s => `[${s.questionNumber}] (Marks: ${s.maxMarks}): ${s.questionText}\nLaTeX Solution: ${s.stepByStepLatex}\nFinal: ${s.finalAnswerLatex}`).join('\n\n') : ''}
+${Array.isArray(resolvedAnswerKey.questions) ? resolvedAnswerKey.questions.map(q => `[${q.q_no}] (Marks: ${q.max_marks})\nQuestion: ${q.problem_statement_latex}\nModel Solution: ${q.solution_latex}\nFinal Answer: ${q.final_answer_latex}`).join('\n\n') : ''}
 CRITICAL INSTRUCTION: You MUST grade the student strictly against this pre-computed LaTeX answer key and allocate method marks accordingly.` : ''}
 
 STRICT THREE-PHASE EVALUATION REQUIREMENTS:
@@ -429,24 +428,23 @@ Respond ONLY with valid JSON strictly matching:
 
       let fallbackBlocks = [];
 
-      // Check if pre-computed LaTeX answer key exists
-      if (resolvedAnswerKey && Array.isArray(resolvedAnswerKey.solutionSet) && resolvedAnswerKey.solutionSet.length > 0) {
-        fallbackBlocks = resolvedAnswerKey.solutionSet.map((sol, idx) => {
-          const qNum = sol.questionNumber || `Q${idx + 1}`;
-          const qMax = Number(sol.maxMarks) || Math.max(1, Math.floor(targetMax / resolvedAnswerKey.solutionSet.length));
+      // Check if pre-computed LaTeX answer key exists (new schema: questions[])
+      if (resolvedAnswerKey && Array.isArray(resolvedAnswerKey.questions) && resolvedAnswerKey.questions.length > 0) {
+        fallbackBlocks = resolvedAnswerKey.questions.map((q, idx) => {
+          const qNum = q.q_no || `Q${idx + 1}`;
+          const qMax = Number(q.max_marks) || Math.max(1, Math.floor(targetMax / resolvedAnswerKey.questions.length));
           const isPartial = idx === 1; // minor deduction on one question for realistic evaluation
           const awarded = isPartial ? Math.max(1, qMax - 2) : qMax;
           return {
             questionNumber: qNum,
-            questionText: sol.questionText || `Question ${idx + 1}`,
-            standardAnswer: sol.stepByStepLatex || sol.finalAnswerLatex || `Standard solution for ${qNum}`,
+            questionText: q.problem_statement_latex || `Question ${idx + 1}`,
+            standardAnswer: q.solution_latex || q.final_answer_latex || `Standard solution for ${qNum}`,
             extractedAnswer: `Student handwritten solution corresponding to ${qNum} with ANS boundary demarcations.`,
             marksAwarded: awarded,
             maxMarks: qMax,
             status: isPartial ? 'partial' : 'correct',
             workingSteps: [
               `Examined student derivation for ${qNum} against pre-computed LaTeX answer key`,
-              `Applied standard formula: ${sol.keyFormula || 'Standard mathematical principles'}`,
               ...(isPartial ? ['Minor notation or intermediate arithmetic transcription observed'] : ['Full method, working steps, and final LaTeX answer verified correct'])
             ],
             feedback: isPartial
@@ -463,7 +461,7 @@ Respond ONLY with valid JSON strictly matching:
             ] : []
           };
         });
-        console.log(`✅ [USED PRE-COMPUTED LATEX ANSWER KEY]: ${fallbackBlocks.length} questions loaded from teacher's answer key`);
+        console.log(`\u2705 [USED PRE-COMPUTED LATEX ANSWER KEY]: ${fallbackBlocks.length} questions loaded from teacher's answer key`);
       }
 
       // Check if teacher's question paper details contain explicit question text
