@@ -195,26 +195,36 @@ const evaluateHandwrittenAnswerSheet = async (req, res) => {
     let resolvedQuestionText = questionPaperText || null;
     let resolvedQuestionUrl = questionPaperUrl || null;
 
-    if (testId && (!resolvedQuestionDoc && !resolvedQuestionUrl && !resolvedQuestionText)) {
+    if (!resolvedQuestionDoc && !resolvedQuestionUrl && !resolvedQuestionText) {
       try {
+        const titleRegex = testTitle ? new RegExp(`^${testTitle.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i') : null;
         const foundContent = await Content.findOne({
           $or: [
-            { id: testId },
-            ...(mongoose.Types.ObjectId.isValid(testId) ? [{ _id: testId }] : [])
+            ...(testId ? [{ id: testId }] : []),
+            ...(testId && mongoose.Types.ObjectId.isValid(testId) ? [{ _id: testId }] : []),
+            ...(testTitle ? [
+              { title: testTitle, type: { $in: ['classtest', 'classtests', 'test'] } },
+              { title: titleRegex, type: { $in: ['classtest', 'classtests', 'test'] } }
+            ] : [])
           ]
         });
         if (foundContent) {
           resolvedQuestionDoc = foundContent.fileDataUrl || null;
           resolvedQuestionUrl = foundContent.fileUrl || foundContent.filePath || null;
-          resolvedQuestionText = foundContent.questionText || foundContent.description || null;
+          resolvedQuestionText = foundContent.questionText || foundContent.description || foundContent.title || null;
+          if (foundContent.steps || foundContent.keyFormula || foundContent.finalAnswer) {
+            resolvedQuestionText = `${resolvedQuestionText || ''}\nKey Formula: ${foundContent.keyFormula || ''}\nSolution Steps: ${JSON.stringify(foundContent.steps || '')}\nFinal Answer: ${foundContent.finalAnswer || ''}`;
+          }
         } else {
-          const foundTest = await ClassTest.findById(testId).catch(() => null);
+          const foundTest = (testId && mongoose.Types.ObjectId.isValid(testId) ? await ClassTest.findById(testId).catch(() => null) : null) ||
+                            (testTitle ? await ClassTest.findOne({ title: testTitle }).catch(() => null) : null);
           if (foundTest) {
             resolvedQuestionUrl = foundTest.questionPaperUrl || null;
+            resolvedQuestionText = foundTest.title || resolvedQuestionText;
           }
         }
       } catch (lookupErr) {
-        console.warn('Could not retrieve teacher question paper by testId:', lookupErr.message);
+        console.warn('Could not retrieve teacher question paper by testId/title:', lookupErr.message);
       }
     }
 
