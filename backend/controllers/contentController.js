@@ -12,12 +12,13 @@ if (!fs.existsSync(uploadsDir)) {
   fs.mkdirSync(uploadsDir, { recursive: true });
 }
 
-// Helper to construct safe ID query
+// Helper to construct safe ID query (supports id, testId, and _id)
 const buildIdQuery = (targetId) => {
+  const orConditions = [{ id: targetId }, { testId: targetId }];
   if (mongoose.Types.ObjectId.isValid(targetId)) {
-    return { $or: [{ id: targetId }, { _id: targetId }] };
+    orConditions.push({ _id: targetId });
   }
-  return { id: targetId };
+  return { $or: orConditions };
 };
 
 // Helper: Extract YouTube Video ID
@@ -425,11 +426,35 @@ const updateAnswerKey = async (req, res) => {
     };
 
     item.answerKey = updatedKey;
+    if (incomingKey.status === 'locked') {
+      item.status = 'available';
+      item.isPublished = true;
+
+      // Dispatch real-time student notification
+      try {
+        await Notification.create({
+          id: `notif_${Date.now()}_${Math.random().toString(36).substr(2, 5)}`,
+          title: 'Class Test Available',
+          message: `Official question paper and evaluation rubric finalized for "${item.title}". You can now start the test!`,
+          type: 'classtest',
+          resourceType: item.resourceType || 'document',
+          course: item.course,
+          branch: item.branch,
+          semester: item.semester,
+          classLevel: item.classLevel,
+          subject: item.subject,
+          contentId: item.testId || item.id,
+        });
+      } catch (notifErr) {
+        console.warn('Locked test notification notice:', notifErr.message);
+      }
+    }
+
     await item.save();
 
     const questionCount = Array.isArray(updatedKey.questions) ? updatedKey.questions.length : 0;
-    console.log(`\uD83D\uDD12 [ANSWER KEY UPDATED]: Test "${item.title}" (Status: ${updatedKey.status}, Questions: ${questionCount})`);
-    res.json({ success: true, answerKey: item.answerKey });
+    console.log(`🔒 [ANSWER KEY UPDATED]: Test "${item.title}" (Status: ${updatedKey.status}, Questions: ${questionCount})`);
+    res.json({ success: true, answerKey: item.answerKey, item });
   } catch (error) {
     res.status(500).json({ message: error.message });
   }

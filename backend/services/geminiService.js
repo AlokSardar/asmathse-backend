@@ -145,6 +145,42 @@ const generateAnswerKeyForQuestionPaper = async ({
     throw new Error('No uploaded question paper file or text found for this test. Please attach a valid PDF or image question paper.');
   }
 
+  // Helper: Robust JSON parser that can salvage completed questions even if response ended near token boundary
+  const parseGeminiJsonWithRecovery = (text) => {
+    if (!text || typeof text !== 'string') return null;
+    const cleaned = text.replace(/^```(?:json)?\s*/i, '').replace(/```\s*$/i, '').trim();
+
+    // 1. Direct standard parse
+    try {
+      const parsed = JSON.parse(cleaned);
+      if (parsed) return parsed;
+    } catch (_) {}
+
+    // 2. Automated partial JSON recovery for questions array
+    try {
+      const qIndex = cleaned.indexOf('"questions"');
+      const arrStart = cleaned.indexOf('[', qIndex !== -1 ? qIndex : 0);
+      if (arrStart !== -1) {
+        let lastClosingBrace = cleaned.lastIndexOf('}');
+        while (lastClosingBrace > arrStart) {
+          const candidate = cleaned.substring(arrStart, lastClosingBrace + 1) + ']';
+          try {
+            const recoveredArr = JSON.parse(candidate);
+            if (Array.isArray(recoveredArr) && recoveredArr.length > 0) {
+              console.log(`🔧 [GEMINI API RECOVERY]: Salvaged ${recoveredArr.length} completed question solutions from cutoff!`);
+              return { questions: recoveredArr };
+            }
+          } catch (_) {}
+          lastClosingBrace = cleaned.lastIndexOf('}', lastClosingBrace - 1);
+        }
+      }
+    } catch (salvageErr) {
+      console.warn('JSON salvage error:', salvageErr.message);
+    }
+
+    return null;
+  };
+
   const prompt = `You are a distinguished Professor of Mathematics and Chief Examiner.
 You have been provided with an official teacher question paper document (PDF or image) for:
 Test Title: "${title}"
@@ -152,19 +188,23 @@ Course/Stream: ${course} (${branch || classLevel || 'General'})
 Subject: ${subject}
 Total Marks: ${totalMarks}
 
-CRITICAL TASK — READ AND PARSE THE ACTUAL VISUAL CONTENT OF THE UPLOADED DOCUMENT:
-1. Meticulously inspect and read every single line of text and mathematical notation visible in the uploaded document.
-2. Extract EVERY main question AND sub-question in strict chronological order as they appear on the paper (e.g., Q1, 1(a), 1(b), 1(c), Q2, 2(a), 2(b), etc.). Do NOT skip or omit any question or sub-question.
-3. For each extracted question:
-   - "q_no": The exact question identifier as written on the paper (e.g. "Q1", "1(a)", "2(b)").
-   - "max_marks": Marks allocated for this question such that the sum of all questions equals approximately ${totalMarks}.
-   - "problem_statement_latex": Complete, verbatim problem statement in clean, valid LaTeX syntax.
-   - "solution_latex": Comprehensive, exhaustive step-by-step mathematical derivation and model solution in clean LaTeX with all intermediate formulas and steps.
-   - "final_answer_latex": The final simplified boxed answer or correct option in clean LaTeX.
-4. Convert ALL mathematical expressions, symbols, integrals, fractions, derivatives, and matrices strictly into clean, standard LaTeX notation compatible with KaTeX/MathJax.
-5. STRICT RULE: Do NOT fabricate or return generic/mock questions. The questions and solutions MUST correspond directly and exclusively to the uploaded test paper document.
+CRITICAL TASK — EXHAUSTIVE, COMPLETE EXTRACTION & STEP-BY-STEP SOLUTION WITHOUT ANY TRUNCATION:
+1. Meticulously inspect and read every single line of text and mathematical notation visible in the uploaded document from the very top to the very bottom.
+2. Extract EVERY main question AND every sub-question in strict chronological order as they appear on the paper (e.g., Q1, 1(a), 1(b), 1(c), Q2, 2(a), 2(b), Q3, etc.).
+3. MANDATORY COMPLETENESS RULE:
+   - You MUST solve EVERY single question in the paper. DO NOT STOP HALFWAY. DO NOT OMIT ANY QUESTION.
+   - If there are 5, 8, 10, or 15 questions, your output MUST contain a solution entry for ALL of them.
+   - Keep derivations mathematically rigorous, concise, high-density, and direct so the entire answer key fits cleanly within the response without hitting token limits.
+4. For each question:
+   - "q_no": Exact question number/label (e.g., "1(a)", "2", "3(b)").
+   - "max_marks": Numeric marks allocated (number).
+   - "problem_statement_latex": Verbatim problem statement in clean LaTeX.
+   - "solution_latex": Complete, step-by-step mathematical model derivation in clean LaTeX with all intermediate formulas and explanations.
+   - "final_answer_latex": Clear boxed final answer in clean LaTeX (e.g. "\\boxed{...}").
+5. Convert all mathematical notation, integrals (\\int), fractions (\\frac), matrices, symbols, derivatives into valid LaTeX syntax compatible with KaTeX/MathJax.
+6. STRICT RULE: Do NOT fabricate or return generic/mock questions. The questions and solutions MUST correspond directly and exclusively to the uploaded test paper document.
 
-Respond ONLY with valid, raw, parseable JSON matching this exact schema — no markdown fences, no other commentary:
+Respond ONLY with valid, raw, parseable JSON matching this exact schema — no markdown fences, no trailing commentary:
 {
   "questions": [
     {
@@ -183,7 +223,7 @@ Respond ONLY with valid, raw, parseable JSON matching this exact schema — no m
 
   for (const modelName of candidateModels) {
     try {
-      console.log(`🤖 [GEMINI API]: Attempting question paper parsing with model "${modelName}"...`);
+      console.log(`🤖 [GEMINI API]: Attempting complete question paper parsing with model "${modelName}"...`);
 
       const parts = [];
 
@@ -210,6 +250,7 @@ Respond ONLY with valid, raw, parseable JSON matching this exact schema — no m
         contents: [{ parts }],
         generationConfig: {
           temperature: 0.1,
+          maxOutputTokens: 8192,
         },
       };
 
@@ -226,14 +267,19 @@ Respond ONLY with valid, raw, parseable JSON matching this exact schema — no m
 
       if (resp.ok) {
         const respJson = await resp.json();
-        const candidateText = respJson.candidates?.[0]?.content?.parts?.[0]?.text;
+        const candidate = respJson.candidates?.[0];
+        const finishReason = candidate?.finishReason;
+        const candidateText = candidate?.content?.parts?.[0]?.text;
+
+        if (finishReason === 'MAX_TOKENS') {
+          console.warn(`⚠️ [GEMINI API]: Generation hit MAX_TOKENS limit on "${modelName}". Invoking recovery parser...`);
+        }
+
         if (candidateText) {
-          // Strip any markdown fences
-          const cleaned = candidateText.replace(/^```(?:json)?\s*/i, '').replace(/```\s*$/i, '').trim();
-          const parsed = JSON.parse(cleaned);
+          const parsed = parseGeminiJsonWithRecovery(candidateText);
 
           let questionsList = [];
-          if (Array.isArray(parsed.questions) && parsed.questions.length > 0) {
+          if (parsed && Array.isArray(parsed.questions) && parsed.questions.length > 0) {
             questionsList = parsed.questions;
           } else if (Array.isArray(parsed) && parsed.length > 0) {
             questionsList = parsed;
@@ -249,7 +295,7 @@ Respond ONLY with valid, raw, parseable JSON matching this exact schema — no m
               final_answer_latex: q.final_answer_latex || q.finalAnswer || q.answer || '',
             }));
 
-            console.log(`✅ [GEMINI API]: Successfully parsed question paper using "${modelName}" (${normalizedQuestions.length} questions)!`);
+            console.log(`✅ [GEMINI API]: Successfully parsed complete question paper using "${modelName}" (${normalizedQuestions.length} questions)!`);
             return {
               generatedBy: `Google Gemini API (${modelName})`,
               status: 'draft',
