@@ -219,26 +219,9 @@ const saveContent = async (req, res) => {
     // Check if this is an update vs new creation
     const existingRecord = await Content.findOne({ $or: [{ id }, ...(testId ? [{ testId }] : [])] });
 
-    // ── Pre-Computed Step-by-Step LaTeX Answer Key (Google Gemini API) ──
-    if (isTestItem && (!existingRecord || !existingRecord.answerKey || !existingRecord.answerKey.solutionSet?.length)) {
-      try {
-        const generatedKey = await generateAnswerKeyForQuestionPaper({
-          title: itemData.title,
-          course: itemData.course,
-          branch: itemData.branch,
-          classLevel: itemData.classLevel,
-          subject: itemData.subject || 'Mathematics',
-          marks: itemData.marks || itemData.fullMarks || 50,
-          fileBuffer: uploadedBuffer,
-          fileMime: uploadedMime,
-          textContent: itemData.questionText || itemData.description || '',
-          localPath: uploadedDiskPath,
-        });
-        payload.answerKey = generatedKey;
-      } catch (keyErr) {
-        console.warn('Answer key generation notice:', keyErr.message);
-      }
-    }
+    // Retain existing answerKey or save provided answerKey without blocking upload modal
+    payload.answerKey = itemData.answerKey || existingRecord?.answerKey || null;
+    payload.publishedResults = itemData.publishedResults !== undefined ? itemData.publishedResults : (existingRecord?.publishedResults || false);
 
     // Upsert by custom id or testId
     const saved = await Content.findOneAndUpdate(
