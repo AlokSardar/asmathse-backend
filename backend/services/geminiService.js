@@ -1,9 +1,103 @@
 const fs = require('fs');
 const path = require('path');
 
-// Universal Google Gemini API Key Resolver
+// Universal & Robust Google Gemini API Key Resolver
 const getGeminiApiKey = () => {
-  return process.env.GEMINI_API_KEY || null;
+  if (process.env.GEMINI_API_KEY && process.env.GEMINI_API_KEY.trim()) {
+    return process.env.GEMINI_API_KEY.trim();
+  }
+
+  // Safe fallback to inspect .env files if process.env is not yet populated
+  try {
+    const candidatePaths = [
+      path.join(__dirname, '..', '.env'),
+      path.join(__dirname, '..', '..', '.env'),
+      path.join(process.cwd(), '.env'),
+      path.join(process.cwd(), 'backend', '.env'),
+    ];
+    for (const envPath of candidatePaths) {
+      if (fs.existsSync(envPath)) {
+        const content = fs.readFileSync(envPath, 'utf8');
+        const match = content.match(/^GEMINI_API_KEY\s*=\s*(.+)$/m);
+        if (match && match[1]) {
+          const key = match[1].trim().replace(/^['"]|['"]$/g, '');
+          if (key) {
+            process.env.GEMINI_API_KEY = key;
+            return key;
+          }
+        }
+      }
+    }
+  } catch (_) {}
+
+  return null;
+};
+
+// Cache for active supported models
+let cachedAvailableModels = null;
+
+/**
+ * Dynamically discover and resolve supported Gemini models for the active API key
+ */
+const getAvailableGeminiModels = async (apiKey) => {
+  if (cachedAvailableModels && cachedAvailableModels.length > 0) {
+    return cachedAvailableModels;
+  }
+
+  const preferredOrder = [
+    'gemini-1.5-pro',
+    'gemini-pro',
+    'gemini-1.5-flash-latest',
+    'gemini-2.0-flash',
+    'gemini-1.5-flash',
+  ];
+
+  try {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 4000);
+
+    const listResp = await fetch(
+      `https://generativelanguage.googleapis.com/v1beta/models?key=${apiKey}`,
+      { signal: controller.signal }
+    );
+    clearTimeout(timeoutId);
+
+    if (listResp.ok) {
+      const data = await listResp.json();
+      const serverModels = (data.models || [])
+        .filter(m => m.supportedGenerationMethods?.includes('generateContent'))
+        .map(m => m.name.replace(/^models\//, ''));
+
+      console.log(`📋 [GEMINI API]: Server reported ${serverModels.length} models available for key:`, serverModels);
+
+      const resolved = [];
+      // Add preferred models that are available on the server
+      for (const pref of preferredOrder) {
+        if (serverModels.includes(pref)) {
+          resolved.push(pref);
+        }
+      }
+      // Add any other models starting with gemini
+      for (const sm of serverModels) {
+        if (sm.startsWith('gemini') && !resolved.includes(sm)) {
+          resolved.push(sm);
+        }
+      }
+
+      if (resolved.length > 0) {
+        cachedAvailableModels = resolved;
+        console.log(`✨ [GEMINI API]: Prioritized model candidate chain:`, resolved);
+        return resolved;
+      }
+    } else {
+      console.warn(`Gemini models query returned HTTP ${listResp.status}`);
+    }
+  } catch (err) {
+    console.warn('Dynamic Gemini model discovery notice:', err.message);
+  }
+
+  // Universal stable fallback list (prioritizing gemini-1.5-pro and gemini-pro as requested)
+  return preferredOrder;
 };
 
 /**
@@ -83,44 +177,51 @@ Respond ONLY with valid, raw, parseable JSON matching this exact schema — no m
   ]
 }`;
 
-  const contents = [];
-  const parts = [];
-
-  if (fileBuffer) {
-    parts.push({
-      inline_data: {
-        mime_type: fileMime,
-        data: fileBuffer.toString('base64'),
-      },
-    });
-  }
-
-  if (textContent) {
-    parts.push({ text: `Question Paper Text Content:\n${textContent}` });
-  }
-
-  parts.push({ text: prompt });
-  contents.push({ parts });
-
-  // Try primary model (gemini-2.0-flash), with automatic fallback to gemini-1.5-flash
-  const modelsToTry = ['gemini-2.0-flash', 'gemini-1.5-flash'];
+  // Dynamically discover candidate models for this API key
+  const candidateModels = await getAvailableGeminiModels(geminiApiKey);
   let lastError = null;
 
-  for (const modelName of modelsToTry) {
+  for (const modelName of candidateModels) {
     try {
-      console.log(`🤖 [GEMINI VISION API]: Parsing uploaded question paper with model ${modelName}...`);
+      console.log(`🤖 [GEMINI API]: Attempting question paper parsing with model "${modelName}"...`);
+
+      const parts = [];
+
+      // Multimodal payload (supported on gemini-1.5-pro, gemini-1.5-flash*, gemini-2.0*)
+      const isMultimodalSupported = !modelName.endsWith('-pro') || modelName.includes('1.5');
+      if (fileBuffer && isMultimodalSupported) {
+        parts.push({
+          inline_data: {
+            mime_type: fileMime,
+            data: fileBuffer.toString('base64'),
+          },
+        });
+      }
+
+      if (textContent) {
+        parts.push({ text: `Question Paper Text Content:\n${textContent}` });
+      }
+
+      parts.push({ text: prompt });
+
       const geminiUrl = `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent?key=${geminiApiKey}`;
+
+      const requestBody = {
+        contents: [{ parts }],
+        generationConfig: {
+          temperature: 0.1,
+        },
+      };
+
+      // response_mime_type is supported on Gemini 1.5 and 2.0 models
+      if (modelName.includes('1.5') || modelName.includes('2.0') || modelName.includes('flash')) {
+        requestBody.generationConfig.response_mime_type = 'application/json';
+      }
 
       const resp = await fetch(geminiUrl, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          contents,
-          generationConfig: {
-            response_mime_type: 'application/json',
-            temperature: 0.1,
-          },
-        }),
+        body: JSON.stringify(requestBody),
       });
 
       if (resp.ok) {
@@ -148,7 +249,7 @@ Respond ONLY with valid, raw, parseable JSON matching this exact schema — no m
               final_answer_latex: q.final_answer_latex || q.finalAnswer || q.answer || '',
             }));
 
-            console.log(`✅ [GOOGLE GEMINI VISION API]: Successfully extracted ${normalizedQuestions.length} questions dynamically from uploaded file via ${modelName}!`);
+            console.log(`✅ [GEMINI API]: Successfully parsed question paper using "${modelName}" (${normalizedQuestions.length} questions)!`);
             return {
               generatedBy: `Google Gemini API (${modelName})`,
               status: 'draft',
@@ -164,16 +265,17 @@ Respond ONLY with valid, raw, parseable JSON matching this exact schema — no m
         lastError = new Error(`Gemini API (${modelName}) returned status ${resp.status}: ${errText.substring(0, 200)}`);
       }
     } catch (err) {
-      console.warn(`Model ${modelName} attempt error:`, err.message);
+      console.warn(`Model "${modelName}" attempt error:`, err.message);
       lastError = err;
     }
   }
 
-  // If both models failed, throw the actual error dynamically (no mock/canned data)
-  throw new Error(`Failed to dynamically analyze question paper with Gemini Vision API: ${lastError?.message || 'Unknown error'}`);
+  // If all candidate models failed, throw the detailed error
+  throw new Error(`Failed to dynamically analyze question paper with Gemini API: ${lastError?.message || 'Model unavailable'}`);
 };
 
 module.exports = {
   getGeminiApiKey,
+  getAvailableGeminiModels,
   generateAnswerKeyForQuestionPaper,
 };

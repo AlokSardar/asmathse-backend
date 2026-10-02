@@ -4,6 +4,7 @@ const mongoose = require('mongoose');
 const Evaluation = require('../models/Evaluation');
 const Content = require('../models/Content');
 const ClassTest = require('../models/ClassTest');
+const { getGeminiApiKey, getAvailableGeminiModels } = require('../services/geminiService');
 
 // Helper: Ensure uploads folder exists
 const uploadsDir = path.join(__dirname, '..', 'uploads');
@@ -283,8 +284,8 @@ const evaluateHandwrittenAnswerSheet = async (req, res) => {
     // AI OCR & Handwritten Parsing with Line Separation and Question Tagging
     let parsingResult = null;
 
-    // Check for Google Gemini Vision API Key
-    const geminiApiKey = process.env.GEMINI_API_KEY;
+    // Check for Google Gemini Vision API Key (robustly resolved)
+    const geminiApiKey = getGeminiApiKey();
     if (geminiApiKey && file && file.startsWith('data:')) {
       try {
         const matches = file.match(/^data:([A-Za-z-+\/]+);base64,(.+)$/);
@@ -379,36 +380,47 @@ Respond ONLY with valid JSON strictly matching:
           requestParts.push({ inline_data: { mime_type: mimeType, data: base64Data } });
           requestParts.push({ text: prompt });
 
-          const geminiResp = await fetch(
-            `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${geminiApiKey}`,
-            {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({
-                contents: [{ parts: requestParts }],
-                generationConfig: {
-                  response_mime_type: 'application/json',
-                  temperature: 0.1,
-                }
-              })
-            }
-          );
+          const candidateModels = await getAvailableGeminiModels(geminiApiKey);
 
-          if (geminiResp.ok) {
-            const geminiData = await geminiResp.json();
-            const textResponse = geminiData.candidates?.[0]?.content?.parts?.[0]?.text;
-            if (textResponse) {
-              parsingResult = JSON.parse(textResponse);
-              console.log('✅ [GEMINI AI MULTIMODAL EVALUATION COMPLETED]:', parsingResult.totalMarks, '/', parsingResult.maxMarks);
+          for (const modelName of candidateModels) {
+            try {
+              const geminiResp = await fetch(
+                `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent?key=${geminiApiKey}`,
+                {
+                  method: 'POST',
+                  headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify({
+                    contents: [{ parts: requestParts }],
+                    generationConfig: {
+                      response_mime_type: 'application/json',
+                      temperature: 0.1,
+                    }
+                  })
+                }
+              );
+
+              if (geminiResp.ok) {
+                const geminiData = await geminiResp.json();
+                const textResponse = geminiData.candidates?.[0]?.content?.parts?.[0]?.text;
+                if (textResponse) {
+                  const cleaned = textResponse.replace(/^```(?:json)?\s*/i, '').replace(/```\s*$/i, '').trim();
+                  parsingResult = JSON.parse(cleaned);
+                  console.log(`✅ [GEMINI AI MULTIMODAL EVALUATION COMPLETED via ${modelName}]:`, parsingResult.totalMarks, '/', parsingResult.maxMarks);
+                  break;
+                }
+              } else {
+                console.warn(`Gemini evaluation call to ${modelName} returned status ${geminiResp.status}:`, await geminiResp.text());
+              }
+            } catch (err) {
+              console.warn(`Evaluation attempt with model ${modelName} notice:`, err.message);
             }
-          } else {
-            console.warn('Gemini API call returned non-200:', await geminiResp.text());
           }
         }
       } catch (geminiErr) {
         console.warn('Gemini multimodal evaluation error, falling back to heuristic vision pipeline:', geminiErr.message);
       }
     }
+
 
     // Heuristic Mathematical OCR & Vision Segmentation Pipeline (Intelligent Fallback)
     if (!parsingResult) {
