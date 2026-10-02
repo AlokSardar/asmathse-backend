@@ -393,20 +393,21 @@ const getAnswerKey = async (req, res) => {
       testId: item.testId || item.id,
       title: item.title,
       marks: item.marks || item.fullMarks || 50,
-      answerKey: item.answerKey || { solutionSet: [], status: 'draft' },
+      answerKey: item.answerKey || { questions: [], status: 'draft' },
     });
   } catch (error) {
     res.status(500).json({ message: error.message });
   }
 };
 
-// @desc    Update or lock LaTeX answer key
+// @desc    Update or lock LaTeX answer key (enforced questions[] schema)
 // @route   PUT /api/content/:id/answer-key
 // @access  Public
 const updateAnswerKey = async (req, res) => {
   try {
     const targetId = req.params.id;
-    const { solutionSet, fullLatexDocument, status } = req.body;
+    const incomingKey = req.body; // full answerKey object
+
     const item = await Content.findOne(buildIdQuery(targetId));
     if (!item) {
       return res.status(404).json({ message: 'Test not found' });
@@ -415,20 +416,88 @@ const updateAnswerKey = async (req, res) => {
     const currentKey = item.answerKey || {};
     const updatedKey = {
       ...currentKey,
-      generatedBy: currentKey.generatedBy || 'Google Gemini API',
-      solutionSet: solutionSet || currentKey.solutionSet || [],
-      fullLatexDocument: fullLatexDocument !== undefined ? fullLatexDocument : currentKey.fullLatexDocument,
-      status: status || currentKey.status || 'draft',
-      lockedAt: status === 'locked' ? new Date() : (status === 'draft' ? null : currentKey.lockedAt),
+      ...incomingKey,
+      generatedBy: incomingKey.generatedBy || currentKey.generatedBy || 'Google Gemini API',
+      questions: incomingKey.questions || currentKey.questions || [],
+      status: incomingKey.status || currentKey.status || 'draft',
+      lockedAt: incomingKey.status === 'locked' ? new Date() : (incomingKey.status === 'draft' ? null : currentKey.lockedAt),
       updatedAt: new Date(),
     };
 
     item.answerKey = updatedKey;
     await item.save();
 
-    console.log(`🔒 [ANSWER KEY UPDATED]: Test "${item.title}" (Status: ${updatedKey.status}, Questions: ${updatedKey.solutionSet.length})`);
+    const questionCount = Array.isArray(updatedKey.questions) ? updatedKey.questions.length : 0;
+    console.log(`\uD83D\uDD12 [ANSWER KEY UPDATED]: Test "${item.title}" (Status: ${updatedKey.status}, Questions: ${questionCount})`);
     res.json({ success: true, answerKey: item.answerKey });
   } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+};
+
+// @desc    On-demand Gemini Vision answer key generation for a specific test
+// @route   POST /api/content/:id/generate-answer-key
+// @access  Public
+const generateAnswerKey = async (req, res) => {
+  try {
+    const targetId = req.params.id;
+    const item = await Content.findOne(buildIdQuery(targetId));
+    if (!item) {
+      return res.status(404).json({ message: 'Test not found' });
+    }
+
+    // Load file buffer from disk if stored locally
+    let fileBuffer = null;
+    let fileMime = 'application/pdf';
+
+    if (item.filePath) {
+      try {
+        const fullPath = path.join(uploadsDir, item.filePath);
+        if (fs.existsSync(fullPath)) {
+          fileBuffer = fs.readFileSync(fullPath);
+          const ext = path.extname(fullPath).toLowerCase();
+          fileMime = ext === '.pdf' ? 'application/pdf' : ext === '.png' ? 'image/png' : 'image/jpeg';
+          console.log(`\uD83D\uDCC4 [GENERATE KEY]: Loaded file from disk (${item.filePath}, ${fileBuffer.length} bytes)`);
+        }
+      } catch (diskErr) {
+        console.warn('Could not read question paper from disk:', diskErr.message);
+      }
+    }
+
+    // Fallback: decode from stored base64 fileDataUrl
+    if (!fileBuffer && item.fileDataUrl && item.fileDataUrl.startsWith('data:')) {
+      try {
+        const matches = item.fileDataUrl.match(/^data:([A-Za-z-+\/]+);base64,(.+)$/);
+        if (matches && matches.length === 3) {
+          fileMime = matches[1];
+          fileBuffer = Buffer.from(matches[2], 'base64');
+          console.log(`\uD83D\uDCC4 [GENERATE KEY]: Decoded file from fileDataUrl (${fileBuffer.length} bytes)`);
+        }
+      } catch (decodeErr) {
+        console.warn('Could not decode fileDataUrl:', decodeErr.message);
+      }
+    }
+
+    const newKey = await generateAnswerKeyForQuestionPaper({
+      title: item.title,
+      course: item.course || 'engineering',
+      branch: item.branch || '',
+      classLevel: item.classLevel || '',
+      subject: item.subject || 'Mathematics',
+      marks: item.marks || item.fullMarks || 50,
+      fileBuffer,
+      fileMime,
+      textContent: item.questionText || item.description || '',
+    });
+
+    item.answerKey = { ...newKey, updatedAt: new Date() };
+    await item.save();
+
+    const questionCount = Array.isArray(newKey.questions) ? newKey.questions.length : 0;
+    console.log(`\u2705 [GENERATE KEY]: Answer key generated for "${item.title}" — ${questionCount} questions via ${newKey.generatedBy}`);
+    res.json({ success: true, answerKey: item.answerKey });
+  } catch (error) {
+    console.error('Error generating answer key:', error);
     res.status(500).json({ message: error.message });
   }
 };
@@ -442,4 +511,6 @@ module.exports = {
   clearAllContent,
   getAnswerKey,
   updateAnswerKey,
+  generateAnswerKey,
 };
+
