@@ -140,7 +140,49 @@ const saveContent = async (req, res) => {
       fileHash = null;
     }
 
-    // ── 2. Document File Hashing & Duplicate Prevention ────────────────
+    // ── 2. Multipart File Upload (req.file) ─────────────────────────────
+    else if (req.file) {
+      try {
+        const diskPath = req.file.path;
+        const fileBuffer = fs.readFileSync(diskPath);
+        uploadedBuffer = fileBuffer;
+        uploadedDiskPath = diskPath;
+
+        fileHash = crypto.createHash('sha256').update(fileBuffer).digest('hex');
+
+        // Check MongoDB for existing identical file
+        const duplicateItem = await Content.findOne({ fileHash });
+        if (duplicateItem && duplicateItem.filePath && fs.existsSync(path.join(uploadsDir, duplicateItem.filePath))) {
+          console.log(`[UPLOAD REUSE] Duplicate file detected (${fileHash.substring(0, 8)}). Reusing existing file: ${duplicateItem.title}`);
+          filePath = duplicateItem.filePath;
+          fileUrl = duplicateItem.fileUrl;
+          resourceType = duplicateItem.resourceType || resourceType;
+          // Remove duplicate file on disk to save storage
+          try { fs.unlinkSync(diskPath); } catch (_) {}
+        } else {
+          filePath = path.basename(diskPath);
+          fileUrl = `/uploads/${filePath}`;
+          const ext = path.extname(req.file.originalname).toLowerCase();
+          if (ext === '.pdf') {
+            resourceType = 'pdf';
+            uploadedMime = 'application/pdf';
+          } else if (['.png', '.jpg', '.jpeg', '.webp'].includes(ext)) {
+            resourceType = 'image';
+            uploadedMime = ext === '.png' ? 'image/png' : 'image/jpeg';
+          } else if (['.doc', '.docx'].includes(ext)) {
+            resourceType = 'docx';
+            uploadedMime = 'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
+          } else {
+            resourceType = 'document';
+          }
+        }
+      } catch (err) {
+        console.error('Multipart file processing error:', err);
+        return res.status(500).json({ message: 'Failed to process uploaded file: ' + err.message });
+      }
+    }
+
+    // ── 3. Base64 Document File Hashing & Duplicate Handling ───────────
     else if (itemData.fileDataUrl && itemData.fileDataUrl.startsWith('data:')) {
       try {
         const commaIndex = itemData.fileDataUrl.indexOf(',');
@@ -151,44 +193,41 @@ const saveContent = async (req, res) => {
         // Calculate SHA-256 hash of the uploaded file
         fileHash = crypto.createHash('sha256').update(fileBuffer).digest('hex');
 
-        // Check MongoDB for exact duplicate hash
+        // Check MongoDB for duplicate hash — reuse existing file to prevent 409 conflict and save storage
         const duplicateItem = await Content.findOne({ fileHash });
-        if (duplicateItem && duplicateItem.id !== id && duplicateItem.testId !== testId) {
-          console.warn(`[UPLOAD ABORTED] Duplicate file detected. Hash: ${fileHash}, Existing: ${duplicateItem.title}`);
-          return res.status(409).json({
-            message: 'Error: This content already exists / Already uploaded!',
-            duplicate: true,
-            existingTitle: duplicateItem.title,
-            existingId: duplicateItem.id,
-          });
-        }
-
-        // Save file to backend/uploads on the local file system (avoiding Atlas Free Tier bloat)
-        const originalName = itemData.fileName || 'document.pdf';
-        const ext = path.extname(originalName) || (originalName.toLowerCase().endsWith('.docx') ? '.docx' : '.pdf');
-        
-        // Auto-detect specific document resourceType
-        const lowerExt = ext.toLowerCase();
-        if (lowerExt === '.pdf') {
-          resourceType = 'pdf';
-          uploadedMime = 'application/pdf';
-        } else if (lowerExt === '.doc' || lowerExt === '.docx') {
-          resourceType = 'docx';
-          uploadedMime = 'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
-        } else if (['.png', '.jpg', '.jpeg', '.webp'].includes(lowerExt)) {
-          resourceType = 'image';
-          uploadedMime = lowerExt === '.png' ? 'image/png' : 'image/jpeg';
+        if (duplicateItem && duplicateItem.filePath && fs.existsSync(path.join(uploadsDir, duplicateItem.filePath))) {
+          console.log(`[UPLOAD REUSE] Duplicate file detected (${fileHash.substring(0, 8)}). Reusing existing file: ${duplicateItem.title}`);
+          filePath = duplicateItem.filePath;
+          fileUrl = duplicateItem.fileUrl;
+          resourceType = duplicateItem.resourceType || resourceType;
         } else {
-          resourceType = 'document';
+          // Save file to backend/uploads on the local file system (avoiding Atlas Free Tier bloat)
+          const originalName = itemData.fileName || 'document.pdf';
+          const ext = path.extname(originalName) || (originalName.toLowerCase().endsWith('.docx') ? '.docx' : '.pdf');
+          
+          // Auto-detect specific document resourceType
+          const lowerExt = ext.toLowerCase();
+          if (lowerExt === '.pdf') {
+            resourceType = 'pdf';
+            uploadedMime = 'application/pdf';
+          } else if (lowerExt === '.doc' || lowerExt === '.docx') {
+            resourceType = 'docx';
+            uploadedMime = 'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
+          } else if (['.png', '.jpg', '.jpeg', '.webp'].includes(lowerExt)) {
+            resourceType = 'image';
+            uploadedMime = lowerExt === '.png' ? 'image/png' : 'image/jpeg';
+          } else {
+            resourceType = 'document';
+          }
+
+          const safeDiskName = `${Date.now()}_${fileHash.substring(0, 10)}${ext}`;
+          const diskPath = path.join(uploadsDir, safeDiskName);
+          fs.writeFileSync(diskPath, fileBuffer);
+          uploadedDiskPath = diskPath;
+
+          filePath = safeDiskName;
+          fileUrl = `/uploads/${safeDiskName}`;
         }
-
-        const safeDiskName = `${Date.now()}_${fileHash.substring(0, 10)}${ext}`;
-        const diskPath = path.join(uploadsDir, safeDiskName);
-        fs.writeFileSync(diskPath, fileBuffer);
-        uploadedDiskPath = diskPath;
-
-        filePath = safeDiskName;
-        fileUrl = `/uploads/${safeDiskName}`;
       } catch (err) {
         console.error('File hashing/saving error:', err);
         return res.status(500).json({ message: 'Failed to process file upload: ' + err.message });
