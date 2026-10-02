@@ -54,48 +54,84 @@ exports.getTests = async (req, res) => {
 
 exports.submitAndEvaluate = async (req, res) => {
   try {
-    const { testId, answerSheetUrl, cheatDetected } = req.body;
-    // Fallback to a mock student ID if req.user is not set by auth middleware yet during frontend testing
-    const studentId = req.user ? req.user.id : '000000000000000000000000'; 
+    const {
+      testId,
+      answerSheetUrl,
+      cheatDetected,
+      strikes = 0,
+      submittedDueToViolation = false,
+      violationReason = '',
+      answers = [],
+      isOnlineTest = false,
+      score,
+      totalMarks = 50,
+      studentName,
+      studentEmail,
+    } = req.body;
+
+    const studentId = req.user ? req.user.id : (req.body.studentId || '000000000000000000000000');
+    const isDisqualified = cheatDetected || submittedDueToViolation || strikes >= 3;
 
     // 1. Save initial submission
     const submission = new TestSubmission({
       test: testId,
       student: studentId,
-      answerSheetUrl,
-      cheatDetected,
-      status: 'evaluating'
+      answerSheetUrl: answerSheetUrl || '',
+      cheatDetected: isDisqualified,
+      strikes,
+      submittedDueToViolation: isDisqualified,
+      violationReason: isDisqualified ? (violationReason || 'Anti-cheat protocol violation: 3 strikes exceeded / focus lost.') : null,
+      answers,
+      isOnlineTest: Boolean(isOnlineTest),
+      studentName,
+      studentEmail,
+      status: isOnlineTest ? 'evaluated' : 'evaluating',
+      aiEvaluation: isOnlineTest ? {
+        marksAwarded: isDisqualified ? 0 : (typeof score === 'number' ? score : 0),
+        totalMarks: totalMarks,
+        feedback: isDisqualified
+          ? `Disqualified: Anti-cheat protocol violation detected (${strikes} strikes recorded). Test locked with zero marks.`
+          : 'Online exam auto-evaluated successfully.',
+        mistakes: isDisqualified ? ['Strict violation of online examination integrity.'] : [],
+        evaluatedAt: new Date()
+      } : undefined
     });
     await submission.save();
 
-    // 2. Mock AI Evaluation Process (Simulates Gemini API integration)
-    setTimeout(async () => {
-      try {
-        const aiEvaluatedSubmission = await TestSubmission.findById(submission._id);
-        if(aiEvaluatedSubmission) {
-          aiEvaluatedSubmission.aiEvaluation = {
-            marksAwarded: cheatDetected ? 0 : Math.floor(Math.random() * 15) + 35, // 35-50 marks
-            totalMarks: 50,
-            feedback: cheatDetected
-              ? "Zero marks awarded. Anti-cheat protocol violation detected (Tab switched or window lost focus)."
-              : "Excellent problem-solving approach. The steps in the calculus section were logically sound.",
-            mistakes: cheatDetected
-              ? ["Strict violation of exam integrity."]
-              : ["Minor calculation error in Q3 part (b).", "Forgot to add constant of integration 'C' in Q4."],
-            evaluatedAt: new Date()
-          };
-          aiEvaluatedSubmission.status = 'evaluated';
-          await aiEvaluatedSubmission.save();
+    // 2. Mock AI Evaluation Process for handwritten uploads
+    if (!isOnlineTest) {
+      setTimeout(async () => {
+        try {
+          const aiEvaluatedSubmission = await TestSubmission.findById(submission._id);
+          if (aiEvaluatedSubmission) {
+            aiEvaluatedSubmission.aiEvaluation = {
+              marksAwarded: isDisqualified ? 0 : Math.floor(Math.random() * 15) + 35, // 35-50 marks
+              totalMarks: 50,
+              feedback: isDisqualified
+                ? "Zero marks awarded. Anti-cheat protocol violation detected (Tab switched or window lost focus 3 times)."
+                : "Excellent problem-solving approach. The steps in the calculus section were logically sound.",
+              mistakes: isDisqualified
+                ? ["Strict violation of exam integrity."]
+                : ["Minor calculation error in Q3 part (b).", "Forgot to add constant of integration 'C' in Q4."],
+              evaluatedAt: new Date()
+            };
+            aiEvaluatedSubmission.status = 'evaluated';
+            await aiEvaluatedSubmission.save();
+          }
+        } catch (err) {
+          console.error("AI Evaluation failed:", err);
         }
-      } catch (err) {
-        console.error("AI Evaluation failed:", err);
-      }
-    }, 4000); // 4-second delay to simulate AI processing
+      }, 4000);
+    }
 
     res.status(200).json({ 
       success: true, 
-      message: 'Test submitted successfully and sent to AI for evaluation.', 
-      submissionId: submission._id 
+      message: isDisqualified 
+        ? 'Test auto-submitted and locked due to anti-cheat violation.' 
+        : 'Test submitted successfully.', 
+      submissionId: submission._id,
+      isDisqualified,
+      submission
     });
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
