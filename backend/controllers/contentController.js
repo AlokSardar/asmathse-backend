@@ -446,36 +446,76 @@ const generateAnswerKey = async (req, res) => {
       return res.status(404).json({ message: 'Test not found' });
     }
 
-    // Load file buffer from disk if stored locally
+    // Dynamic file resolution for this exact Test_ID
     let fileBuffer = null;
     let fileMime = 'application/pdf';
 
-    if (item.filePath) {
+    // 1. Direct payload fileDataUrl passed from frontend request body (most immediate & fresh)
+    const incomingDataUrl = req.body?.fileDataUrl || (req.body?.file && typeof req.body.file === 'string' && req.body.file.startsWith('data:') ? req.body.file : null);
+    if (incomingDataUrl && incomingDataUrl.startsWith('data:')) {
       try {
-        const fullPath = path.join(uploadsDir, item.filePath);
+        const matches = incomingDataUrl.match(/^data:([A-Za-z0-9-+/]+);base64,(.+)$/);
+        if (matches && matches.length === 3) {
+          fileMime = matches[1];
+          fileBuffer = Buffer.from(matches[2], 'base64');
+          console.log(`[GENERATE KEY]: Used fresh question paper fileDataUrl from request body (${fileBuffer.length} bytes, MIME: ${fileMime})`);
+        }
+      } catch (e) {
+        console.warn('Could not decode fileDataUrl from req.body:', e.message);
+      }
+    }
+
+    // 2. Load file buffer from disk if stored locally
+    if (!fileBuffer && item.filePath) {
+      try {
+        const fullPath = path.isAbsolute(item.filePath) ? item.filePath : path.join(uploadsDir, item.filePath);
         if (fs.existsSync(fullPath)) {
           fileBuffer = fs.readFileSync(fullPath);
           const ext = path.extname(fullPath).toLowerCase();
-          fileMime = ext === '.pdf' ? 'application/pdf' : ext === '.png' ? 'image/png' : 'image/jpeg';
-          console.log(`\uD83D\uDCC4 [GENERATE KEY]: Loaded file from disk (${item.filePath}, ${fileBuffer.length} bytes)`);
+          fileMime = ext === '.pdf' ? 'application/pdf' : (ext === '.png' ? 'image/png' : 'image/jpeg');
+          console.log(`[GENERATE KEY]: Loaded question paper from disk (${fullPath}, ${fileBuffer.length} bytes)`);
         }
       } catch (diskErr) {
         console.warn('Could not read question paper from disk:', diskErr.message);
       }
     }
 
-    // Fallback: decode from stored base64 fileDataUrl
+    // 3. Stored base64 fileDataUrl in MongoDB
     if (!fileBuffer && item.fileDataUrl && item.fileDataUrl.startsWith('data:')) {
       try {
-        const matches = item.fileDataUrl.match(/^data:([A-Za-z-+\/]+);base64,(.+)$/);
+        const matches = item.fileDataUrl.match(/^data:([A-Za-z0-9-+/]+);base64,(.+)$/);
         if (matches && matches.length === 3) {
           fileMime = matches[1];
           fileBuffer = Buffer.from(matches[2], 'base64');
-          console.log(`\uD83D\uDCC4 [GENERATE KEY]: Decoded file from fileDataUrl (${fileBuffer.length} bytes)`);
+          console.log(`[GENERATE KEY]: Decoded file from item.fileDataUrl in DB (${fileBuffer.length} bytes)`);
         }
       } catch (decodeErr) {
-        console.warn('Could not decode fileDataUrl:', decodeErr.message);
+        console.warn('Could not decode item.fileDataUrl:', decodeErr.message);
       }
+    }
+
+    // 4. Remote HTTP/HTTPS URL
+    if (!fileBuffer && item.fileUrl && (item.fileUrl.startsWith('http://') || item.fileUrl.startsWith('https://'))) {
+      try {
+        const resp = await fetch(item.fileUrl);
+        if (resp.ok) {
+          const ab = await resp.arrayBuffer();
+          fileBuffer = Buffer.from(ab);
+          const cType = resp.headers.get('content-type');
+          if (cType) fileMime = cType;
+          console.log(`[GENERATE KEY]: Fetched question paper from remote URL (${item.fileUrl}, ${fileBuffer.length} bytes)`);
+        }
+      } catch (urlErr) {
+        console.warn('Could not fetch file from URL:', urlErr.message);
+      }
+    }
+
+    const questionText = item.questionText || req.body?.questionText || item.description || '';
+
+    if (!fileBuffer && (!questionText || questionText.trim().length === 0)) {
+      return res.status(400).json({
+        message: 'No question paper file (PDF/Image) found for this test. Please attach an actual question paper before generating the answer key.'
+      });
     }
 
     const newKey = await generateAnswerKeyForQuestionPaper({
@@ -487,18 +527,18 @@ const generateAnswerKey = async (req, res) => {
       marks: item.marks || item.fullMarks || 50,
       fileBuffer,
       fileMime,
-      textContent: item.questionText || item.description || '',
+      textContent: questionText,
     });
 
     item.answerKey = { ...newKey, updatedAt: new Date() };
     await item.save();
 
     const questionCount = Array.isArray(newKey.questions) ? newKey.questions.length : 0;
-    console.log(`\u2705 [GENERATE KEY]: Answer key generated for "${item.title}" — ${questionCount} questions via ${newKey.generatedBy}`);
+    console.log(`[GENERATE KEY]: Answer key generated dynamically for "${item.title}" — ${questionCount} questions via ${newKey.generatedBy}`);
     res.json({ success: true, answerKey: item.answerKey });
   } catch (error) {
-    console.error('Error generating answer key:', error);
-    res.status(500).json({ message: error.message });
+    console.error('Error generating dynamic answer key:', error);
+    res.status(500).json({ message: error.message || 'Failed to generate answer key with Gemini API' });
   }
 };
 
@@ -513,4 +553,3 @@ module.exports = {
   updateAnswerKey,
   generateAnswerKey,
 };
-
