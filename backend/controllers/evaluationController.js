@@ -315,7 +315,14 @@ PHASE 2: HANDWRITTEN ANSWER SHEET PARSING & LINE SEPARATION
 
 PHASE 3: QUESTION-BY-QUESTION CORRELATION & STRICT MARKING
 - Strictly correlate each student solution with the teacher's standard answer question-by-question.
-- Award method marks for theorems, setup, and intermediate operations (out of allocated question marks, totaling up to maxMarks: ${maxMarks}).
+- STRICT MAXIMUM MARKS ENFORCEMENT & SCALING RULES:
+  * For EVERY question block, "maxMarks" MUST STRICTLY EQUAL the question's allocated maximum marks (e.g. if the question carries 1 mark, maxMarks MUST be 1; if 2 marks, 2; if 5 marks, 5).
+  * "marksAwarded" CANNOT UNDER ANY CIRCUMSTANCE EXCEED "maxMarks": 0 <= marksAwarded <= maxMarks.
+  * If a question carries 1 mark: a completely correct answer receives 1 mark, an incorrect answer receives 0 marks, and a minor slip receives 0.5 or 0 marks. NEVER ASSIGN 5 OR 10 MARKS TO A 1-MARK QUESTION.
+  * If a question carries 2 marks: marksAwarded must be in [0, 2] (e.g. 0, 1, 1.5, or 2).
+  * If a question carries 5 marks: marksAwarded must be in [0, 5] (e.g. 0, 1, 2, 3, 4, or 5).
+  * Partial marks must be awarded proportionally based on theorems, setup, and intermediate operations strictly within [0, maxMarks].
+  * The sum of marksAwarded across all questionBlocks cannot exceed ${maxMarks}.
 - Classify question status: "correct" | "partial" | "incorrect".
 - Detect specific mistakes/slip-ups (sign error, arithmetic mistake, omitted integration constant '+ C', missing limit, invalid substitution).
 - For EVERY detected mistake, provide normalized percentage location on the student's copy:
@@ -442,11 +449,16 @@ Respond ONLY with valid JSON strictly matching:
 
       // Check if pre-computed LaTeX answer key exists (new schema: questions[])
       if (resolvedAnswerKey && Array.isArray(resolvedAnswerKey.questions) && resolvedAnswerKey.questions.length > 0) {
-        fallbackBlocks = resolvedAnswerKey.questions.map((q, idx) => {
           const qNum = q.q_no || `Q${idx + 1}`;
-          const qMax = Number(q.max_marks) || Math.max(1, Math.floor(targetMax / resolvedAnswerKey.questions.length));
+          const qMax = Number(q.max_marks || q.marks) || Math.max(1, Math.floor(targetMax / resolvedAnswerKey.questions.length));
           const isPartial = idx === 1; // minor deduction on one question for realistic evaluation
-          const awarded = isPartial ? Math.max(1, qMax - 2) : qMax;
+          let awarded = qMax;
+          if (isPartial) {
+            if (qMax <= 1) awarded = 0.5;
+            else if (qMax <= 2) awarded = 1;
+            else awarded = Math.max(1, qMax - 2);
+          }
+          awarded = Math.min(qMax, Math.max(0, awarded));
           return {
             questionNumber: qNum,
             questionText: q.problem_statement_latex || `Question ${idx + 1}`,
@@ -896,10 +908,51 @@ Respond ONLY with valid JSON strictly matching:
       };
     }
 
+    // STRICT AI EVALUATION & GRADING BOUNDS (Max Marks Enforcement)
+    const targetMaxFinal = Number(maxMarks) || Number(parsingResult?.maxMarks) || 50;
+    const keyQuestions = (resolvedAnswerKey && Array.isArray(resolvedAnswerKey.questions))
+      ? resolvedAnswerKey.questions
+      : (Array.isArray(targetTest?.questions) ? targetTest.questions : []);
+
+    if (Array.isArray(parsingResult?.questionBlocks) && parsingResult.questionBlocks.length > 0) {
+      parsingResult.questionBlocks = parsingResult.questionBlocks.map((block, idx) => {
+        // Match question from answer key or test definition
+        const matchKey = keyQuestions.find(kq => 
+          (kq.q_no && String(kq.q_no).trim().toLowerCase() === String(block.questionNumber || '').trim().toLowerCase()) ||
+          (kq.id && String(kq.id) === String(block.questionId || ''))
+        ) || keyQuestions[idx];
+
+        let qMax = Number(matchKey?.max_marks || matchKey?.marks || block.maxMarks);
+        if (!qMax || isNaN(qMax) || qMax <= 0) {
+          qMax = Math.max(1, Math.floor(targetMaxFinal / parsingResult.questionBlocks.length));
+        }
+
+        let awarded = Number(block.marksAwarded);
+        if (isNaN(awarded) || awarded < 0) awarded = 0;
+
+        // Strict clamp: awarded score can NEVER exceed maxMarks
+        if (awarded > qMax) {
+          console.warn(`⚠️ [BOUNDS ENFORCEMENT] Clamped question ${block.questionNumber} awarded marks from ${awarded} down to max ${qMax}`);
+          awarded = qMax;
+        }
+
+        return {
+          ...block,
+          maxMarks: qMax,
+          marksAwarded: awarded
+        };
+      });
+
+      // Recompute totalMarks strictly from bounded questionBlocks
+      const recomputedTotal = parsingResult.questionBlocks.reduce((sum, b) => sum + (Number(b.marksAwarded) || 0), 0);
+      parsingResult.totalMarks = Math.min(targetMaxFinal, recomputedTotal);
+      parsingResult.maxMarks = targetMaxFinal;
+    }
+
     // Save evaluation document to MongoDB Atlas
     const evalId = `eval_${Date.now()}_${Math.random().toString(36).substr(2, 6)}`;
     const totalMarksAwarded = Number(parsingResult.totalMarks) || 0;
-    const maxMarksFinal = Number(parsingResult.maxMarks) || Number(maxMarks) || 50;
+    const maxMarksFinal = Number(parsingResult.maxMarks) || targetMaxFinal;
     const percentage = Math.round((totalMarksAwarded / maxMarksFinal) * 100);
 
     const evaluationDoc = {

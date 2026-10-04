@@ -191,17 +191,20 @@ Total Marks: ${totalMarks}
 CRITICAL TASK — EXHAUSTIVE, COMPLETE EXTRACTION & STEP-BY-STEP SOLUTION WITHOUT ANY TRUNCATION:
 1. Meticulously inspect and read every single line of text and mathematical notation visible in the uploaded document from the very top to the very bottom.
 2. Extract EVERY main question AND every sub-question in strict chronological order as they appear on the paper (e.g., Q1, 1(a), 1(b), 1(c), Q2, 2(a), 2(b), Q3, etc.).
-3. MANDATORY COMPLETENESS RULE:
+3. MANDATORY COMPLETENESS & CLEAN TYPOGRAPHY RULES:
    - You MUST solve EVERY single question in the paper. DO NOT STOP HALFWAY. DO NOT OMIT ANY QUESTION.
-   - If there are 5, 8, 10, or 15 questions, your output MUST contain a solution entry for ALL of them.
-   - Keep derivations mathematically rigorous, concise, high-density, and direct so the entire answer key fits cleanly within the response without hitting token limits.
+   - For every question, ensure proper markdown and LaTeX spacing, explicit line breaks ("\\n\\n"), and clean typography so text never overlaps or runs together.
+   - In "problem_statement_latex", use clean standard text with inline formulas in $...$ or display formulas in $$...$$. Use explicit double line breaks between paragraphs.
+   - In "solution_latex", structure your solution into clear, numbered steps with bold headers (e.g., "\\\\textbf{Step 1: Given Information & Method}\\\\n\\\\n...\\\\n\\\\n\\\\textbf{Step 2: Derivation}\\\\n\\\\n..."). Always separate distinct equations and explanations with explicit double line breaks ("\\\\n\\\\n") or LaTeX line breaks ("\\\\\\\\\\\\n") so that mathematical expressions render with beautiful margins and never collide.
+   - For displayed equations, put them on their own line with $$...$$ or \\begin{aligned} ... \\end{aligned}.
+   - In "final_answer_latex", provide a clean, boxed final result (e.g., "\\\\boxed{...}") with clear unit or conclusion text.
 4. For each question:
    - "q_no": Exact question number/label (e.g., "1(a)", "2", "3(b)").
-   - "max_marks": Numeric marks allocated (number).
-   - "problem_statement_latex": Verbatim problem statement in clean LaTeX.
-   - "solution_latex": Complete, step-by-step mathematical model derivation in clean LaTeX with all intermediate formulas and explanations.
+   - "max_marks": Numeric marks allocated (integer or float, e.g. 1, 2, 3, 4, 5, 10).
+   - "problem_statement_latex": Verbatim problem statement with clean LaTeX and proper spacing.
+   - "solution_latex": Complete step-by-step mathematical model derivation with clear line breaks ("\\n\\n") and clean typography.
    - "final_answer_latex": Clear boxed final answer in clean LaTeX (e.g. "\\boxed{...}").
-5. Convert all mathematical notation, integrals (\\int), fractions (\\frac), matrices, symbols, derivatives into valid LaTeX syntax compatible with KaTeX/MathJax.
+5. Convert all mathematical notation, integrals (\\int), fractions (\\frac), matrices, symbols, derivatives into valid KaTeX-compatible LaTeX syntax.
 6. STRICT RULE: Do NOT fabricate or return generic/mock questions. The questions and solutions MUST correspond directly and exclusively to the uploaded test paper document.
 
 Respond ONLY with valid, raw, parseable JSON matching this exact schema — no markdown fences, no trailing commentary:
@@ -210,9 +213,9 @@ Respond ONLY with valid, raw, parseable JSON matching this exact schema — no m
     {
       "q_no": "1(a)",
       "max_marks": 5,
-      "problem_statement_latex": "\\\\text{Problem statement in LaTeX}",
-      "solution_latex": "\\\\textbf{Step 1:} ...\\\\\\\\ \\\\textbf{Step 2:} ...",
-      "final_answer_latex": "\\\\boxed{\\\\text{Final answer}}"
+      "problem_statement_latex": "Evaluate the integral $\\\\int_{0}^{\\\\pi/2} \\\\frac{\\\\sin x}{\\\\sin x + \\\\cos x} dx$.",
+      "solution_latex": "\\\\textbf{Step 1: Setup and King's Property}\\\\n\\\\nLet $I = \\\\int_{0}^{\\\\pi/2} \\\\frac{\\\\sin x}{\\\\sin x + \\\\cos x} dx$ ...\\\\n\\\\n\\\\textbf{Step 2: Algebraic Summation}\\\\n\\\\nAdding both expressions gives $2I = \\\\int_{0}^{\\\\pi/2} 1 dx = \\\\frac{\\\\pi}{2}$ ...\\\\n\\\\n\\\\textbf{Step 3: Final Computation}\\\\n\\\\nTherefore, $I = \\\\frac{\\\\pi}{4}$.",
+      "final_answer_latex": "\\\\boxed{I = \\\\frac{\\\\pi}{4}}"
     }
   ]
 }`;
