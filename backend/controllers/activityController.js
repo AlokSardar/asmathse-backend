@@ -1,4 +1,5 @@
 const Activity = require('../models/Activity');
+const mongoose = require('mongoose');
 
 // @desc    Get all student activity logs
 // @route   GET /api/analytics
@@ -39,7 +40,63 @@ const logActivity = async (req, res) => {
   }
 };
 
+// @desc    Delete single activity by ID
+// @route   DELETE /api/analytics/:id
+// @access  Public
+const deleteActivityById = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const isObjId = mongoose.Types.ObjectId.isValid(id);
+    const result = await Activity.deleteOne({
+      $or: [
+        ...(isObjId ? [{ _id: id }] : []),
+        { id: id }
+      ]
+    });
+    res.json({ success: true, message: 'Activity log deleted', deletedCount: result.deletedCount });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+};
+
+// @desc    Delete multiple activities by IDs
+// @route   POST /api/analytics/batch-delete
+// @access  Public
+const deleteActivitiesBatch = async (req, res) => {
+  try {
+    const { ids } = req.body;
+    if (!Array.isArray(ids) || ids.length === 0) {
+      return res.status(400).json({ success: false, message: 'ids array is required' });
+    }
+    const validObjectIds = ids.filter(id => mongoose.Types.ObjectId.isValid(id));
+    const result = await Activity.deleteMany({
+      $or: [
+        { _id: { $in: validObjectIds } },
+        { id: { $in: ids } }
+      ]
+    });
+    res.json({ success: true, message: `${result.deletedCount} activity logs deleted`, deletedCount: result.deletedCount });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+};
+
+// @desc    Clear all activity logs
+// @route   DELETE /api/analytics
+// @access  Public
+const clearAllActivities = async (req, res) => {
+  try {
+    const result = await Activity.deleteMany({});
+    res.json({ success: true, message: 'All activity logs cleared', deletedCount: result.deletedCount });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+};
+
 module.exports = {
   getAllActivities,
-  logActivity
+  logActivity,
+  deleteActivityById,
+  deleteActivitiesBatch,
+  clearAllActivities
 };
