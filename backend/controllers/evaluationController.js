@@ -449,6 +449,7 @@ Respond ONLY with valid JSON strictly matching:
 
       // Check if pre-computed LaTeX answer key exists (new schema: questions[])
       if (resolvedAnswerKey && Array.isArray(resolvedAnswerKey.questions) && resolvedAnswerKey.questions.length > 0) {
+        fallbackBlocks = resolvedAnswerKey.questions.map((q, idx) => {
           const qNum = q.q_no || `Q${idx + 1}`;
           const qMax = Number(q.max_marks || q.marks) || Math.max(1, Math.floor(targetMax / resolvedAnswerKey.questions.length));
           const isPartial = idx === 1; // minor deduction on one question for realistic evaluation
@@ -1052,6 +1053,47 @@ const clearAllEvaluations = async (req, res) => {
   }
 };
 
+// @desc    Delete single evaluation by ID or custom id
+// @route   DELETE /api/evaluations/:id
+// @access  Public
+const deleteEvaluationById = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const isObjId = mongoose.Types.ObjectId.isValid(id);
+    const result = await Evaluation.deleteOne({
+      $or: [
+        ...(isObjId ? [{ _id: id }] : []),
+        { id: id }
+      ]
+    });
+    res.json({ success: true, message: 'Evaluation record deleted', deletedCount: result.deletedCount });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+};
+
+// @desc    Delete multiple evaluations by IDs
+// @route   POST /api/evaluations/batch-delete
+// @access  Public
+const deleteEvaluationsBatch = async (req, res) => {
+  try {
+    const { ids } = req.body;
+    if (!Array.isArray(ids) || ids.length === 0) {
+      return res.status(400).json({ success: false, message: 'ids array is required' });
+    }
+    const validObjectIds = ids.filter(id => mongoose.Types.ObjectId.isValid(id));
+    const result = await Evaluation.deleteMany({
+      $or: [
+        { _id: { $in: validObjectIds } },
+        { id: { $in: ids } }
+      ]
+    });
+    res.json({ success: true, message: `${result.deletedCount} evaluation records deleted`, deletedCount: result.deletedCount });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+};
+
 // @desc    Publish evaluation results for a test and notify students
 // @route   POST /api/evaluations/publish-results
 // @access  Public
@@ -1131,5 +1173,7 @@ module.exports = {
   evaluateHandwrittenAnswerSheet,
   publishEvaluationResults,
   batchSyncEvaluations,
-  clearAllEvaluations
+  clearAllEvaluations,
+  deleteEvaluationById,
+  deleteEvaluationsBatch
 };
