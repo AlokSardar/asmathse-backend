@@ -1112,33 +1112,65 @@ const publishEvaluationResults = async (req, res) => {
       return res.status(400).json({ success: false, message: 'testId or testTitle required' });
     }
 
-    const query = {};
-    if (testId) {
-      query.$or = [{ testId }, { id: testId }];
-    } else if (testTitle) {
-      query.testTitle = testTitle;
+    const orConditions = [];
+    if (testId && testId !== 'all') {
+      orConditions.push({ testId: String(testId) });
+      orConditions.push({ id: String(testId) });
+      if (mongoose.Types.ObjectId.isValid(testId)) {
+        orConditions.push({ _id: testId });
+      }
+    }
+    if (testTitle && testTitle !== 'all' && testTitle !== 'Class Test') {
+      const cleanTitle = String(testTitle).trim();
+      const titleRegex = new RegExp(`^${escapeRegex(cleanTitle)}$`, 'i');
+      orConditions.push({ testTitle: cleanTitle });
+      orConditions.push({ testTitle: titleRegex });
+    }
+
+    const query = orConditions.length > 0 ? { $or: orConditions } : {};
+
+    // Also update Content.publishedResults if testId/testTitle matches
+    let targetContent = null;
+    const contentOr = [];
+    if (testId && testId !== 'all') {
+      contentOr.push({ id: String(testId) });
+      contentOr.push({ testId: String(testId) });
+      if (mongoose.Types.ObjectId.isValid(testId)) {
+        contentOr.push({ _id: testId });
+      }
+    }
+    if (testTitle && testTitle !== 'all' && testTitle !== 'Class Test') {
+      const cleanTitle = String(testTitle).trim();
+      const titleRegex = new RegExp(`^${escapeRegex(cleanTitle)}$`, 'i');
+      contentOr.push({ title: cleanTitle });
+      contentOr.push({ title: titleRegex });
+    }
+
+    if (contentOr.length > 0) {
+      targetContent = await Content.findOneAndUpdate(
+        { $or: contentOr },
+        { $set: { publishedResults: true } },
+        { new: true }
+      );
+      // Also update ClassTest collection if present
+      await ClassTest.updateMany(
+        { $or: contentOr },
+        { $set: { publishedResults: true } }
+      ).catch(() => null);
+    }
+
+    const updatePayload = {
+      published: true,
+      publishedAt: new Date(),
+    };
+    if (targetContent?.answerKey) {
+      updatePayload.answerKeySnapshot = targetContent.answerKey;
     }
 
     const updateResult = await Evaluation.updateMany(
       query,
-      { $set: { published: true, publishedAt: new Date() } }
+      { $set: updatePayload }
     );
-
-    // Also update Content.publishedResults if testId/testTitle matches
-    let targetContent = null;
-    if (testId) {
-      targetContent = await Content.findOneAndUpdate(
-        { $or: [{ id: testId }, { testId }] },
-        { $set: { publishedResults: true } },
-        { new: true }
-      );
-    } else if (testTitle) {
-      targetContent = await Content.findOneAndUpdate(
-        { title: testTitle, type: { $in: ['classtest', 'classtests', 'test'] } },
-        { $set: { publishedResults: true } },
-        { new: true }
-      );
-    }
 
     // Trigger Real-Time Notification: "Result Published for [Test Name]"
     try {
