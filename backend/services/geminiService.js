@@ -122,6 +122,7 @@ const generateAnswerKeyForQuestionPaper = async ({
   fileMime = 'application/pdf',
   textContent = '',
   localPath = null,
+  customPrompt = '',
 }) => {
   const geminiApiKey = getGeminiApiKey();
   const totalMarks = Number(marks) || 50;
@@ -187,7 +188,11 @@ Test Title: "${title}"
 Course/Stream: ${course} (${branch || classLevel || 'General'})
 Subject: ${subject}
 Total Marks: ${totalMarks}
-
+${customPrompt && customPrompt.trim() ? `
+TEACHER'S CUSTOM INSTRUCTIONS & SPECIFIC GRADING RULES:
+${customPrompt.trim()}
+CRITICAL: You MUST strictly incorporate and follow the teacher's custom rules and solution criteria above.
+` : ''}
 CRITICAL TASK — EXHAUSTIVE, COMPLETE EXTRACTION & STEP-BY-STEP SOLUTION WITHOUT ANY TRUNCATION:
 1. Meticulously inspect and read every single line of text and mathematical notation visible in the uploaded document from the very top to the very bottom.
 2. Extract EVERY main question AND every sub-question in strict chronological order as they appear on the paper (e.g., Q1, 1(a), 1(b), 1(c), Q2, 2(a), 2(b), Q3, etc.).

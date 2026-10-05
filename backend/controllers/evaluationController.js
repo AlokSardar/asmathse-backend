@@ -103,6 +103,7 @@ const evaluateHandwrittenAnswerSheet = async (req, res) => {
       questionPaperDataUrl,
       questionPaperName,
       questionPaperText,
+      customPrompt = '',
     } = req.body;
 
     if (!file && !cheated) {
@@ -201,6 +202,7 @@ const evaluateHandwrittenAnswerSheet = async (req, res) => {
     let resolvedQuestionText = questionPaperText || null;
     let resolvedQuestionUrl = questionPaperUrl || null;
     let resolvedAnswerKey = null;
+    let targetTest = null;
 
     // Securely query MongoDB Content / ClassTest to link question paper file and rubric
     if (!resolvedQuestionDoc || !resolvedQuestionText || !resolvedAnswerKey) {
@@ -224,6 +226,7 @@ const evaluateHandwrittenAnswerSheet = async (req, res) => {
         if (orConditions.length > 0) {
           const foundContent = await Content.findOne({ $or: orConditions });
           if (foundContent) {
+            targetTest = foundContent;
             resolvedAnswerKey = foundContent.answerKey || null;
             if (!resolvedQuestionDoc && foundContent.fileDataUrl) {
               resolvedQuestionDoc = foundContent.fileDataUrl;
@@ -243,6 +246,7 @@ const evaluateHandwrittenAnswerSheet = async (req, res) => {
             const foundTest = (testId && mongoose.Types.ObjectId.isValid(testId) ? await ClassTest.findById(testId).catch(() => null) : null) ||
                               (testTitle ? await ClassTest.findOne({ title: testTitle }).catch(() => null) : null);
             if (foundTest) {
+              targetTest = foundTest;
               if (!resolvedQuestionUrl) resolvedQuestionUrl = foundTest.questionPaperUrl || null;
               resolvedQuestionText = foundTest.title || resolvedQuestionText;
               console.log(`📄 [TEACHER QUESTION PAPER LINKED VIA CLASSTEST]: Found ClassTest "${foundTest.title}"`);
@@ -300,6 +304,10 @@ ${resolvedAnswerKey ? `
 TEACHER'S PRE-COMPUTED / LOCKED LATEX ANSWER KEY & RUBRIC:
 ${Array.isArray(resolvedAnswerKey.questions) ? resolvedAnswerKey.questions.map(q => `[${q.q_no}] (Marks: ${q.max_marks})\nQuestion: ${q.problem_statement_latex}\nModel Solution: ${q.solution_latex}\nFinal Answer: ${q.final_answer_latex}`).join('\n\n') : ''}
 CRITICAL INSTRUCTION: You MUST grade the student strictly against this pre-computed LaTeX answer key and allocate method marks accordingly.` : ''}
+${customPrompt && customPrompt.trim() ? `
+TEACHER'S CUSTOM EVALUATION INSTRUCTIONS & GRADING RULES:
+${customPrompt.trim()}
+CRITICAL: You MUST strictly evaluate and apply all specific grading rules, tolerance criteria, and guidelines specified above by the teacher.` : ''}
 
 STRICT THREE-PHASE EVALUATION REQUIREMENTS:
 PHASE 1: QUESTION PAPER EXTRACTION & ANSWER KEY DERIVATION
@@ -946,7 +954,7 @@ Respond ONLY with valid JSON strictly matching:
 
       // Recompute totalMarks strictly from bounded questionBlocks
       const recomputedTotal = parsingResult.questionBlocks.reduce((sum, b) => sum + (Number(b.marksAwarded) || 0), 0);
-      parsingResult.totalMarks = Math.min(targetMaxFinal, recomputedTotal);
+      parsingResult.totalMarks = Math.min(targetMaxFinal, Math.max(0, recomputedTotal));
       parsingResult.maxMarks = targetMaxFinal;
     }
 

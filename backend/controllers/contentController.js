@@ -565,6 +565,8 @@ const generateAnswerKey = async (req, res) => {
       });
     }
 
+    const customPrompt = req.body?.customPrompt || '';
+
     const newKey = await generateAnswerKeyForQuestionPaper({
       title: item.title,
       course: item.course || 'engineering',
@@ -575,6 +577,7 @@ const generateAnswerKey = async (req, res) => {
       fileBuffer,
       fileMime,
       textContent: questionText,
+      customPrompt,
     });
 
     item.answerKey = { ...newKey, updatedAt: new Date() };
