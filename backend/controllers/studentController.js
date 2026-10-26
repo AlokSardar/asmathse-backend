@@ -12,7 +12,15 @@ const getStudentContent = async (req, res) => {
 
     // Determine active curriculum/board context
     const rawCourse = String(q.course || q.board || user.targetCourse || user.course || user.board || user.stream || '').trim().toLowerCase();
-    const isCbse = rawCourse.includes('cbse') || rawCourse.includes('school') || rawCourse.includes('class') || (user.classLevel && /class/i.test(user.classLevel));
+    const isCbse = rawCourse.includes('cbse') || rawCourse.includes('school') ||
+      (q.classLevel && /class/i.test(String(q.classLevel))) ||
+      (q.class && /class/i.test(String(q.class))) ||
+      (q.class_name && /class/i.test(String(q.class_name))) ||
+      (q.className && /class/i.test(String(q.className))) ||
+      (user.classLevel && /class/i.test(String(user.classLevel))) ||
+      (user.class_name && /class/i.test(String(user.class_name))) ||
+      (user.class && /class/i.test(String(user.class))) ||
+      (user.className && /class/i.test(String(user.className)));
     const isJee = rawCourse.includes('jee') || rawCourse.includes('iit');
     const isBsc = rawCourse.includes('bsc') || rawCourse.includes('b.sc') || rawCourse.includes('science');
 
@@ -39,17 +47,15 @@ const getStudentContent = async (req, res) => {
 
     if (isCbse) {
       // Precise CBSE active context: Board, Class Level, Subject (strictly isolated from engineering/semesters)
-      const activeClass = q.classLevel || q.class || user.classLevel || user.class;
+      const activeClass = q.classLevel || q.class || q.class_name || q.className || user.classLevel || user.class || user.class_name || user.className;
       const activeSubject = q.subject || user.subject || 'Mathematics';
 
       const cbseClauses = [
         {
           $or: [
-            { course: /cbse|school|class|^all$/i },
-            { board: /cbse/i },
-            { stream: /cbse/i },
-            { course: null },
-            { course: { $exists: false } }
+            { board: /^cbse$/i },
+            { course: /^cbse$/i },
+            { stream: /^cbse$/i }
           ]
         }
       ];
@@ -59,12 +65,28 @@ const getStudentContent = async (req, res) => {
         const classConditions = [
           { classLevel: new RegExp(`^${activeClass}$`, 'i') },
           { class: new RegExp(`^${activeClass}$`, 'i') },
+          { class_name: new RegExp(`^${activeClass}$`, 'i') },
+          { className: new RegExp(`^${activeClass}$`, 'i') },
           { classLevel: /all/i },
           { class: /all/i }
         ];
         if (numLevel) {
-          classConditions.push({ classLevel: new RegExp(numLevel, 'i') });
-          classConditions.push({ class: new RegExp(numLevel, 'i') });
+          const numVal = Number(numLevel);
+          classConditions.push(
+            { classLevel: numVal },
+            { class: numVal },
+            { class_name: numVal },
+            { className: numVal },
+            { classNumber: numVal },
+            { classLevel: numLevel },
+            { class: numLevel },
+            { class_name: numLevel },
+            { className: numLevel },
+            { classLevel: new RegExp(`(^|\\b|class\\s*)${numLevel}(th)?($|\\b)`, 'i') },
+            { class: new RegExp(`(^|\\b|class\\s*)${numLevel}(th)?($|\\b)`, 'i') },
+            { class_name: new RegExp(`(^|\\b|class\\s*)${numLevel}(th)?($|\\b)`, 'i') },
+            { className: new RegExp(`(^|\\b|class\\s*)${numLevel}(th)?($|\\b)`, 'i') }
+          );
         }
         cbseClauses.push({ $or: classConditions });
       }
@@ -72,12 +94,13 @@ const getStudentContent = async (req, res) => {
       if (activeSubject) {
         const subConditions = [
           { subject: new RegExp(`^${activeSubject}$`, 'i') },
-          { subject: /all/i },
-          { subject: null },
-          { subject: { $exists: false } }
+          { subject: /all/i }
         ];
-        if (/math/i.test(activeSubject)) {
-          subConditions.push({ subject: /math/i });
+        if (/math/i.test(activeSubject) || /^both$/i.test(activeSubject)) {
+          subConditions.push(
+            { subject: /math/i },
+            { subject: /both/i }
+          );
         }
         cbseClauses.push({ $or: subConditions });
       }
@@ -221,6 +244,60 @@ const getStudentContent = async (req, res) => {
 const getStudentAssignments = async (req, res) => {
   try {
     const user = req.user || {};
+    const rawCourse = String(user.targetCourse || user.course || user.board || user.stream || '').trim().toLowerCase();
+    const isCbse = rawCourse.includes('cbse') || rawCourse.includes('school') ||
+      (user.classLevel && /class/i.test(String(user.classLevel))) ||
+      (user.class_name && /class/i.test(String(user.class_name))) ||
+      (user.class && /class/i.test(String(user.class))) ||
+      (user.className && /class/i.test(String(user.className)));
+
+    if (isCbse) {
+      const activeClass = user.classLevel || user.class || user.class_name || user.className;
+      const numLevel = activeClass ? String(activeClass).replace(/[^0-9]/g, '') : '';
+      const numVal = numLevel ? Number(numLevel) : null;
+
+      const classFilter = [];
+      if (activeClass) {
+        classFilter.push(
+          { classLevel: new RegExp(`^${activeClass}$`, 'i') },
+          { class: new RegExp(`^${activeClass}$`, 'i') },
+          { class_name: new RegExp(`^${activeClass}$`, 'i') },
+          { className: new RegExp(`^${activeClass}$`, 'i') }
+        );
+        if (numVal !== null) {
+          classFilter.push(
+            { classNumber: numVal },
+            { classLevel: numVal },
+            { class_name: numVal },
+            { className: numVal },
+            { classLevel: new RegExp(`(^|\\b|class\\s*)${numLevel}(th)?($|\\b)`, 'i') },
+            { class_name: new RegExp(`(^|\\b|class\\s*)${numLevel}(th)?($|\\b)`, 'i') }
+          );
+        }
+      }
+
+      const contentQuery = {
+        type: { $in: ['assignment', 'assignments'] },
+        $or: [{ board: /^cbse$/i }, { course: /^cbse$/i }, { stream: /^cbse$/i }]
+      };
+      if (classFilter.length > 0) {
+        contentQuery.$and = [{ $or: classFilter }];
+      }
+
+      const [assignments, contentAssignments] = await Promise.all([
+        Assignment.find({ $or: [{ stream: /cbse/i }, { board: /cbse/i }] }).sort({ createdAt: -1 }).catch(() => []),
+        Content.find(contentQuery).sort({ uploadedAt: -1 }).catch(() => [])
+      ]);
+
+      const map = new Map();
+      [...assignments, ...contentAssignments].forEach(a => {
+        const id = String(a.id || a._id || a.title);
+        if (!map.has(id)) map.set(id, a);
+      });
+
+      return res.json(Array.from(map.values()));
+    }
+
     const stream = user.stream || user.branch;
     const branch = user.branch || user.stream;
     const semester = user.semester;

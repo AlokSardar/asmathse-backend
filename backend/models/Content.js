@@ -7,6 +7,8 @@ const contentSchema = new mongoose.Schema({
   course: { type: String, index: true }, // 'engineering', 'cbse', 'jee', 'bsc'
   board: { type: String, index: true }, // 'CBSE', etc.
   class: { type: String, index: true }, // 'Class 9', 'Class 10', etc.
+  class_name: { type: String, index: true }, // 'Class 9', etc.
+  classNumber: { type: Number, index: true }, // 9, 10, etc.
   stream: { type: String }, // alias / branch
   branch: { type: String, index: true }, // 'CSE', 'ECE', etc.
   semester: { type: mongoose.Schema.Types.Mixed }, // Number or String

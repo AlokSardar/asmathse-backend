@@ -43,50 +43,76 @@ const getAllContent = async (req, res) => {
     const { course, board, branch, semester, classLevel, class: queryClass, subject, type, resourceType, academicYear, academic_year } = req.query;
     const query = {};
 
-    const rawCourse = String(course || board || '').trim().toLowerCase();
-    const isCbse = rawCourse.includes('cbse') || rawCourse.includes('school') || rawCourse.includes('class') || (classLevel && /class/i.test(classLevel));
-    const isJee = rawCourse.includes('jee') || rawCourse.includes('iit');
-    const isBsc = rawCourse.includes('bsc') || rawCourse.includes('b.sc') || rawCourse.includes('science');
+    const rawCourse = String(course || board || req.query.stream || '').trim().toLowerCase();
+    const isCbse = rawCourse.includes('cbse') || rawCourse.includes('school') || (classLevel && /class/i.test(String(classLevel))) || (queryClass && /class/i.test(String(queryClass)));
+    const isJee = !isCbse && (rawCourse.includes('jee') || rawCourse.includes('iit'));
+    const isBsc = !isCbse && !isJee && (rawCourse.includes('bsc') || rawCourse.includes('b.sc') || rawCourse.includes('science'));
     const isEng = !isCbse && !isJee && !isBsc && (rawCourse.includes('eng') || rawCourse.includes('btech') || rawCourse.includes('makaut'));
 
     if (isCbse) {
+      // 1. Strict CBSE Board / Course matching (Zero leakage from course:null engineering records)
       const cbseClauses = [
         {
           $or: [
-            { course: /cbse|school|class|^all$/i },
+            { board: /^cbse$/i },
+            { course: /^cbse$/i },
+            { stream: /^cbse$/i },
             { board: /cbse/i },
-            { stream: /cbse/i },
-            { course: null },
-            { course: { $exists: false } }
+            { course: /cbse/i },
+            { stream: /cbse/i }
           ]
         }
       ];
 
-      const targetClass = classLevel || queryClass;
+      // 2. Exact Class Filtering: matches "Class 9", "9", 9, class_name, className, classNumber
+      const targetClass = classLevel || queryClass || req.query.class_name || req.query.className;
       if (targetClass) {
-        const numLevel = String(targetClass).replace(/[^0-9]/g, '');
+        const strVal = String(targetClass).trim();
+        const numLevel = parseInt(strVal.replace(/[^0-9]/g, ''), 10);
         const classConditions = [
-          { classLevel: new RegExp(`^${escapeRegex(targetClass)}$`, 'i') },
-          { class: new RegExp(`^${escapeRegex(targetClass)}$`, 'i') },
+          { classLevel: new RegExp(`^${escapeRegex(strVal)}$`, 'i') },
+          { class: new RegExp(`^${escapeRegex(strVal)}$`, 'i') },
+          { class_name: new RegExp(`^${escapeRegex(strVal)}$`, 'i') },
+          { className: new RegExp(`^${escapeRegex(strVal)}$`, 'i') },
           { classLevel: /all/i },
-          { class: /all/i }
+          { class: /all/i },
+          { class_name: /all/i }
         ];
-        if (numLevel) {
-          classConditions.push({ classLevel: new RegExp(numLevel, 'i') });
-          classConditions.push({ class: new RegExp(numLevel, 'i') });
+
+        if (!isNaN(numLevel) && numLevel > 0) {
+          // Exact numeric data type matching in MongoDB Atlas
+          classConditions.push(
+            { classLevel: numLevel },
+            { class: numLevel },
+            { class_name: numLevel },
+            { className: numLevel },
+            { classNumber: numLevel }
+          );
+          // Word boundary regex matching for "Class 9", "9", "9th", "Class 9th"
+          const numRegex = new RegExp(`(^|\\b|class\\s*)${numLevel}(th)?($|\\b)`, 'i');
+          classConditions.push(
+            { classLevel: numRegex },
+            { class: numRegex },
+            { class_name: numRegex },
+            { className: numRegex }
+          );
         }
         cbseClauses.push({ $or: classConditions });
       }
 
+      // 3. Exact Subject Filtering: matches "Mathematics", "Maths", "Both"
       if (subject) {
+        const subStr = String(subject).trim();
         const subConditions = [
-          { subject: new RegExp(`^${escapeRegex(subject)}$`, 'i') },
+          { subject: new RegExp(`^${escapeRegex(subStr)}$`, 'i') },
           { subject: /all/i },
           { subject: null },
-          { subject: { $exists: false } }
+          { subject: { $exists: false } },
+          { subject: '' }
         ];
-        if (/math/i.test(subject)) {
+        if (/math/i.test(subStr) || /both/i.test(subStr)) {
           subConditions.push({ subject: /math/i });
+          subConditions.push({ subject: /both/i });
         }
         cbseClauses.push({ $or: subConditions });
       }
@@ -453,7 +479,7 @@ const saveContent = async (req, res) => {
       branch = null; // Explicitly null to prevent cross-contamination as CSE
       stream = 'CBSE';
       semester = null; // Explicitly null to prevent cross-contamination as Sem 1
-      classLevel = itemData.classLevel || itemData.class || 'Class 9';
+      classLevel = itemData.classLevel || itemData.class || itemData.class_name || itemData.className || 'Class 9';
       targetClass = classLevel;
       subject = itemData.subject || 'Mathematics';
       isCommon1stYr = false;
@@ -461,7 +487,7 @@ const saveContent = async (req, res) => {
       branch = itemData.branch || 'JEE';
       stream = 'JEE';
       semester = null;
-      classLevel = itemData.classLevel || itemData.class || 'JEE Mains & Advanced';
+      classLevel = itemData.classLevel || itemData.class || itemData.class_name || 'JEE Mains & Advanced';
       targetClass = classLevel;
       subject = itemData.subject || 'JEE Mathematics';
       isCommon1stYr = false;
@@ -510,6 +536,9 @@ const saveContent = async (req, res) => {
       semester,
       classLevel,
       class: targetClass,
+      class_name: targetClass,
+      className: targetClass,
+      classNumber: isCbse && targetClass ? (parseInt(String(targetClass).replace(/[^0-9]/g, ''), 10) || 9) : null,
       subject,
       targetAudience: itemData.targetAudience || itemData.deploymentTarget || 'all',
       deploymentTarget: itemData.deploymentTarget || itemData.targetAudience || 'all',
@@ -536,10 +565,14 @@ const saveContent = async (req, res) => {
         const ctDoc = {
           title: saved.title,
           course: saved.course,
+          board: saved.board,
           branch: saved.branch,
           stream: saved.stream || saved.branch,
           semester: saved.semester,
           classLevel: saved.classLevel,
+          class: saved.class || saved.classLevel,
+          class_name: saved.class_name || saved.classLevel,
+          classNumber: saved.classNumber,
           subject: saved.subject,
           academicYear: targetAcademicYear,
           academic_year: targetAcademicYear,

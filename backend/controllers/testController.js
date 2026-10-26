@@ -14,90 +14,160 @@ exports.createTest = async (req, res) => {
 
 exports.getTests = async (req, res) => {
   try {
-    const { stream, semester, branch, course, classLevel, subject, academicYear, academic_year } = req.query;
-    const query = {};
+    const { stream, semester, branch, course, board, classLevel, class_name, className, subject, academicYear, academic_year } = req.query;
+    const rawCourse = String(course || board || stream || '').trim().toLowerCase();
+    const isCbse = rawCourse.includes('cbse') || rawCourse.includes('school') ||
+      (classLevel && /class/i.test(String(classLevel))) ||
+      (req.query.class && /class/i.test(String(req.query.class))) ||
+      (class_name && /class/i.test(String(class_name))) ||
+      (className && /class/i.test(String(className)));
 
-    if (course) {
-      query.course = new RegExp(`^${course}$`, 'i');
-    }
+    let query = {};
 
-    const targetBranch = branch || stream;
-    if (targetBranch) {
-      if (course === 'bsc') {
-        const isHonours = /honour|major/i.test(targetBranch);
-        query.branch = isHonours ? /honour|major/i : /general|pass/i;
-      } else if (course === 'jee') {
-        // Unified JEE matches all JEE tests
-      } else {
-        const b = targetBranch.trim();
-        const branchConditions = [
-          new RegExp(`^${b}$`, 'i'),
-          /common/i,
-          /^all/i,
-          /unified/i
-        ];
-        if (/cse|computer/i.test(b)) {
-          branchConditions.push(/cse|computer|comp/i);
-        } else if (/it|information/i.test(b)) {
-          branchConditions.push(/it|information|info/i);
-        } else if (/ece|electronic/i.test(b)) {
-          branchConditions.push(/ece|electronic|comm/i);
-        } else if (/ee|electrical/i.test(b)) {
-          branchConditions.push(/ee|electrical/i);
-        } else if (/me|mech/i.test(b)) {
-          branchConditions.push(/me|mech/i);
-        } else if (/ce|civil/i.test(b)) {
-          branchConditions.push(/ce|civil/i);
-        }
-        query.$or = [
-          ...branchConditions.map(r => ({ branch: r })),
-          ...branchConditions.map(r => ({ stream: r })),
-          { isCommonFirstYear: true }
-        ];
-      }
-    }
+    if (isCbse) {
+      const activeClass = classLevel || req.query.class || class_name || className;
+      const numLevel = activeClass ? String(activeClass).replace(/[^0-9]/g, '') : '';
+      const numVal = numLevel ? Number(numLevel) : null;
 
-    if (semester !== undefined && semester !== null && semester !== '') {
-      const cleanSem = String(semester).replace(/[^0-9]/g, '');
-      const semNum = Number(cleanSem);
-      const semConditions = [
-        { semester: cleanSem },
-        { semester: String(semester) },
-        { semester: new RegExp(`^${String(semester)}$`, 'i') },
-        { semester: /all/i },
-        { semester: null },
-        { semester: { $exists: false } }
+      const cbseConditions = [
+        { board: /^cbse$/i },
+        { course: /^cbse$/i },
+        { stream: /^cbse$/i }
       ];
-      if (!isNaN(semNum) && semNum > 0) {
-        semConditions.push({ semester: semNum });
-      }
-      if (semNum === 1 || semNum === 2) {
-        semConditions.push({ branch: /common/i });
-        semConditions.push({ isCommonFirstYear: true });
+
+      const classConditions = [];
+      if (activeClass) {
+        classConditions.push(
+          { classLevel: new RegExp(`^${activeClass}$`, 'i') },
+          { class: new RegExp(`^${activeClass}$`, 'i') },
+          { class_name: new RegExp(`^${activeClass}$`, 'i') },
+          { className: new RegExp(`^${activeClass}$`, 'i') },
+          { classLevel: /all/i },
+          { class: /all/i }
+        );
+        if (numVal !== null) {
+          classConditions.push(
+            { classLevel: numVal },
+            { class: numVal },
+            { class_name: numVal },
+            { className: numVal },
+            { classNumber: numVal },
+            { classLevel: numLevel },
+            { class: numLevel },
+            { class_name: numLevel },
+            { className: numLevel },
+            { classLevel: new RegExp(`(^|\\b|class\\s*)${numLevel}(th)?($|\\b)`, 'i') },
+            { class: new RegExp(`(^|\\b|class\\s*)${numLevel}(th)?($|\\b)`, 'i') },
+            { class_name: new RegExp(`(^|\\b|class\\s*)${numLevel}(th)?($|\\b)`, 'i') },
+            { className: new RegExp(`(^|\\b|class\\s*)${numLevel}(th)?($|\\b)`, 'i') }
+          );
+        }
       }
 
-      if (query.$or) {
-        query.$and = [{ $or: query.$or }, { $or: semConditions }];
-        delete query.$or;
-      } else {
-        query.$or = semConditions;
+      const subjectConditions = [];
+      const activeSub = subject || 'Mathematics';
+      if (activeSub) {
+        subjectConditions.push(
+          { subject: new RegExp(`^${activeSub}$`, 'i') },
+          { subject: /all/i }
+        );
+        if (/math/i.test(activeSub) || /^both$/i.test(activeSub)) {
+          subjectConditions.push(
+            { subject: /math/i },
+            { subject: /both/i }
+          );
+        }
       }
-    }
 
-    if (classLevel && course !== 'jee') {
-      const numLevel = String(classLevel).replace(/[^0-9]/g, '');
-      if (numLevel) {
-        query.classLevel = new RegExp(`${numLevel}`, 'i');
-      } else {
-        query.classLevel = new RegExp(`^${classLevel}$`, 'i');
+      const cbseAndClauses = [{ $or: cbseConditions }];
+      if (classConditions.length > 0) cbseAndClauses.push({ $or: classConditions });
+      if (subjectConditions.length > 0) cbseAndClauses.push({ $or: subjectConditions });
+
+      query.$and = cbseAndClauses;
+
+    } else {
+      if (course) {
+        query.course = new RegExp(`^${course}$`, 'i');
       }
-    }
 
-    if (subject && course !== 'jee') {
-      if (/math/i.test(subject)) {
-        query.subject = /math/i;
-      } else {
-        query.subject = new RegExp(`^${subject}$`, 'i');
+      const targetBranch = branch || stream;
+      if (targetBranch) {
+        if (course === 'bsc') {
+          const isHonours = /honour|major/i.test(targetBranch);
+          query.branch = isHonours ? /honour|major/i : /general|pass/i;
+        } else if (course === 'jee') {
+          // Unified JEE matches all JEE tests
+        } else {
+          const b = targetBranch.trim();
+          const branchConditions = [
+            new RegExp(`^${b}$`, 'i'),
+            /common/i,
+            /^all/i,
+            /unified/i
+          ];
+          if (/cse|computer/i.test(b)) {
+            branchConditions.push(/cse|computer|comp/i);
+          } else if (/it|information/i.test(b)) {
+            branchConditions.push(/it|information|info/i);
+          } else if (/ece|electronic/i.test(b)) {
+            branchConditions.push(/ece|electronic|comm/i);
+          } else if (/ee|electrical/i.test(b)) {
+            branchConditions.push(/ee|electrical/i);
+          } else if (/me|mech/i.test(b)) {
+            branchConditions.push(/me|mech/i);
+          } else if (/ce|civil/i.test(b)) {
+            branchConditions.push(/ce|civil/i);
+          }
+          query.$or = [
+            ...branchConditions.map(r => ({ branch: r })),
+            ...branchConditions.map(r => ({ stream: r })),
+            { isCommonFirstYear: true }
+          ];
+        }
+      }
+
+      if (semester !== undefined && semester !== null && semester !== '') {
+        const cleanSem = String(semester).replace(/[^0-9]/g, '');
+        const semNum = Number(cleanSem);
+        const semConditions = [
+          { semester: cleanSem },
+          { semester: String(semester) },
+          { semester: new RegExp(`^${String(semester)}$`, 'i') },
+          { semester: /all/i },
+          { semester: null },
+          { semester: { $exists: false } }
+        ];
+        if (!isNaN(semNum) && semNum > 0) {
+          semConditions.push({ semester: semNum });
+        }
+        if (semNum === 1 || semNum === 2) {
+          semConditions.push({ branch: /common/i });
+          semConditions.push({ isCommonFirstYear: true });
+        }
+
+        if (query.$or) {
+          query.$and = [{ $or: query.$or }, { $or: semConditions }];
+          delete query.$or;
+        } else {
+          query.$or = semConditions;
+        }
+      }
+
+      if (classLevel && course !== 'jee') {
+        const numLevel = String(classLevel).replace(/[^0-9]/g, '');
+        if (numLevel) {
+          query.classLevel = new RegExp(`${numLevel}`, 'i');
+        } else {
+          query.classLevel = new RegExp(`^${classLevel}$`, 'i');
+        }
+      }
+
+      if (subject && course !== 'jee') {
+        if (/math/i.test(subject)) {
+          query.subject = /math/i;
+        } else {
+          query.subject = new RegExp(`^${subject}$`, 'i');
+        }
       }
     }
 

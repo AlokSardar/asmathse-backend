@@ -49,7 +49,7 @@ const uploadContent = async (req, res) => {
       branch = null;
       stream = 'CBSE';
       semester = null;
-      classLevel = rawClassLevel || rawClass || 'Class 9';
+      classLevel = rawClassLevel || rawClass || req.body.class_name || req.body.className || 'Class 9';
       targetClass = classLevel;
       subject = rawSubject || 'Mathematics';
       isCommon = false;
@@ -57,7 +57,7 @@ const uploadContent = async (req, res) => {
       branch = rawBranch || 'JEE';
       stream = 'JEE';
       semester = null;
-      classLevel = rawClassLevel || rawClass || 'JEE Mains & Advanced';
+      classLevel = rawClassLevel || rawClass || req.body.class_name || req.body.className || 'JEE Mains & Advanced';
       targetClass = classLevel;
       subject = rawSubject || 'JEE Mathematics';
       isCommon = false;
@@ -83,6 +83,9 @@ const uploadContent = async (req, res) => {
       );
     }
 
+    const cleanNum = classLevel ? String(classLevel).replace(/[^0-9]/g, '') : '';
+    const classNum = cleanNum ? Number(cleanNum) : null;
+
     const content = await Content.create({
       title,
       type: type || 'materials',
@@ -93,6 +96,9 @@ const uploadContent = async (req, res) => {
       semester,
       classLevel,
       class: targetClass,
+      class_name: targetClass,
+      className: targetClass,
+      classNumber: classNum,
       subject,
       academicYear: academicYear || '2026-2027',
       isCommonFirstYear: isCommon,
