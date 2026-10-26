@@ -3,6 +3,7 @@ const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
 const Content = require('../models/Content');
+const ClassTest = require('../models/ClassTest');
 const Notification = require('../models/Notification');
 const { generateAnswerKeyForQuestionPaper, streamAnswerKeyForQuestionPaper } = require('../services/geminiService');
 
@@ -39,11 +40,28 @@ const escapeRegex = (str) => {
 // @access  Public
 const getAllContent = async (req, res) => {
   try {
-    const { course, branch, semester, classLevel, subject, type, resourceType } = req.query;
+    const { course, branch, semester, classLevel, subject, type, resourceType, academicYear, academic_year } = req.query;
     const query = {};
 
     if (course) {
       query.course = new RegExp(`^${escapeRegex(course)}$`, 'i');
+    }
+
+    const targetYear = academicYear || academic_year;
+    if (targetYear && targetYear !== 'all') {
+      const yearConditions = [
+        { academicYear: targetYear },
+        { academic_year: targetYear },
+        { academicYear: { $exists: false } },
+        { academicYear: null },
+        { academicYear: '' }
+      ];
+      if (query.$or) {
+        query.$and = [{ $or: query.$or }, { $or: yearConditions }];
+        delete query.$or;
+      } else {
+        query.$or = yearConditions;
+      }
     }
 
     if (branch) {
@@ -53,20 +71,87 @@ const getAllContent = async (req, res) => {
       } else if (course === 'jee') {
         // Unified JEE matches all JEE materials
       } else {
-        query.branch = new RegExp(`^${escapeRegex(branch)}$`, 'i');
+        const b = branch.trim();
+        const branchConditions = [
+          new RegExp(`^${escapeRegex(b)}$`, 'i'),
+          /common/i,
+          /^all/i,
+          /unified/i
+        ];
+        if (/cse|computer/i.test(b)) {
+          branchConditions.push(/cse|computer|comp/i);
+        } else if (/it|information/i.test(b)) {
+          branchConditions.push(/it|information|info/i);
+        } else if (/ece|electronic/i.test(b)) {
+          branchConditions.push(/ece|electronic|comm/i);
+        } else if (/ee|electrical/i.test(b)) {
+          branchConditions.push(/ee|electrical/i);
+        } else if (/me|mech/i.test(b)) {
+          branchConditions.push(/me|mech/i);
+        } else if (/ce|civil/i.test(b)) {
+          branchConditions.push(/ce|civil/i);
+        }
+        const branchClauses = [
+          ...branchConditions.map(r => ({ branch: r })),
+          ...branchConditions.map(r => ({ stream: r })),
+          { isCommonFirstYear: true }
+        ];
+
+        if (query.$and) {
+          query.$and.push({ $or: branchClauses });
+        } else if (query.$or) {
+          query.$and = [{ $or: query.$or }, { $or: branchClauses }];
+          delete query.$or;
+        } else {
+          query.$or = branchClauses;
+        }
       }
     }
 
     if (semester !== undefined && semester !== null && semester !== '') {
-      query.semester = { $in: [Number(semester), String(semester)] };
+      const cleanSem = String(semester).replace(/[^0-9]/g, '');
+      const semNum = Number(cleanSem);
+      const semConditions = [
+        { semester: cleanSem },
+        { semester: String(semester) },
+        { semester: new RegExp(`^${escapeRegex(String(semester))}$`, 'i') },
+        { semester: /all/i },
+        { semester: null },
+        { semester: { $exists: false } }
+      ];
+      if (!isNaN(semNum) && semNum > 0) {
+        semConditions.push({ semester: semNum });
+      }
+      if (semNum === 1 || semNum === 2) {
+        semConditions.push({ branch: /common/i });
+        semConditions.push({ isCommonFirstYear: true });
+      }
+
+      if (query.$and) {
+        query.$and.push({ $or: semConditions });
+      } else if (query.$or) {
+        query.$and = [{ $or: query.$or }, { $or: semConditions }];
+        delete query.$or;
+      } else {
+        query.$or = semConditions;
+      }
     }
 
     if (classLevel && course !== 'jee') {
-      query.classLevel = new RegExp(`^${escapeRegex(classLevel)}$`, 'i');
+      const numLevel = String(classLevel).replace(/[^0-9]/g, '');
+      if (numLevel) {
+        query.classLevel = new RegExp(`${numLevel}`, 'i');
+      } else {
+        query.classLevel = new RegExp(`^${escapeRegex(classLevel)}$`, 'i');
+      }
     }
 
     if (subject && course !== 'jee') {
-      query.subject = new RegExp(`^${escapeRegex(subject)}$`, 'i');
+      if (/math/i.test(subject)) {
+        query.subject = /math/i;
+      } else {
+        query.subject = new RegExp(`^${escapeRegex(subject)}$`, 'i');
+      }
     }
 
     if (type) query.type = new RegExp(`^${escapeRegex(type)}$`, 'i');
@@ -240,6 +325,13 @@ const saveContent = async (req, res) => {
       else if (lower.endsWith('.png') || lower.endsWith('.jpg') || lower.endsWith('.jpeg')) resourceType = 'image';
     }
 
+    const targetAcademicYear = itemData.academicYear || itemData.academic_year || itemData.examYear || '2026-2027';
+    const isCommon1stYr = Boolean(
+      itemData.isCommonFirstYear ||
+      (itemData.branch && /common/i.test(itemData.branch)) ||
+      (Number(itemData.semester) <= 2 && /common/i.test(itemData.branch || ''))
+    );
+
     const payload = {
       ...itemData,
       id,
@@ -253,6 +345,12 @@ const saveContent = async (req, res) => {
       filePath,
       fileDataUrl: null, // Zero base64 payload stored in MongoDB Atlas free tier!
       uploadedAt: itemData.uploadedAt || new Date(),
+      academicYear: targetAcademicYear,
+      academic_year: targetAcademicYear,
+      stream: itemData.stream || itemData.branch || null,
+      targetAudience: itemData.targetAudience || itemData.deploymentTarget || 'all',
+      deploymentTarget: itemData.deploymentTarget || itemData.targetAudience || 'all',
+      isCommonFirstYear: isCommon1stYr,
     };
 
     // Check if this is an update vs new creation
@@ -268,6 +366,40 @@ const saveContent = async (req, res) => {
       { $set: payload },
       { new: true, upsert: true, runValidators: false }
     );
+
+    // Bidirectional sync: if this is a class test, also synchronize to ClassTest collection
+    if (isClassTest) {
+      try {
+        const ctDoc = {
+          title: saved.title,
+          course: saved.course,
+          branch: saved.branch,
+          stream: saved.stream || saved.branch,
+          semester: saved.semester,
+          classLevel: saved.classLevel,
+          subject: saved.subject,
+          academicYear: targetAcademicYear,
+          academic_year: targetAcademicYear,
+          durationMinutes: Number(saved.duration) || 45,
+          examDate: saved.examDate ? new Date(saved.examDate) : new Date(),
+          questionPaperUrl: saved.fileUrl || saved.filePath || '',
+          targetAudience: saved.targetAudience || 'all',
+          deploymentTarget: saved.deploymentTarget || 'all',
+          targetStudentEmails: Array.isArray(saved.targetStudentEmails) ? saved.targetStudentEmails : [],
+          isCommonFirstYear: isCommon1stYr,
+          isOnlineTest: Boolean(saved.isOnlineTest),
+          questions: Array.isArray(saved.questions) ? saved.questions : [],
+          fullMarks: saved.fullMarks || saved.marks || 50,
+        };
+        await ClassTest.findOneAndUpdate(
+          { $or: [{ id: saved.id }, { testId: saved.testId || saved.id }, { title: saved.title }] },
+          { $set: ctDoc },
+          { upsert: true, new: true }
+        ).catch(() => null);
+      } catch (ctErr) {
+        console.warn('ClassTest synchronization notice:', ctErr.message);
+      }
+    }
 
     // ── 3. Automatic Real-Time Notification for Students ─────────────
     if (!existingRecord) {

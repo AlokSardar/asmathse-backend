@@ -1,4 +1,5 @@
 const ClassTest = require('../models/ClassTest');
+const Content = require('../models/Content');
 const TestSubmission = require('../models/TestSubmission');
 
 exports.createTest = async (req, res) => {
@@ -13,40 +14,116 @@ exports.createTest = async (req, res) => {
 
 exports.getTests = async (req, res) => {
   try {
-    const { stream, semester, branch, course, classLevel, subject } = req.query;
+    const { stream, semester, branch, course, classLevel, subject, academicYear, academic_year } = req.query;
     const query = {};
 
     if (course) {
       query.course = new RegExp(`^${course}$`, 'i');
     }
 
-    if (branch) {
+    const targetBranch = branch || stream;
+    if (targetBranch) {
       if (course === 'bsc') {
-        const isHonours = /honour|major/i.test(branch);
+        const isHonours = /honour|major/i.test(targetBranch);
         query.branch = isHonours ? /honour|major/i : /general|pass/i;
       } else if (course === 'jee') {
         // Unified JEE matches all JEE tests
       } else {
-        query.branch = new RegExp(`^${branch}$`, 'i');
+        const b = targetBranch.trim();
+        const branchConditions = [
+          new RegExp(`^${b}$`, 'i'),
+          /common/i,
+          /^all/i,
+          /unified/i
+        ];
+        if (/cse|computer/i.test(b)) {
+          branchConditions.push(/cse|computer|comp/i);
+        } else if (/it|information/i.test(b)) {
+          branchConditions.push(/it|information|info/i);
+        } else if (/ece|electronic/i.test(b)) {
+          branchConditions.push(/ece|electronic|comm/i);
+        } else if (/ee|electrical/i.test(b)) {
+          branchConditions.push(/ee|electrical/i);
+        } else if (/me|mech/i.test(b)) {
+          branchConditions.push(/me|mech/i);
+        } else if (/ce|civil/i.test(b)) {
+          branchConditions.push(/ce|civil/i);
+        }
+        query.$or = [
+          ...branchConditions.map(r => ({ branch: r })),
+          ...branchConditions.map(r => ({ stream: r })),
+          { isCommonFirstYear: true }
+        ];
       }
-    } else if (stream) {
-      query.$or = [{ stream }, { course: stream }, { branch: stream }];
     }
 
     if (semester !== undefined && semester !== null && semester !== '') {
-      query.semester = { $in: [Number(semester), String(semester)] };
+      const cleanSem = String(semester).replace(/[^0-9]/g, '');
+      const semNum = Number(cleanSem);
+      const semConditions = [
+        { semester: cleanSem },
+        { semester: String(semester) },
+        { semester: new RegExp(`^${String(semester)}$`, 'i') },
+        { semester: /all/i },
+        { semester: null },
+        { semester: { $exists: false } }
+      ];
+      if (!isNaN(semNum) && semNum > 0) {
+        semConditions.push({ semester: semNum });
+      }
+      if (semNum === 1 || semNum === 2) {
+        semConditions.push({ branch: /common/i });
+        semConditions.push({ isCommonFirstYear: true });
+      }
+
+      if (query.$or) {
+        query.$and = [{ $or: query.$or }, { $or: semConditions }];
+        delete query.$or;
+      } else {
+        query.$or = semConditions;
+      }
     }
 
     if (classLevel && course !== 'jee') {
-      query.classLevel = new RegExp(`^${classLevel}$`, 'i');
+      const numLevel = String(classLevel).replace(/[^0-9]/g, '');
+      if (numLevel) {
+        query.classLevel = new RegExp(`${numLevel}`, 'i');
+      } else {
+        query.classLevel = new RegExp(`^${classLevel}$`, 'i');
+      }
     }
 
     if (subject && course !== 'jee') {
-      query.subject = new RegExp(`^${subject}$`, 'i');
+      if (/math/i.test(subject)) {
+        query.subject = /math/i;
+      } else {
+        query.subject = new RegExp(`^${subject}$`, 'i');
+      }
     }
-    
-    const tests = await ClassTest.find(query).sort({ examDate: -1, createdAt: -1 });
-    res.status(200).json({ success: true, data: tests });
+
+    const [classTests, contentTests] = await Promise.all([
+      ClassTest.find(query).sort({ examDate: -1, createdAt: -1 }).catch(() => []),
+      Content.find({
+        ...query,
+        type: { $in: ['classtest', 'classtests', 'test'] }
+      }).sort({ examDate: -1, createdAt: -1 }).catch(() => [])
+    ]);
+
+    // Deduplicate combined test records by title and id
+    const seen = new Set();
+    const mergedTests = [];
+
+    [...classTests, ...contentTests].forEach(t => {
+      const normTitle = String(t.title || '').trim().toLowerCase();
+      const testId = String(t.testId || t.id || t._id || normTitle);
+      if (!seen.has(normTitle) && !seen.has(testId)) {
+        seen.add(normTitle);
+        seen.add(testId);
+        mergedTests.push(t);
+      }
+    });
+
+    res.status(200).json({ success: true, data: mergedTests });
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
   }
