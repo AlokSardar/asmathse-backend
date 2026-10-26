@@ -4,7 +4,7 @@ const fs = require('fs');
 const path = require('path');
 const Content = require('../models/Content');
 const Notification = require('../models/Notification');
-const { generateAnswerKeyForQuestionPaper } = require('../services/geminiService');
+const { generateAnswerKeyForQuestionPaper, streamAnswerKeyForQuestionPaper } = require('../services/geminiService');
 
 // Ensure uploads directory exists
 const uploadsDir = path.join(__dirname, '..', 'uploads');
@@ -592,6 +592,122 @@ const generateAnswerKey = async (req, res) => {
   }
 };
 
+// @desc    Live Streaming Gemini Vision Answer Key Generation
+// @route   POST /api/content/:id/generate-answer-key-stream
+// @access  Public
+const generateAnswerKeyStream = async (req, res) => {
+  // Set SSE headers
+  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache, no-transform');
+  res.setHeader('Connection', 'keep-alive');
+  res.flushHeaders?.();
+
+  const sendEvent = (event, data) => {
+    res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+  };
+
+  try {
+    const targetId = req.params.id;
+    const item = await Content.findOne(buildIdQuery(targetId));
+    if (!item) {
+      sendEvent('error', { message: 'Test not found in database' });
+      return res.end();
+    }
+
+    sendEvent('status', { stage: 'init', message: `Test "${item.title}" verified. Resolving document pages...`, percent: 10 });
+
+    let fileBuffer = null;
+    let fileMime = 'application/pdf';
+
+    const incomingDataUrl = req.body?.fileDataUrl || (req.body?.file && typeof req.body.file === 'string' && req.body.file.startsWith('data:') ? req.body.file : null);
+    if (incomingDataUrl && incomingDataUrl.startsWith('data:')) {
+      try {
+        const matches = incomingDataUrl.match(/^data:([A-Za-z0-9-+/]+);base64,(.+)$/);
+        if (matches && matches.length === 3) {
+          fileMime = matches[1];
+          fileBuffer = Buffer.from(matches[2], 'base64');
+          console.log(`[GENERATE STREAM]: Used incoming fileDataUrl (${fileBuffer.length} bytes)`);
+        }
+      } catch (_) {}
+    }
+
+    if (!fileBuffer && item.fileDataUrl && item.fileDataUrl.startsWith('data:')) {
+      try {
+        const matches = item.fileDataUrl.match(/^data:([A-Za-z0-9-+/]+);base64,(.+)$/);
+        if (matches && matches.length === 3) {
+          fileMime = matches[1];
+          fileBuffer = Buffer.from(matches[2], 'base64');
+        }
+      } catch (_) {}
+    }
+
+    if (!fileBuffer) {
+      const candidates = [
+        item.fileUrl,
+        item.filePath,
+        item.fileName ? path.join(uploadsDir, item.fileName) : null,
+      ].filter(Boolean);
+
+      for (const cand of candidates) {
+        let cleanName = null;
+        if (cand.includes('/uploads/')) {
+          cleanName = cand.substring(cand.indexOf('/uploads/') + '/uploads/'.length);
+        } else if (cand.startsWith('uploads/')) {
+          cleanName = cand.replace('uploads/', '');
+        } else if (!cand.startsWith('http://') && !cand.startsWith('https://')) {
+          cleanName = path.basename(cand);
+        }
+
+        const candidateLocalPath = cleanName
+          ? path.join(uploadsDir, cleanName)
+          : (fs.existsSync(cand) ? cand : null);
+
+        if (candidateLocalPath && fs.existsSync(candidateLocalPath)) {
+          fileBuffer = fs.readFileSync(candidateLocalPath);
+          const ext = path.extname(candidateLocalPath).toLowerCase();
+          fileMime = ext === '.pdf' ? 'application/pdf' : (ext === '.png' ? 'image/png' : 'image/jpeg');
+          break;
+        }
+      }
+    }
+
+    const questionText = req.body?.questionText || item.questionText || item.description || item.desc || '';
+    const customPrompt = req.body?.customPrompt || '';
+
+    sendEvent('status', { stage: 'connecting', message: 'Connecting to Gemini Multimodal Engine...', percent: 25 });
+
+    const newKey = await streamAnswerKeyForQuestionPaper({
+      title: item.title,
+      course: item.course || 'engineering',
+      branch: item.branch || '',
+      classLevel: item.classLevel || '',
+      subject: item.subject || 'Mathematics',
+      marks: item.marks || item.fullMarks || 50,
+      fileBuffer,
+      fileMime,
+      textContent: questionText,
+      customPrompt,
+      onProgress: (prog) => {
+        sendEvent('status', prog);
+      },
+      onQuestion: (qData) => {
+        sendEvent('question', qData);
+      },
+    });
+
+    item.answerKey = { ...newKey, updatedAt: new Date() };
+    await item.save();
+
+    console.log(`[GENERATE STREAM]: Answer key generated and saved for "${item.title}" (${newKey.questions.length} questions)`);
+    sendEvent('complete', { success: true, answerKey: item.answerKey });
+    res.end();
+  } catch (err) {
+    console.error('Error in generateAnswerKeyStream:', err);
+    sendEvent('error', { message: err.message || 'Streaming generation failed' });
+    res.end();
+  }
+};
+
 module.exports = {
   getAllContent,
   getContentById,
@@ -602,4 +718,5 @@ module.exports = {
   getAnswerKey,
   updateAnswerKey,
   generateAnswerKey,
+  generateAnswerKeyStream,
 };

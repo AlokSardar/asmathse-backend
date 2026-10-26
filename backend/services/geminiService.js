@@ -101,6 +101,108 @@ const getAvailableGeminiModels = async (apiKey) => {
 };
 
 /**
+ * Robust JSON parser that can salvage completed questions even if response ended near token boundary
+ */
+const parseGeminiJsonWithRecovery = (text) => {
+  if (!text || typeof text !== 'string') return null;
+  const cleaned = text.replace(/^```(?:json)?\s*/i, '').replace(/```\s*$/i, '').trim();
+
+  // 1. Direct standard parse
+  try {
+    const parsed = JSON.parse(cleaned);
+    if (parsed) return parsed;
+  } catch (_) {}
+
+  // 2. Automated partial JSON recovery for questions array
+  try {
+    const qIndex = cleaned.indexOf('"questions"');
+    const arrStart = cleaned.indexOf('[', qIndex !== -1 ? qIndex : 0);
+    if (arrStart !== -1) {
+      let lastClosingBrace = cleaned.lastIndexOf('}');
+      while (lastClosingBrace > arrStart) {
+        const candidate = cleaned.substring(arrStart, lastClosingBrace + 1) + ']';
+        try {
+          const recoveredArr = JSON.parse(candidate);
+          if (Array.isArray(recoveredArr) && recoveredArr.length > 0) {
+            console.log(`🔧 [GEMINI API RECOVERY]: Salvaged ${recoveredArr.length} completed question solutions from cutoff!`);
+            return { questions: recoveredArr };
+          }
+        } catch (_) {}
+        lastClosingBrace = cleaned.lastIndexOf('}', lastClosingBrace - 1);
+      }
+    }
+  } catch (salvageErr) {
+    console.warn('JSON salvage error:', salvageErr.message);
+  }
+
+  return null;
+};
+
+/**
+ * Incremental parser to extract completed question blocks in real-time from a streaming chunk buffer
+ */
+const extractCompletedQuestionsFromText = (text) => {
+  if (!text || typeof text !== 'string') return [];
+  const results = [];
+  const qIndex = text.indexOf('"questions"');
+  if (qIndex === -1) return results;
+
+  let pos = text.indexOf('{', qIndex);
+  while (pos !== -1) {
+    let depth = 0;
+    let endPos = -1;
+    let inString = false;
+    let escape = false;
+
+    for (let i = pos; i < text.length; i++) {
+      const char = text[i];
+      if (escape) {
+        escape = false;
+        continue;
+      }
+      if (char === '\\') {
+        escape = true;
+        continue;
+      }
+      if (char === '"') {
+        inString = !inString;
+        continue;
+      }
+      if (!inString) {
+        if (char === '{') depth++;
+        else if (char === '}') {
+          depth--;
+          if (depth === 0) {
+            endPos = i;
+            break;
+          }
+        }
+      }
+    }
+
+    if (endPos !== -1) {
+      const candidateStr = text.substring(pos, endPos + 1);
+      try {
+        const obj = JSON.parse(candidateStr);
+        if (obj && (obj.q_no || obj.questionNumber || obj.problem_statement_latex || obj.solution_latex)) {
+          results.push({
+            q_no: obj.q_no || obj.questionNumber || `Q${results.length + 1}`,
+            max_marks: Number(obj.max_marks || obj.marks || obj.maxMarks) || 5,
+            problem_statement_latex: obj.problem_statement_latex || obj.questionText || obj.problem || '',
+            solution_latex: obj.solution_latex || obj.stepByStepLatex || obj.solution || '',
+            final_answer_latex: obj.final_answer_latex || obj.finalAnswer || obj.answer || '',
+          });
+        }
+      } catch (_) {}
+      pos = text.indexOf('{', endPos + 1);
+    } else {
+      break;
+    }
+  }
+  return results;
+};
+
+/**
  * Generate Pre-Computed Step-by-Step LaTeX Answer Key for an Uploaded Question Paper
  * Strictly powered by Google Gemini Vision API (multimodal).
  * No hardcoded or mock solutions — processes the actual visual document dynamically.
@@ -145,42 +247,6 @@ const generateAnswerKeyForQuestionPaper = async ({
   if (!fileBuffer && (!textContent || textContent.trim().length === 0)) {
     throw new Error('No uploaded question paper file or text found for this test. Please attach a valid PDF or image question paper.');
   }
-
-  // Helper: Robust JSON parser that can salvage completed questions even if response ended near token boundary
-  const parseGeminiJsonWithRecovery = (text) => {
-    if (!text || typeof text !== 'string') return null;
-    const cleaned = text.replace(/^```(?:json)?\s*/i, '').replace(/```\s*$/i, '').trim();
-
-    // 1. Direct standard parse
-    try {
-      const parsed = JSON.parse(cleaned);
-      if (parsed) return parsed;
-    } catch (_) {}
-
-    // 2. Automated partial JSON recovery for questions array
-    try {
-      const qIndex = cleaned.indexOf('"questions"');
-      const arrStart = cleaned.indexOf('[', qIndex !== -1 ? qIndex : 0);
-      if (arrStart !== -1) {
-        let lastClosingBrace = cleaned.lastIndexOf('}');
-        while (lastClosingBrace > arrStart) {
-          const candidate = cleaned.substring(arrStart, lastClosingBrace + 1) + ']';
-          try {
-            const recoveredArr = JSON.parse(candidate);
-            if (Array.isArray(recoveredArr) && recoveredArr.length > 0) {
-              console.log(`🔧 [GEMINI API RECOVERY]: Salvaged ${recoveredArr.length} completed question solutions from cutoff!`);
-              return { questions: recoveredArr };
-            }
-          } catch (_) {}
-          lastClosingBrace = cleaned.lastIndexOf('}', lastClosingBrace - 1);
-        }
-      }
-    } catch (salvageErr) {
-      console.warn('JSON salvage error:', salvageErr.message);
-    }
-
-    return null;
-  };
 
   const prompt = `You are a distinguished Professor of Mathematics and Chief Examiner.
 You have been provided with an official teacher question paper document (PDF or image) for:
@@ -329,8 +395,259 @@ Respond ONLY with valid, raw, parseable JSON matching this exact schema — no m
   throw new Error(`Failed to dynamically analyze question paper with Gemini API: ${lastError?.message || 'Model unavailable'}`);
 };
 
+/**
+ * Streaming / Incremental Gemini Vision Answer Key Generator:
+ * Connects to Gemini's streaming endpoint, incrementally emits discovered questions
+ * as they stream in, and returns the final compiled answer key with KaTeX solutions.
+ */
+const streamAnswerKeyForQuestionPaper = async ({
+  title,
+  course = 'engineering',
+  branch = '',
+  classLevel = '',
+  subject = 'Mathematics',
+  marks = 50,
+  fileBuffer = null,
+  fileMime = 'application/pdf',
+  textContent = '',
+  localPath = null,
+  customPrompt = '',
+  onProgress = null,
+  onQuestion = null,
+}) => {
+  const geminiApiKey = getGeminiApiKey();
+  const totalMarks = Number(marks) || 50;
+
+  if (!geminiApiKey) {
+    throw new Error('Google Gemini API Key is missing. Please configure GEMINI_API_KEY in the server environment.');
+  }
+
+  // Attempt reading fileBuffer from localPath if not passed directly
+  if (!fileBuffer && localPath && fs.existsSync(localPath)) {
+    try {
+      fileBuffer = fs.readFileSync(localPath);
+      const ext = path.extname(localPath).toLowerCase();
+      fileMime = ext === '.pdf' ? 'application/pdf' : (ext === '.png' ? 'image/png' : 'image/jpeg');
+    } catch (e) {
+      console.warn('Could not read question paper buffer from localPath:', e.message);
+    }
+  }
+
+  if (!fileBuffer && (!textContent || textContent.trim().length === 0)) {
+    throw new Error('No uploaded question paper file or text found for this test. Please attach a valid PDF or image question paper.');
+  }
+
+  onProgress?.({ stage: 'connecting', message: 'Connecting to Google Gemini Vision Stream...', percent: 15 });
+
+  const prompt = `You are a distinguished Professor of Mathematics and Chief Examiner.
+You have been provided with an official teacher question paper document (PDF or image) for:
+Test Title: "${title}"
+Course/Stream: ${course} (${branch || classLevel || 'General'})
+Subject: ${subject}
+Total Marks: ${totalMarks}
+${customPrompt && customPrompt.trim() ? `
+TEACHER'S CUSTOM INSTRUCTIONS & SPECIFIC GRADING RULES:
+${customPrompt.trim()}
+CRITICAL: You MUST strictly incorporate and follow the teacher's custom rules and solution criteria above.
+` : ''}
+CRITICAL TASK — EXHAUSTIVE, COMPLETE EXTRACTION & STEP-BY-STEP SOLUTION WITHOUT ANY TRUNCATION:
+1. Meticulously inspect and read every single line of text and mathematical notation visible in the uploaded document from page 1 to the end.
+2. Extract EVERY main question AND every sub-question in strict chronological order as they appear on the paper (e.g., Q1, 1(a), 1(b), 1(c), Q2, 2(a), 2(b), Q3, etc.).
+3. MANDATORY COMPLETENESS & CLEAN TYPOGRAPHY RULES:
+   - You MUST solve EVERY single question in the paper. DO NOT STOP HALFWAY. DO NOT OMIT ANY QUESTION.
+   - For every question, ensure proper markdown and LaTeX spacing, explicit line breaks ("\\n\\n"), and clean typography so text never overlaps or runs together.
+   - In "problem_statement_latex", use clean standard text with inline formulas in $...$ or display formulas in $$...$$. Use explicit double line breaks between paragraphs.
+   - In "solution_latex", structure your solution into clear, numbered steps with bold headers (e.g., "\\\\textbf{Step 1: Given Information & Method}\\\\n\\\\n...\\\\n\\\\n\\\\textbf{Step 2: Derivation}\\\\n\\\\n..."). Always separate distinct equations and explanations with explicit double line breaks ("\\\\n\\\\n") or LaTeX line breaks ("\\\\\\\\\\\\n") so that mathematical expressions render with beautiful margins and never collide.
+   - For displayed equations, put them on their own line with $$...$$ or \\begin{aligned} ... \\end{aligned}.
+   - In "final_answer_latex", provide a clean, boxed final result (e.g., "\\\\boxed{...}") with clear unit or conclusion text.
+4. For each question:
+   - "q_no": Exact question number/label (e.g., "1(a)", "2", "3(b)").
+   - "max_marks": Numeric marks allocated (integer or float, e.g. 1, 2, 3, 4, 5, 10).
+   - "problem_statement_latex": Verbatim problem statement with clean LaTeX and proper spacing.
+   - "solution_latex": Complete step-by-step mathematical model derivation with clear line breaks ("\\n\\n") and clean typography.
+   - "final_answer_latex": Clear boxed final answer in clean LaTeX (e.g. "\\boxed{...}").
+5. Convert all mathematical notation, integrals (\\int), fractions (\\frac), matrices, symbols, derivatives into valid KaTeX-compatible LaTeX syntax.
+6. STRICT RULE: Do NOT fabricate or return generic/mock questions. The questions and solutions MUST correspond directly and exclusively to the uploaded test paper document.
+
+Respond ONLY with valid, raw, parseable JSON matching this exact schema — no markdown fences, no trailing commentary:
+{
+  "questions": [
+    {
+      "q_no": "1(a)",
+      "max_marks": 5,
+      "problem_statement_latex": "Evaluate the integral $\\\\int_{0}^{\\\\pi/2} \\\\frac{\\\\sin x}{\\\\sin x + \\\\cos x} dx$.",
+      "solution_latex": "\\\\textbf{Step 1: Setup and King's Property}\\\\n\\\\nLet $I = \\\\int_{0}^{\\\\pi/2} \\\\frac{\\\\sin x}{\\\\sin x + \\\\cos x} dx$ ...\\\\n\\\\n\\\\textbf{Step 2: Algebraic Summation}\\\\n\\\\nAdding both expressions gives $2I = \\\\int_{0}^{\\\\pi/2} 1 dx = \\\\frac{\\\\pi}{2}$ ...\\\\n\\\\n\\\\textbf{Step 3: Final Computation}\\\\n\\\\nTherefore, $I = \\\\frac{\\\\pi}{4}$.",
+      "final_answer_latex": "\\\\boxed{I = \\\\frac{\\\\pi}{4}}"
+    }
+  ]
+}`;
+
+  const candidateModels = await getAvailableGeminiModels(geminiApiKey);
+  let accumulatedText = '';
+  let emittedCount = 0;
+  let lastError = null;
+
+  for (const modelName of candidateModels) {
+    try {
+      console.log(`🤖 [GEMINI STREAMING API]: Attempting streaming question paper analysis with "${modelName}"...`);
+      onProgress?.({ stage: 'analyzing', message: `Analyzing question paper layout using ${modelName}...`, percent: 30 });
+
+      const parts = [];
+      const isMultimodalSupported = modelName !== 'gemini-pro';
+      if (fileBuffer && isMultimodalSupported) {
+        parts.push({
+          inline_data: {
+            mime_type: fileMime,
+            data: fileBuffer.toString('base64'),
+          },
+        });
+      }
+
+      if (textContent) {
+        parts.push({ text: `Question Paper Text Content:\n${textContent}` });
+      }
+
+      parts.push({ text: prompt });
+
+      const streamUrl = `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:streamGenerateContent?alt=sse&key=${geminiApiKey}`;
+
+      const requestBody = {
+        contents: [{ parts }],
+        generationConfig: {
+          temperature: 0.1,
+          maxOutputTokens: 8192,
+        },
+      };
+
+      if (modelName.includes('1.5') || modelName.includes('2.0') || modelName.includes('flash')) {
+        requestBody.generationConfig.response_mime_type = 'application/json';
+      }
+
+      const resp = await fetch(streamUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(requestBody),
+      });
+
+      if (!resp.ok) {
+        const errTxt = await resp.text();
+        console.warn(`Gemini stream call to ${modelName} returned status ${resp.status}:`, errTxt);
+        lastError = new Error(`Gemini stream status ${resp.status}`);
+        continue;
+      }
+
+      onProgress?.({ stage: 'streaming', message: 'Generating dynamic questions & LaTeX solutions in real-time...', percent: 45 });
+
+      accumulatedText = '';
+      emittedCount = 0;
+
+      // Read SSE stream
+      let lineBuffer = '';
+      if (resp.body) {
+        for await (const chunk of resp.body) {
+          const chunkStr = Buffer.isBuffer(chunk) ? chunk.toString('utf8') : String(chunk);
+          lineBuffer += chunkStr;
+
+          const lines = lineBuffer.split('\n');
+          lineBuffer = lines.pop() || ''; // keep incomplete trailing line
+
+          for (const line of lines) {
+            const trimmedLine = line.trim();
+            if (trimmedLine.startsWith('data:')) {
+              const dataPayload = trimmedLine.replace(/^data:\s*/, '');
+              if (dataPayload === '[DONE]') continue;
+              try {
+                const sseJson = JSON.parse(dataPayload);
+                const partText = sseJson.candidates?.[0]?.content?.parts?.[0]?.text;
+                if (partText) {
+                  accumulatedText += partText;
+
+                  // Dynamically extract completed question blocks
+                  const extractedSoFar = extractCompletedQuestionsFromText(accumulatedText);
+                  if (extractedSoFar.length > emittedCount) {
+                    for (let i = emittedCount; i < extractedSoFar.length; i++) {
+                      const qObj = extractedSoFar[i];
+                      onQuestion?.({
+                        question: qObj,
+                        index: i + 1,
+                        totalDiscovered: extractedSoFar.length,
+                      });
+                      onProgress?.({
+                        stage: 'question_extracted',
+                        message: `Discovered and solved ${qObj.q_no} (${qObj.max_marks} marks)`,
+                        percent: Math.min(92, 45 + (i + 1) * 8),
+                      });
+                    }
+                    emittedCount = extractedSoFar.length;
+                  }
+                }
+              } catch (_) {}
+            }
+          }
+        }
+      }
+
+      // Check if we extracted questions during stream or can parse from accumulated text
+      let finalParsed = extractCompletedQuestionsFromText(accumulatedText);
+      if (finalParsed.length === 0) {
+        const recovered = parseGeminiJsonWithRecovery(accumulatedText);
+        if (recovered?.questions) finalParsed = recovered.questions;
+      }
+
+      if (finalParsed.length > 0) {
+        // Emit any questions that were not yet emitted
+        if (finalParsed.length > emittedCount) {
+          for (let i = emittedCount; i < finalParsed.length; i++) {
+            onQuestion?.({
+              question: finalParsed[i],
+              index: i + 1,
+              totalDiscovered: finalParsed.length,
+            });
+          }
+        }
+
+        onProgress?.({ stage: 'completed', message: `Successfully generated ${finalParsed.length} questions & LaTeX solutions!`, percent: 100 });
+
+        return {
+          generatedBy: `Google Gemini Streaming API (${modelName})`,
+          status: 'draft',
+          questions: finalParsed,
+          lockedAt: null,
+          updatedAt: new Date(),
+        };
+      }
+    } catch (streamErr) {
+      console.warn(`Streaming attempt on model ${modelName} notice:`, streamErr.message);
+      lastError = streamErr;
+    }
+  }
+
+  // Graceful fallback to standard generation if streaming endpoint had network issues
+  console.log('🔄 [FALLBACK]: Invoking standard generator with simulated incremental question emission...');
+  onProgress?.({ stage: 'fallback', message: 'Finalizing full question paper extraction...', percent: 70 });
+  const standardResult = await generateAnswerKeyForQuestionPaper({
+    title, course, branch, classLevel, subject, marks, fileBuffer, fileMime, textContent, localPath, customPrompt
+  });
+
+  if (standardResult?.questions && Array.isArray(standardResult.questions)) {
+    for (let i = 0; i < standardResult.questions.length; i++) {
+      onQuestion?.({
+        question: standardResult.questions[i],
+        index: i + 1,
+        totalDiscovered: standardResult.questions.length,
+      });
+    }
+    onProgress?.({ stage: 'completed', message: `Completed ${standardResult.questions.length} questions!`, percent: 100 });
+  }
+
+  return standardResult;
+};
+
 module.exports = {
   getGeminiApiKey,
   getAvailableGeminiModels,
+  parseGeminiJsonWithRecovery,
+  extractCompletedQuestionsFromText,
   generateAnswerKeyForQuestionPaper,
+  streamAnswerKeyForQuestionPaper,
 };

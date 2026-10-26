@@ -22,6 +22,15 @@ router.post('/register', registerUser);
 router.post('/send-otp', sendOtp);
 router.post('/verify-otp', verifyOtp);
 router.post('/login', loginUser);
+// Explicit Role-Isolated Login Endpoints
+router.post('/student/login', (req, res, next) => {
+  req.body.expectedRole = 'student';
+  return loginUser(req, res, next);
+});
+router.post('/admin/login', (req, res, next) => {
+  req.body.expectedRole = 'admin';
+  return loginUser(req, res, next);
+});
 router.post('/onboarding', completeOnboarding);
 router.put('/onboarding', completeOnboarding);
 router.get('/profile', protect, getUserProfile);

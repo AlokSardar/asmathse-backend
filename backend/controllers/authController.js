@@ -417,7 +417,8 @@ const registerUser = async (req, res) => {
 // @route   POST /api/auth/login
 // @access  Public
 const loginUser = async (req, res) => {
-  const { email, password } = req.body;
+  const { email, password, role, portal, expectedRole } = req.body;
+  const requestedRole = String(expectedRole || role || portal || '').toLowerCase().trim();
 
   try {
     if (!email || !password) {
@@ -426,7 +427,7 @@ const loginUser = async (req, res) => {
 
     const cleanEmail = String(email).toLowerCase().trim();
     console.log(`\n========================================`);
-    console.log(`[AUTH LOGIN] Received login request for: "${cleanEmail}"`);
+    console.log(`[AUTH LOGIN] Received login request for: "${cleanEmail}" (Requested Portal: "${requestedRole || 'unspecified'}")`);
 
     // Strict Authentication: Query MongoDB for user by normalized email
     let user = null;
@@ -440,6 +441,12 @@ const loginUser = async (req, res) => {
 
     // Emergency admin fallback if database is currently connecting/firewalled
     if (!user && cleanEmail === 'admin@asmaths.com' && password === 'AdminPassword123!') {
+      if (requestedRole === 'student') {
+        return res.status(403).json({
+          message: 'Access Denied: Educator credentials cannot access the Student Portal. Please use the Teacher / Admin login.',
+          roleMismatch: true,
+        });
+      }
       console.log(`[AUTH LOGIN] ✅ Admin Master Credentials Verified directly!`);
       const token = generateToken('master_admin_id');
       return res.json({
@@ -485,6 +492,23 @@ const loginUser = async (req, res) => {
     }
 
     const isAdmin = String(user.role || '').toLowerCase() === 'admin';
+
+    // Strict Role-Based Authentication & Login Isolation Enforcement
+    if (requestedRole === 'admin' && !isAdmin) {
+      console.log(`[AUTH LOGIN] ❌ Role Isolation Block: Student "${cleanEmail}" rejected from Admin portal.`);
+      return res.status(403).json({
+        message: 'Access Denied: Student accounts cannot access the Educator / Admin Portal. Please use the Student Login tab.',
+        roleMismatch: true,
+      });
+    }
+
+    if (requestedRole === 'student' && isAdmin) {
+      console.log(`[AUTH LOGIN] ❌ Role Isolation Block: Admin "${cleanEmail}" rejected from Student portal.`);
+      return res.status(403).json({
+        message: 'Access Denied: Educator credentials cannot access the Student Portal. Please switch to the Teacher / Admin Login tab.',
+        roleMismatch: true,
+      });
+    }
 
     // Registration Approval / Verification check:
     // If student has isApproved: false, refuse access until admin manually approves

@@ -10,6 +10,7 @@ const {
   getAnswerKey,
   updateAnswerKey,
   generateAnswerKey,
+  generateAnswerKeyStream,
 } = require('../controllers/contentController');
 
 const multer = require('multer');
@@ -41,6 +42,7 @@ router.delete('/', clearAllContent);
 router.get('/:id/answer-key', getAnswerKey);
 router.put('/:id/answer-key', updateAnswerKey);
 router.post('/:id/generate-answer-key', generateAnswerKey);
+router.post('/:id/generate-answer-key-stream', generateAnswerKeyStream);
 router.get('/:id', getContentById);
 router.delete('/:id', deleteContent);
 
