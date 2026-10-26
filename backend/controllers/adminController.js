@@ -9,15 +9,26 @@ const Evaluation = require('../models/Evaluation');
 // @route   POST /api/admin/content
 // @access  Private/Admin
 const uploadContent = async (req, res) => {
-  const { title, type, stream, semester, fileUrl } = req.body;
+  const { title, type, stream, branch, semester, course, classLevel, subject, academicYear, fileUrl } = req.body;
   try {
+    const isCommon = Boolean(
+      (branch && /common/i.test(branch)) ||
+      (stream && /common/i.test(stream)) ||
+      (Number(semester) <= 2 && (/common/i.test(branch || '') || /common/i.test(stream || '')))
+    );
     const content = await Content.create({
       title,
-      type,
-      stream,
-      semester,
+      type: type || 'materials',
+      course: course || 'engineering',
+      stream: stream || branch || 'CSE',
+      branch: branch || stream || 'CSE',
+      semester: semester !== undefined ? semester : 1,
+      classLevel: classLevel || null,
+      subject: subject || 'Mathematics',
+      academicYear: academicYear || '2026-2027',
+      isCommonFirstYear: isCommon,
       fileUrl,
-      uploadedBy: req.user.id
+      uploadedBy: req.user ? req.user.id : 'admin'
     });
     res.status(201).json(content);
   } catch (error) {

@@ -44,7 +44,34 @@ const getAllContent = async (req, res) => {
     const query = {};
 
     if (course) {
-      query.course = new RegExp(`^${escapeRegex(course)}$`, 'i');
+      const c = course.trim().toLowerCase();
+      let courseRegex;
+      if (c.includes('eng') || c.includes('btech')) {
+        courseRegex = /engineering|btech|b\.tech|makaut|^all$/i;
+      } else if (c.includes('bsc')) {
+        courseRegex = /bsc|b\.sc|science|^all$/i;
+      } else if (c.includes('cbse')) {
+        courseRegex = /cbse|school|class|^all$/i;
+      } else if (c.includes('jee')) {
+        courseRegex = /jee|iit|^all$/i;
+      } else {
+        courseRegex = new RegExp(`^${escapeRegex(course)}$`, 'i');
+      }
+      const courseConditions = [
+        { course: courseRegex },
+        { course: null },
+        { course: { $exists: false } },
+        { course: '' },
+        { course: /all/i }
+      ];
+      if (query.$and) {
+        query.$and.push({ $or: courseConditions });
+      } else if (query.$or) {
+        query.$and = [{ $or: query.$or }, { $or: courseConditions }];
+        delete query.$or;
+      } else {
+        query.$or = courseConditions;
+      }
     }
 
     const targetYear = academicYear || academic_year;
@@ -347,7 +374,12 @@ const saveContent = async (req, res) => {
       uploadedAt: itemData.uploadedAt || new Date(),
       academicYear: targetAcademicYear,
       academic_year: targetAcademicYear,
-      stream: itemData.stream || itemData.branch || null,
+      course: itemData.course || 'engineering',
+      branch: itemData.branch || itemData.stream || 'CSE',
+      stream: itemData.stream || itemData.branch || 'CSE',
+      semester: itemData.semester !== undefined ? itemData.semester : 1,
+      classLevel: itemData.classLevel || null,
+      subject: itemData.subject || 'Mathematics',
       targetAudience: itemData.targetAudience || itemData.deploymentTarget || 'all',
       deploymentTarget: itemData.deploymentTarget || itemData.targetAudience || 'all',
       isCommonFirstYear: isCommon1stYr,
