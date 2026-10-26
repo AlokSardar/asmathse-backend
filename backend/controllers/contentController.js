@@ -578,6 +578,7 @@ const generateAnswerKey = async (req, res) => {
       fileMime,
       textContent: questionText,
       customPrompt,
+      pages: req.body?.pages || req.body?.files || [],
     });
 
     item.answerKey = { ...newKey, updatedAt: new Date() };
@@ -687,6 +688,7 @@ const generateAnswerKeyStream = async (req, res) => {
       fileMime,
       textContent: questionText,
       customPrompt,
+      pages: req.body?.pages || req.body?.files || [],
       onProgress: (prog) => {
         sendEvent('status', prog);
       },

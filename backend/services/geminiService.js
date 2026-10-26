@@ -1,5 +1,6 @@
 const fs = require('fs');
 const path = require('path');
+const { PDFDocument } = require('pdf-lib');
 
 // Universal & Robust Google Gemini API Key Resolver
 const getGeminiApiKey = () => {
@@ -203,15 +204,65 @@ const extractCompletedQuestionsFromText = (text) => {
 };
 
 /**
+ * Splits a document buffer or payload into sequential pages.
+ * If PDF, extracts each page into an individual single-page PDF buffer using pdf-lib.
+ * If image or text, returns a single page object.
+ */
+const splitDocumentIntoPages = async ({ fileBuffer, fileMime, textContent, pages = [] }) => {
+  if (Array.isArray(pages) && pages.length > 0) {
+    return pages.map((p, idx) => ({
+      buffer: Buffer.isBuffer(p.buffer)
+        ? p.buffer
+        : (p.dataUrl ? Buffer.from(p.dataUrl.replace(/^data:[^;]+;base64,/, ''), 'base64') : (p.data ? Buffer.from(p.data, 'base64') : null)),
+      mime: p.mime || p.fileMime || 'image/jpeg',
+      pageNumber: idx + 1,
+      totalPages: pages.length,
+      textContent: p.textContent || '',
+    }));
+  }
+
+  const isPdf = (fileMime && fileMime.includes('pdf')) || (fileBuffer && fileBuffer.slice(0, 4).toString() === '%PDF');
+
+  if (fileBuffer && isPdf) {
+    try {
+      const srcDoc = await PDFDocument.load(fileBuffer, { ignoreEncryption: true });
+      const pageCount = srcDoc.getPageCount();
+      if (pageCount > 1) {
+        const pageList = [];
+        for (let i = 0; i < pageCount; i++) {
+          const subDoc = await PDFDocument.create();
+          const [copiedPage] = await subDoc.copyPages(srcDoc, [i]);
+          subDoc.addPage(copiedPage);
+          const subBytes = await subDoc.save();
+          pageList.push({
+            buffer: Buffer.from(subBytes),
+            mime: 'application/pdf',
+            pageNumber: i + 1,
+            totalPages: pageCount,
+            textContent: '',
+          });
+        }
+        console.log(`📑 [PAGE-BY-PAGE SPLITTER]: Extracted ${pageList.length} sequential pages from PDF`);
+        return pageList;
+      }
+    } catch (pdfErr) {
+      console.warn('PDF splitting fallback to single page:', pdfErr.message);
+    }
+  }
+
+  return [{
+    buffer: fileBuffer,
+    mime: fileMime || 'application/pdf',
+    pageNumber: 1,
+    totalPages: 1,
+    textContent: textContent || '',
+  }];
+};
+
+/**
  * Generate Pre-Computed Step-by-Step LaTeX Answer Key for an Uploaded Question Paper
- * Strictly powered by Google Gemini Vision API (multimodal).
- * No hardcoded or mock solutions — processes the actual visual document dynamically.
- *
- * Enforced output schema:
- * {
- *   generatedBy, status, lockedAt, updatedAt,
- *   questions: [{ q_no, max_marks, problem_statement_latex, solution_latex, final_answer_latex }]
- * }
+ * Strictly processes the document sequentially page-by-page:
+ * (Process Page 1 -> generate key -> process Page 2 -> generate key -> ... -> loop completes on the last page -> finalize).
  */
 const generateAnswerKeyForQuestionPaper = async ({
   title,
@@ -225,6 +276,7 @@ const generateAnswerKeyForQuestionPaper = async ({
   textContent = '',
   localPath = null,
   customPrompt = '',
+  pages = [],
 }) => {
   const geminiApiKey = getGeminiApiKey();
   const totalMarks = Number(marks) || 50;
@@ -244,29 +296,50 @@ const generateAnswerKeyForQuestionPaper = async ({
     }
   }
 
-  if (!fileBuffer && (!textContent || textContent.trim().length === 0)) {
+  if (!fileBuffer && (!textContent || textContent.trim().length === 0) && (!pages || pages.length === 0)) {
     throw new Error('No uploaded question paper file or text found for this test. Please attach a valid PDF or image question paper.');
   }
 
-  const prompt = `You are a distinguished Professor of Mathematics and Chief Examiner.
-You have been provided with an official teacher question paper document (PDF or image) for:
+  // Split question paper into sequential pages
+  const docPages = await splitDocumentIntoPages({ fileBuffer, fileMime, textContent, pages });
+  const totalPages = docPages.length;
+  console.log(`📑 [ANSWER KEY PIPELINE]: Initializing sequential page-by-page loop across ${totalPages} page(s)...`);
+
+  const candidateModels = await getAvailableGeminiModels(geminiApiKey);
+  const accumulatedQuestions = [];
+  let successfulModel = candidateModels[0] || 'gemini-1.5-pro';
+
+  // Sequential Page-by-Page Loop:
+  // Process Page 1 -> generate key -> process Page 2 -> generate key -> ... -> loop completes on the last page -> finalize
+  for (let pIdx = 0; pIdx < totalPages; pIdx++) {
+    const pageObj = docPages[pIdx];
+    const pageNum = pageObj.pageNumber;
+    console.log(`🔄 [SEQUENTIAL ANSWER KEY LOOP]: Processing Page ${pageNum} of ${totalPages}...`);
+
+    const pagePrompt = `You are a distinguished Professor of Mathematics and Chief Examiner.
+You are analyzing PAGE ${pageNum} of ${totalPages} of an official teacher question paper document for:
 Test Title: "${title}"
 Course/Stream: ${course} (${branch || classLevel || 'General'})
 Subject: ${subject}
-Total Marks: ${totalMarks}
+Total Marks for full paper: ${totalMarks}
 ${customPrompt && customPrompt.trim() ? `
 TEACHER'S CUSTOM INSTRUCTIONS & SPECIFIC GRADING RULES:
 ${customPrompt.trim()}
 CRITICAL: You MUST strictly incorporate and follow the teacher's custom rules and solution criteria above.
 ` : ''}
-CRITICAL TASK — EXHAUSTIVE, COMPLETE EXTRACTION & STEP-BY-STEP SOLUTION WITHOUT ANY TRUNCATION:
-1. Meticulously inspect and read every single line of text and mathematical notation visible in the uploaded document from the very top to the very bottom.
-2. Extract EVERY main question AND every sub-question in strict chronological order as they appear on the paper (e.g., Q1, 1(a), 1(b), 1(c), Q2, 2(a), 2(b), Q3, etc.).
+${accumulatedQuestions.length > 0 ? `
+QUESTIONS EXTRACTED AND SOLVED ON PREVIOUS PAGES (Pages 1 to ${pageNum - 1}):
+${accumulatedQuestions.map(q => `[${q.q_no}]: ${q.problem_statement_latex}`).join('\n')}
+CRITICAL CONTINUITY RULE: Continue the question sequence seamlessly. Do NOT duplicate already extracted questions. Focus strictly on extracting and solving the questions and sub-questions present on PAGE ${pageNum}.
+` : ''}
+CRITICAL TASK — EXHAUSTIVE, COMPLETE EXTRACTION & STEP-BY-STEP SOLUTION FOR PAGE ${pageNum} OF ${totalPages}:
+1. Meticulously inspect and read every single line of text and mathematical notation visible on PAGE ${pageNum} from top to bottom.
+2. Extract EVERY main question AND every sub-question that appears on this page in strict chronological order (e.g., Q1, 1(a), 1(b), 1(c), Q2, 2(a), 2(b), etc.).
 3. MANDATORY COMPLETENESS & CLEAN TYPOGRAPHY RULES:
-   - You MUST solve EVERY single question in the paper. DO NOT STOP HALFWAY. DO NOT OMIT ANY QUESTION.
+   - You MUST solve EVERY single question on this page. DO NOT STOP HALFWAY. DO NOT OMIT ANY QUESTION.
    - For every question, ensure proper markdown and LaTeX spacing, explicit line breaks ("\\n\\n"), and clean typography so text never overlaps or runs together.
    - In "problem_statement_latex", use clean standard text with inline formulas in $...$ or display formulas in $$...$$. Use explicit double line breaks between paragraphs.
-   - In "solution_latex", structure your solution into clear, numbered steps with bold headers (e.g., "\\\\textbf{Step 1: Given Information & Method}\\\\n\\\\n...\\\\n\\\\n\\\\textbf{Step 2: Derivation}\\\\n\\\\n..."). Always separate distinct equations and explanations with explicit double line breaks ("\\\\n\\\\n") or LaTeX line breaks ("\\\\\\\\\\\\n") so that mathematical expressions render with beautiful margins and never collide.
+   - In "solution_latex", structure your solution into clear, numbered steps with bold headers (e.g., "\\\\textbf{Step 1: Setup}\\\\n\\\\n...\\\\n\\\\n\\\\textbf{Step 2: Derivation}\\\\n\\\\n..."). Always separate distinct equations and explanations with explicit double line breaks ("\\\\n\\\\n") or LaTeX line breaks ("\\\\\\\\\\\\n") so that mathematical expressions render with beautiful margins and never collide.
    - For displayed equations, put them on their own line with $$...$$ or \\begin{aligned} ... \\end{aligned}.
    - In "final_answer_latex", provide a clean, boxed final result (e.g., "\\\\boxed{...}") with clear unit or conclusion text.
 4. For each question:
@@ -276,7 +349,7 @@ CRITICAL TASK — EXHAUSTIVE, COMPLETE EXTRACTION & STEP-BY-STEP SOLUTION WITHOU
    - "solution_latex": Complete step-by-step mathematical model derivation with clear line breaks ("\\n\\n") and clean typography.
    - "final_answer_latex": Clear boxed final answer in clean LaTeX (e.g. "\\boxed{...}").
 5. Convert all mathematical notation, integrals (\\int), fractions (\\frac), matrices, symbols, derivatives into valid KaTeX-compatible LaTeX syntax.
-6. STRICT RULE: Do NOT fabricate or return generic/mock questions. The questions and solutions MUST correspond directly and exclusively to the uploaded test paper document.
+6. STRICT RULE: Questions and solutions MUST correspond directly and exclusively to the uploaded document on PAGE ${pageNum}.
 
 Respond ONLY with valid, raw, parseable JSON matching this exact schema — no markdown fences, no trailing commentary:
 {
@@ -291,114 +364,93 @@ Respond ONLY with valid, raw, parseable JSON matching this exact schema — no m
   ]
 }`;
 
-  // Dynamically discover candidate models for this API key
-  const candidateModels = await getAvailableGeminiModels(geminiApiKey);
-  let lastError = null;
+    let pageQuestions = [];
 
-  for (const modelName of candidateModels) {
-    try {
-      console.log(`🤖 [GEMINI API]: Attempting complete question paper parsing with model "${modelName}"...`);
+    for (const modelName of candidateModels) {
+      try {
+        const parts = [];
+        const isMultimodalSupported = modelName !== 'gemini-pro';
 
-      const parts = [];
+        if (pageObj.buffer && isMultimodalSupported) {
+          parts.push({
+            inline_data: {
+              mime_type: pageObj.mime || 'application/pdf',
+              data: pageObj.buffer.toString('base64'),
+            },
+          });
+        }
+        if (pageObj.textContent) {
+          parts.push({ text: `Page ${pageNum} Content:\n${pageObj.textContent}` });
+        }
+        parts.push({ text: pagePrompt });
 
-      // Multimodal payload (supported on gemini-1.5-pro, gemini-1.5-flash*, gemini-2.0*)
-      // Only bare 'gemini-pro' does NOT support inline_data
-      const isMultimodalSupported = modelName !== 'gemini-pro';
-      if (fileBuffer && isMultimodalSupported) {
-        parts.push({
-          inline_data: {
-            mime_type: fileMime,
-            data: fileBuffer.toString('base64'),
+        const geminiUrl = `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent?key=${geminiApiKey}`;
+        const requestBody = {
+          contents: [{ parts }],
+          generationConfig: {
+            temperature: 0.1,
+            maxOutputTokens: 8192,
           },
+        };
+
+        if (modelName.includes('1.5') || modelName.includes('2.0') || modelName.includes('flash')) {
+          requestBody.generationConfig.response_mime_type = 'application/json';
+        }
+
+        const resp = await fetch(geminiUrl, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(requestBody),
         });
-      }
 
-      if (textContent) {
-        parts.push({ text: `Question Paper Text Content:\n${textContent}` });
-      }
-
-      parts.push({ text: prompt });
-
-      const geminiUrl = `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent?key=${geminiApiKey}`;
-
-      const requestBody = {
-        contents: [{ parts }],
-        generationConfig: {
-          temperature: 0.1,
-          maxOutputTokens: 8192,
-        },
-      };
-
-      // response_mime_type is supported on Gemini 1.5 and 2.0 models
-      if (modelName.includes('1.5') || modelName.includes('2.0') || modelName.includes('flash')) {
-        requestBody.generationConfig.response_mime_type = 'application/json';
-      }
-
-      const resp = await fetch(geminiUrl, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(requestBody),
-      });
-
-      if (resp.ok) {
-        const respJson = await resp.json();
-        const candidate = respJson.candidates?.[0];
-        const finishReason = candidate?.finishReason;
-        const candidateText = candidate?.content?.parts?.[0]?.text;
-
-        if (finishReason === 'MAX_TOKENS') {
-          console.warn(`⚠️ [GEMINI API]: Generation hit MAX_TOKENS limit on "${modelName}". Invoking recovery parser...`);
-        }
-
-        if (candidateText) {
-          const parsed = parseGeminiJsonWithRecovery(candidateText);
-
-          let questionsList = [];
-          if (parsed && Array.isArray(parsed.questions) && parsed.questions.length > 0) {
-            questionsList = parsed.questions;
-          } else if (Array.isArray(parsed) && parsed.length > 0) {
-            questionsList = parsed;
-          }
-
-          if (questionsList.length > 0) {
-            // Normalize question objects to strict schema
-            const normalizedQuestions = questionsList.map((q, idx) => ({
-              q_no: q.q_no || q.questionNumber || `Q${idx + 1}`,
-              max_marks: Number(q.max_marks || q.marks || q.maxMarks) || Math.max(1, Math.floor(totalMarks / questionsList.length)),
-              problem_statement_latex: q.problem_statement_latex || q.questionText || q.problem || '',
-              solution_latex: q.solution_latex || q.stepByStepLatex || q.solution || '',
-              final_answer_latex: q.final_answer_latex || q.finalAnswer || q.answer || '',
-            }));
-
-            console.log(`✅ [GEMINI API]: Successfully parsed complete question paper using "${modelName}" (${normalizedQuestions.length} questions)!`);
-            return {
-              generatedBy: `Google Gemini API (${modelName})`,
-              status: 'draft',
-              questions: normalizedQuestions,
-              lockedAt: null,
-              updatedAt: new Date(),
-            };
+        if (resp.ok) {
+          const respJson = await resp.json();
+          const candidateText = respJson.candidates?.[0]?.content?.parts?.[0]?.text;
+          if (candidateText) {
+            const parsed = parseGeminiJsonWithRecovery(candidateText);
+            const qList = (parsed && Array.isArray(parsed.questions)) ? parsed.questions : (Array.isArray(parsed) ? parsed : []);
+            if (qList.length > 0) {
+              pageQuestions = qList.map((q, idx) => ({
+                q_no: q.q_no || q.questionNumber || `Q${accumulatedQuestions.length + idx + 1}`,
+                max_marks: Number(q.max_marks || q.marks || q.maxMarks) || Math.max(1, Math.floor(totalMarks / (qList.length * totalPages))),
+                problem_statement_latex: q.problem_statement_latex || q.questionText || q.problem || '',
+                solution_latex: q.solution_latex || q.stepByStepLatex || q.solution || '',
+                final_answer_latex: q.final_answer_latex || q.finalAnswer || q.answer || '',
+                pageNumber: pageNum,
+              }));
+              successfulModel = modelName;
+              console.log(`✅ [PAGE ${pageNum}/${totalPages} SUCCESS]: Extracted ${pageQuestions.length} questions via ${modelName}`);
+              break;
+            }
           }
         }
-      } else {
-        const errText = await resp.text();
-        console.warn(`Gemini API call to ${modelName} returned status ${resp.status}:`, errText);
-        lastError = new Error(`Gemini API (${modelName}) returned status ${resp.status}: ${errText.substring(0, 200)}`);
+      } catch (err) {
+        console.warn(`Page ${pageNum} model ${modelName} notice:`, err.message);
       }
-    } catch (err) {
-      console.warn(`Model "${modelName}" attempt error:`, err.message);
-      lastError = err;
+    }
+
+    if (pageQuestions.length > 0) {
+      accumulatedQuestions.push(...pageQuestions);
     }
   }
 
-  // If all candidate models failed, throw the detailed error
-  throw new Error(`Failed to dynamically analyze question paper with Gemini API: ${lastError?.message || 'Model unavailable'}`);
+  // Loop completes on the last page -> finalize
+  console.log(`🏁 [ANSWER KEY LOOP COMPLETED]: Extracted total of ${accumulatedQuestions.length} questions across ${totalPages} pages.`);
+
+  return {
+    generatedBy: `Google Gemini API (${successfulModel}) - Sequential Page-by-Page`,
+    status: 'draft',
+    questions: accumulatedQuestions,
+    lockedAt: null,
+    updatedAt: new Date(),
+  };
 };
 
 /**
  * Streaming / Incremental Gemini Vision Answer Key Generator:
- * Connects to Gemini's streaming endpoint, incrementally emits discovered questions
- * as they stream in, and returns the final compiled answer key with KaTeX solutions.
+ * Connects to Gemini's streaming endpoint and processes documents sequentially page-by-page:
+ * (Process Page 1 -> generate key -> process Page 2 -> generate key -> ... -> loop completes on the last page -> finalize).
+ * Emits real-time progress and discovered questions across each page.
  */
 const streamAnswerKeyForQuestionPaper = async ({
   title,
@@ -412,6 +464,7 @@ const streamAnswerKeyForQuestionPaper = async ({
   textContent = '',
   localPath = null,
   customPrompt = '',
+  pages = [],
   onProgress = null,
   onQuestion = null,
 }) => {
@@ -433,31 +486,60 @@ const streamAnswerKeyForQuestionPaper = async ({
     }
   }
 
-  if (!fileBuffer && (!textContent || textContent.trim().length === 0)) {
+  if (!fileBuffer && (!textContent || textContent.trim().length === 0) && (!pages || pages.length === 0)) {
     throw new Error('No uploaded question paper file or text found for this test. Please attach a valid PDF or image question paper.');
   }
 
-  onProgress?.({ stage: 'connecting', message: 'Connecting to Google Gemini Vision Stream...', percent: 15 });
+  onProgress?.({ stage: 'connecting', message: 'Analyzing question paper pages & document structure...', percent: 12 });
 
-  const prompt = `You are a distinguished Professor of Mathematics and Chief Examiner.
-You have been provided with an official teacher question paper document (PDF or image) for:
+  // Split question paper into sequential pages
+  const docPages = await splitDocumentIntoPages({ fileBuffer, fileMime, textContent, pages });
+  const totalPages = docPages.length;
+  console.log(`📑 [STREAM ANSWER KEY PIPELINE]: Initializing sequential page-by-page streaming across ${totalPages} page(s)...`);
+
+  const candidateModels = await getAvailableGeminiModels(geminiApiKey);
+  const accumulatedQuestions = [];
+  let successfulModel = candidateModels[0] || 'gemini-1.5-pro';
+
+  // Sequential Page-by-Page Streaming Loop:
+  // Process Page 1 -> generate key -> process Page 2 -> generate key -> ... -> loop completes on the last page -> finalize
+  for (let pIdx = 0; pIdx < totalPages; pIdx++) {
+    const pageObj = docPages[pIdx];
+    const pageNum = pageObj.pageNumber;
+    console.log(`🔄 [SEQUENTIAL STREAMING LOOP]: Processing Page ${pageNum} of ${totalPages}...`);
+
+    onProgress?.({
+      stage: 'page_processing',
+      page: pageNum,
+      totalPages,
+      message: `Processing Page ${pageNum} of ${totalPages}: Extracting questions & generating LaTeX solutions...`,
+      percent: Math.min(92, Math.round(15 + (pIdx / totalPages) * 75)),
+    });
+
+    const pagePrompt = `You are a distinguished Professor of Mathematics and Chief Examiner.
+You are analyzing PAGE ${pageNum} of ${totalPages} of an official teacher question paper document for:
 Test Title: "${title}"
 Course/Stream: ${course} (${branch || classLevel || 'General'})
 Subject: ${subject}
-Total Marks: ${totalMarks}
+Total Marks for full paper: ${totalMarks}
 ${customPrompt && customPrompt.trim() ? `
 TEACHER'S CUSTOM INSTRUCTIONS & SPECIFIC GRADING RULES:
 ${customPrompt.trim()}
 CRITICAL: You MUST strictly incorporate and follow the teacher's custom rules and solution criteria above.
 ` : ''}
-CRITICAL TASK — EXHAUSTIVE, COMPLETE EXTRACTION & STEP-BY-STEP SOLUTION WITHOUT ANY TRUNCATION:
-1. Meticulously inspect and read every single line of text and mathematical notation visible in the uploaded document from page 1 to the end.
-2. Extract EVERY main question AND every sub-question in strict chronological order as they appear on the paper (e.g., Q1, 1(a), 1(b), 1(c), Q2, 2(a), 2(b), Q3, etc.).
+${accumulatedQuestions.length > 0 ? `
+QUESTIONS EXTRACTED AND SOLVED ON PREVIOUS PAGES (Pages 1 to ${pageNum - 1}):
+${accumulatedQuestions.map(q => `[${q.q_no}]: ${q.problem_statement_latex}`).join('\n')}
+CRITICAL CONTINUITY RULE: Continue the question sequence seamlessly. Do NOT duplicate already extracted questions. Focus strictly on extracting and solving the questions and sub-questions present on PAGE ${pageNum}.
+` : ''}
+CRITICAL TASK — EXHAUSTIVE, COMPLETE EXTRACTION & STEP-BY-STEP SOLUTION FOR PAGE ${pageNum} OF ${totalPages}:
+1. Meticulously inspect and read every single line of text and mathematical notation visible on PAGE ${pageNum} from top to bottom.
+2. Extract EVERY main question AND every sub-question that appears on this page in strict chronological order (e.g., Q1, 1(a), 1(b), 1(c), Q2, 2(a), 2(b), etc.).
 3. MANDATORY COMPLETENESS & CLEAN TYPOGRAPHY RULES:
-   - You MUST solve EVERY single question in the paper. DO NOT STOP HALFWAY. DO NOT OMIT ANY QUESTION.
+   - You MUST solve EVERY single question on this page. DO NOT STOP HALFWAY. DO NOT OMIT ANY QUESTION.
    - For every question, ensure proper markdown and LaTeX spacing, explicit line breaks ("\\n\\n"), and clean typography so text never overlaps or runs together.
    - In "problem_statement_latex", use clean standard text with inline formulas in $...$ or display formulas in $$...$$. Use explicit double line breaks between paragraphs.
-   - In "solution_latex", structure your solution into clear, numbered steps with bold headers (e.g., "\\\\textbf{Step 1: Given Information & Method}\\\\n\\\\n...\\\\n\\\\n\\\\textbf{Step 2: Derivation}\\\\n\\\\n..."). Always separate distinct equations and explanations with explicit double line breaks ("\\\\n\\\\n") or LaTeX line breaks ("\\\\\\\\\\\\n") so that mathematical expressions render with beautiful margins and never collide.
+   - In "solution_latex", structure your solution into clear, numbered steps with bold headers (e.g., "\\\\textbf{Step 1: Setup}\\\\n\\\\n...\\\\n\\\\n\\\\textbf{Step 2: Derivation}\\\\n\\\\n..."). Always separate distinct equations and explanations with explicit double line breaks ("\\\\n\\\\n") or LaTeX line breaks ("\\\\\\\\\\\\n") so that mathematical expressions render with beautiful margins and never collide.
    - For displayed equations, put them on their own line with $$...$$ or \\begin{aligned} ... \\end{aligned}.
    - In "final_answer_latex", provide a clean, boxed final result (e.g., "\\\\boxed{...}") with clear unit or conclusion text.
 4. For each question:
@@ -467,7 +549,7 @@ CRITICAL TASK — EXHAUSTIVE, COMPLETE EXTRACTION & STEP-BY-STEP SOLUTION WITHOU
    - "solution_latex": Complete step-by-step mathematical model derivation with clear line breaks ("\\n\\n") and clean typography.
    - "final_answer_latex": Clear boxed final answer in clean LaTeX (e.g. "\\boxed{...}").
 5. Convert all mathematical notation, integrals (\\int), fractions (\\frac), matrices, symbols, derivatives into valid KaTeX-compatible LaTeX syntax.
-6. STRICT RULE: Do NOT fabricate or return generic/mock questions. The questions and solutions MUST correspond directly and exclusively to the uploaded test paper document.
+6. STRICT RULE: Questions and solutions MUST correspond directly and exclusively to the uploaded document on PAGE ${pageNum}.
 
 Respond ONLY with valid, raw, parseable JSON matching this exact schema — no markdown fences, no trailing commentary:
 {
@@ -482,165 +564,147 @@ Respond ONLY with valid, raw, parseable JSON matching this exact schema — no m
   ]
 }`;
 
-  const candidateModels = await getAvailableGeminiModels(geminiApiKey);
-  let accumulatedText = '';
-  let emittedCount = 0;
-  let lastError = null;
+    let pageQuestions = [];
+    let pageStreamed = false;
 
-  for (const modelName of candidateModels) {
-    try {
-      console.log(`🤖 [GEMINI STREAMING API]: Attempting streaming question paper analysis with "${modelName}"...`);
-      onProgress?.({ stage: 'analyzing', message: `Analyzing question paper layout using ${modelName}...`, percent: 30 });
+    for (const modelName of candidateModels) {
+      try {
+        const parts = [];
+        const isMultimodalSupported = modelName !== 'gemini-pro';
 
-      const parts = [];
-      const isMultimodalSupported = modelName !== 'gemini-pro';
-      if (fileBuffer && isMultimodalSupported) {
-        parts.push({
-          inline_data: {
-            mime_type: fileMime,
-            data: fileBuffer.toString('base64'),
+        if (pageObj.buffer && isMultimodalSupported) {
+          parts.push({
+            inline_data: {
+              mime_type: pageObj.mime || 'application/pdf',
+              data: pageObj.buffer.toString('base64'),
+            },
+          });
+        }
+        if (pageObj.textContent) {
+          parts.push({ text: `Page ${pageNum} Content:\n${pageObj.textContent}` });
+        }
+        parts.push({ text: pagePrompt });
+
+        const streamUrl = `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:streamGenerateContent?alt=sse&key=${geminiApiKey}`;
+        const requestBody = {
+          contents: [{ parts }],
+          generationConfig: {
+            temperature: 0.1,
+            maxOutputTokens: 8192,
           },
+        };
+
+        if (modelName.includes('1.5') || modelName.includes('2.0') || modelName.includes('flash')) {
+          requestBody.generationConfig.response_mime_type = 'application/json';
+        }
+
+        const resp = await fetch(streamUrl, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(requestBody),
         });
-      }
 
-      if (textContent) {
-        parts.push({ text: `Question Paper Text Content:\n${textContent}` });
-      }
+        if (!resp.ok) continue;
 
-      parts.push({ text: prompt });
+        let pageAccumulatedText = '';
+        let pageEmittedCount = 0;
+        let lineBuffer = '';
 
-      const streamUrl = `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:streamGenerateContent?alt=sse&key=${geminiApiKey}`;
+        if (resp.body) {
+          for await (const chunk of resp.body) {
+            const chunkStr = Buffer.isBuffer(chunk) ? chunk.toString('utf8') : String(chunk);
+            lineBuffer += chunkStr;
+            const lines = lineBuffer.split('\n');
+            lineBuffer = lines.pop() || '';
 
-      const requestBody = {
-        contents: [{ parts }],
-        generationConfig: {
-          temperature: 0.1,
-          maxOutputTokens: 8192,
-        },
-      };
-
-      if (modelName.includes('1.5') || modelName.includes('2.0') || modelName.includes('flash')) {
-        requestBody.generationConfig.response_mime_type = 'application/json';
-      }
-
-      const resp = await fetch(streamUrl, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(requestBody),
-      });
-
-      if (!resp.ok) {
-        const errTxt = await resp.text();
-        console.warn(`Gemini stream call to ${modelName} returned status ${resp.status}:`, errTxt);
-        lastError = new Error(`Gemini stream status ${resp.status}`);
-        continue;
-      }
-
-      onProgress?.({ stage: 'streaming', message: 'Generating dynamic questions & LaTeX solutions in real-time...', percent: 45 });
-
-      accumulatedText = '';
-      emittedCount = 0;
-
-      // Read SSE stream
-      let lineBuffer = '';
-      if (resp.body) {
-        for await (const chunk of resp.body) {
-          const chunkStr = Buffer.isBuffer(chunk) ? chunk.toString('utf8') : String(chunk);
-          lineBuffer += chunkStr;
-
-          const lines = lineBuffer.split('\n');
-          lineBuffer = lines.pop() || ''; // keep incomplete trailing line
-
-          for (const line of lines) {
-            const trimmedLine = line.trim();
-            if (trimmedLine.startsWith('data:')) {
-              const dataPayload = trimmedLine.replace(/^data:\s*/, '');
-              if (dataPayload === '[DONE]') continue;
-              try {
-                const sseJson = JSON.parse(dataPayload);
-                const partText = sseJson.candidates?.[0]?.content?.parts?.[0]?.text;
-                if (partText) {
-                  accumulatedText += partText;
-
-                  // Dynamically extract completed question blocks
-                  const extractedSoFar = extractCompletedQuestionsFromText(accumulatedText);
-                  if (extractedSoFar.length > emittedCount) {
-                    for (let i = emittedCount; i < extractedSoFar.length; i++) {
-                      const qObj = extractedSoFar[i];
-                      onQuestion?.({
-                        question: qObj,
-                        index: i + 1,
-                        totalDiscovered: extractedSoFar.length,
-                      });
-                      onProgress?.({
-                        stage: 'question_extracted',
-                        message: `Discovered and solved ${qObj.q_no} (${qObj.max_marks} marks)`,
-                        percent: Math.min(92, 45 + (i + 1) * 8),
-                      });
+            for (const line of lines) {
+              const trimmedLine = line.trim();
+              if (trimmedLine.startsWith('data:')) {
+                const dataPayload = trimmedLine.replace(/^data:\s*/, '');
+                if (dataPayload === '[DONE]') continue;
+                try {
+                  const sseJson = JSON.parse(dataPayload);
+                  const partText = sseJson.candidates?.[0]?.content?.parts?.[0]?.text;
+                  if (partText) {
+                    pageAccumulatedText += partText;
+                    const extractedSoFar = extractCompletedQuestionsFromText(pageAccumulatedText);
+                    if (extractedSoFar.length > pageEmittedCount) {
+                      for (let i = pageEmittedCount; i < extractedSoFar.length; i++) {
+                        const qObj = {
+                          ...extractedSoFar[i],
+                          pageNumber: pageNum,
+                        };
+                        accumulatedQuestions.push(qObj);
+                        onQuestion?.({
+                          question: qObj,
+                          index: accumulatedQuestions.length,
+                          totalDiscovered: accumulatedQuestions.length,
+                          page: pageNum,
+                        });
+                        onProgress?.({
+                          stage: 'question_extracted',
+                          message: `[Page ${pageNum}/${totalPages}] Discovered and solved ${qObj.q_no} (${qObj.max_marks} marks)`,
+                          percent: Math.min(95, Math.round(15 + ((pIdx + (i + 1) / (extractedSoFar.length + 1)) / totalPages) * 75)),
+                        });
+                      }
+                      pageEmittedCount = extractedSoFar.length;
                     }
-                    emittedCount = extractedSoFar.length;
                   }
-                }
-              } catch (_) {}
+                } catch (_) {}
+              }
             }
           }
         }
-      }
 
-      // Check if we extracted questions during stream or can parse from accumulated text
-      let finalParsed = extractCompletedQuestionsFromText(accumulatedText);
-      if (finalParsed.length === 0) {
-        const recovered = parseGeminiJsonWithRecovery(accumulatedText);
-        if (recovered?.questions) finalParsed = recovered.questions;
-      }
+        // Check leftover questions
+        let finalPageParsed = extractCompletedQuestionsFromText(pageAccumulatedText);
+        if (finalPageParsed.length === 0) {
+          const recovered = parseGeminiJsonWithRecovery(pageAccumulatedText);
+          if (recovered?.questions) finalPageParsed = recovered.questions;
+        }
 
-      if (finalParsed.length > 0) {
-        // Emit any questions that were not yet emitted
-        if (finalParsed.length > emittedCount) {
-          for (let i = emittedCount; i < finalParsed.length; i++) {
+        if (finalPageParsed.length > pageEmittedCount) {
+          for (let i = pageEmittedCount; i < finalPageParsed.length; i++) {
+            const qObj = {
+              ...finalPageParsed[i],
+              pageNumber: pageNum,
+            };
+            accumulatedQuestions.push(qObj);
             onQuestion?.({
-              question: finalParsed[i],
-              index: i + 1,
-              totalDiscovered: finalParsed.length,
+              question: qObj,
+              index: accumulatedQuestions.length,
+              totalDiscovered: accumulatedQuestions.length,
+              page: pageNum,
             });
           }
         }
 
-        onProgress?.({ stage: 'completed', message: `Successfully generated ${finalParsed.length} questions & LaTeX solutions!`, percent: 100 });
-
-        return {
-          generatedBy: `Google Gemini Streaming API (${modelName})`,
-          status: 'draft',
-          questions: finalParsed,
-          lockedAt: null,
-          updatedAt: new Date(),
-        };
+        if (accumulatedQuestions.length > 0 || pageAccumulatedText.length > 0) {
+          successfulModel = modelName;
+          pageStreamed = true;
+          console.log(`✅ [STREAM PAGE ${pageNum}/${totalPages} SUCCESS]: Processed via ${modelName}`);
+          break;
+        }
+      } catch (streamErr) {
+        console.warn(`Stream attempt for page ${pageNum} with ${modelName} notice:`, streamErr.message);
       }
-    } catch (streamErr) {
-      console.warn(`Streaming attempt on model ${modelName} notice:`, streamErr.message);
-      lastError = streamErr;
     }
   }
 
-  // Graceful fallback to standard generation if streaming endpoint had network issues
-  console.log('🔄 [FALLBACK]: Invoking standard generator with simulated incremental question emission...');
-  onProgress?.({ stage: 'fallback', message: 'Finalizing full question paper extraction...', percent: 70 });
-  const standardResult = await generateAnswerKeyForQuestionPaper({
-    title, course, branch, classLevel, subject, marks, fileBuffer, fileMime, textContent, localPath, customPrompt
+  // Loop completed on the last page -> finalize
+  onProgress?.({
+    stage: 'completed',
+    message: `Successfully generated ${accumulatedQuestions.length} questions across all ${totalPages} pages!`,
+    percent: 100,
   });
 
-  if (standardResult?.questions && Array.isArray(standardResult.questions)) {
-    for (let i = 0; i < standardResult.questions.length; i++) {
-      onQuestion?.({
-        question: standardResult.questions[i],
-        index: i + 1,
-        totalDiscovered: standardResult.questions.length,
-      });
-    }
-    onProgress?.({ stage: 'completed', message: `Completed ${standardResult.questions.length} questions!`, percent: 100 });
-  }
-
-  return standardResult;
+  return {
+    generatedBy: `Google Gemini Streaming API (${successfulModel}) - Sequential Page-by-Page`,
+    status: 'draft',
+    questions: accumulatedQuestions,
+    lockedAt: null,
+    updatedAt: new Date(),
+  };
 };
 
 module.exports = {
@@ -648,6 +712,7 @@ module.exports = {
   getAvailableGeminiModels,
   parseGeminiJsonWithRecovery,
   extractCompletedQuestionsFromText,
+  splitDocumentIntoPages,
   generateAnswerKeyForQuestionPaper,
   streamAnswerKeyForQuestionPaper,
 };

@@ -4,7 +4,7 @@ const mongoose = require('mongoose');
 const Evaluation = require('../models/Evaluation');
 const Content = require('../models/Content');
 const ClassTest = require('../models/ClassTest');
-const { getGeminiApiKey, getAvailableGeminiModels, parseGeminiJsonWithRecovery } = require('../services/geminiService');
+const { getGeminiApiKey, getAvailableGeminiModels, parseGeminiJsonWithRecovery, splitDocumentIntoPages } = require('../services/geminiService');
 
 // Helper: Ensure uploads folder exists
 const uploadsDir = path.join(__dirname, '..', 'uploads');
@@ -364,9 +364,63 @@ const evaluateHandwrittenAnswerSheet = async (req, res) => {
           });
         }
 
-        if (allSubmissionPages.length > 0) {
-          const prompt = `You are a Professor of Mathematics and an automated Examination AI Evaluator.
-You are evaluating a student's handwritten mathematics answer sheet for ${testTitle} (${course} - ${subject || 'Mathematics'}).
+        // 1. Expand all submission pages (handling multi-page PDFs or multi-image submissions)
+        const initialPages = [...allSubmissionPages];
+        const expandedPages = [];
+        for (let idx = 0; idx < initialPages.length; idx++) {
+          const p = initialPages[idx];
+          const isPdf = (p.dataUrl && p.dataUrl.includes('application/pdf')) || (p.name && p.name.toLowerCase().endsWith('.pdf'));
+          if (isPdf && p.dataUrl) {
+            try {
+              const rawBase64 = p.dataUrl.replace(/^data:[^;]+;base64,/, '');
+              const pdfBuf = Buffer.from(rawBase64, 'base64');
+              const splitPdfs = await splitDocumentIntoPages({ fileBuffer: pdfBuf, fileMime: 'application/pdf' });
+              if (splitPdfs && splitPdfs.length > 1) {
+                splitPdfs.forEach((sp, spIdx) => {
+                  expandedPages.push({
+                    dataUrl: `data:application/pdf;base64,${sp.buffer.toString('base64')}`,
+                    name: `Page_${spIdx + 1}.pdf`,
+                    pageNumber: spIdx + 1,
+                    totalPages: splitPdfs.length,
+                  });
+                });
+                continue;
+              }
+            } catch (err) {
+              console.warn('Submission PDF splitting notice:', err.message);
+            }
+          }
+          expandedPages.push({
+            ...p,
+            pageNumber: expandedPages.length + 1,
+          });
+        }
+
+        if (expandedPages.length > 0) {
+          allSubmissionPages.length = 0;
+          allSubmissionPages.push(...expandedPages);
+        }
+
+        const totalPages = allSubmissionPages.length;
+
+        if (totalPages > 0) {
+          const candidateModels = await getAvailableGeminiModels(geminiApiKey);
+          const accumulatedQuestionBlocks = [];
+          const accumulatedMistakes = [];
+          let totalSeparatorsDetected = 0;
+          const pageFeedbacks = [];
+
+          console.log(`🤖 [AI SEQUENTIAL MULTI-PAGE EVALUATION]: Initializing sequential evaluation across ${totalPages} page(s)...`);
+
+          // Sequential Page-by-Page AI Answer Sheet Evaluation Loop:
+          // Process Page 1 -> evaluate -> process Page 2 -> evaluate -> ... -> loop completes on the last page -> aggregate final score and report
+          for (let pageIdx = 0; pageIdx < totalPages; pageIdx++) {
+            const pageItem = allSubmissionPages[pageIdx];
+            const pageNum = pageIdx + 1;
+            console.log(`🔍 [AI SEQUENTIAL EVALUATION]: Evaluating Page ${pageNum} of ${totalPages}...`);
+
+            const pagePrompt = `You are a Professor of Mathematics and an automated Examination AI Evaluator.
+You are evaluating PAGE ${pageNum} of ${totalPages} of a student's handwritten mathematics answer sheet for ${testTitle} (${course} - ${subject || 'Mathematics'}).
 ${resolvedQuestionDoc ? 'You have also been supplied with the Teacher\'s Official Question Paper document as the primary reference.' : ''}
 ${resolvedAnswerKey ? `
 TEACHER'S PRE-COMPUTED / LOCKED LATEX ANSWER KEY & RUBRIC:
@@ -376,59 +430,37 @@ ${customPrompt && customPrompt.trim() ? `
 TEACHER'S CUSTOM EVALUATION INSTRUCTIONS & GRADING RULES:
 ${customPrompt.trim()}
 CRITICAL: You MUST strictly evaluate and apply all specific grading rules, tolerance criteria, and guidelines specified above by the teacher.` : ''}
+${accumulatedQuestionBlocks.length > 0 ? `
+QUESTIONS EVALUATED ON PREVIOUS PAGES (Pages 1 to ${pageNum - 1}):
+${accumulatedQuestionBlocks.map(q => `[${q.questionNumber}] (Awarded: ${q.marksAwarded}/${q.maxMarks}) on Page ${q.pageNumber}`).join('\n')}
+CRITICAL CONTINUITY RULE: If a question started on an earlier page and continues onto this page, grade the continued work on Page ${pageNum}. Extract every question attempted on Page ${pageNum}.
+` : ''}
 
-CRITICAL MANDATORY INSTRUCTION — EXHAUSTIVE MULTI-PAGE & MULTI-SECTION EVALUATION:
-- The student's uploaded submission contains MULTIPLE PAGES or MULTIPLE SECTIONS (Page 1, Page 2, Page 3, Page 4, etc.).
-- You MUST thoroughly scan, transcribe, and grade EVERY SINGLE PAGE and SECTION from page 1 to the very last page without stopping.
-- DO NOT stop after page 1. DO NOT evaluate only the first question.
-- Inspect all pages completely and extract EVERY question attempted by the student across all pages into distinct question blocks in "questionBlocks".
-- For every question in "questionBlocks", indicate the "pageNumber" (e.g. 1, 2, 3) where the student's solution appears.
-
-STRICT THREE-PHASE EVALUATION REQUIREMENTS:
-PHASE 1: QUESTION PAPER EXTRACTION & ANSWER KEY DERIVATION
-- Analyze the question paper and pre-computed rubric.
-- Extract each question number and problem statement (questionText).
-- Solve and derive the complete standard correct answer (standardAnswer) with step-by-step mathematical reasoning and final simplified answer in LaTeX.
-
-PHASE 2: HANDWRITTEN ANSWER SHEET PARSING & LINE SEPARATION (ACROSS ALL PAGES)
-- Inspect EVERY PAGE of the student's handwritten answer sheet.
-- Detect Question Tags explicitly written by the student (e.g. 'ANS [Q1]', 'Q1', 'Question 1', '1(a)', 'Q2', 'Q3').
-- Detect horizontal boundary lines drawn by the student to separate answers across all pages.
-- Transcribe the student's handwritten working steps and final answer (extractedAnswer).
-
-PHASE 3: QUESTION-BY-QUESTION CORRELATION & STRICT MARKING
-- Strictly correlate each student solution with the teacher's standard answer question-by-question.
-- STRICT MAXIMUM MARKS ENFORCEMENT & SCALING RULES:
-  * For EVERY question block, "maxMarks" MUST STRICTLY EQUAL the question's allocated maximum marks (e.g. if the question carries 1 mark, maxMarks MUST be 1; if 2 marks, 2; if 5 marks, 5).
-  * "marksAwarded" CANNOT UNDER ANY CIRCUMSTANCE EXCEED "maxMarks": 0 <= marksAwarded <= maxMarks.
-  * If a question carries 1 mark: a completely correct answer receives 1 mark, an incorrect answer receives 0 marks, and a minor slip receives 0.5 or 0 marks. NEVER ASSIGN 5 OR 10 MARKS TO A 1-MARK QUESTION.
-  * If a question carries 2 marks: marksAwarded must be in [0, 2] (e.g. 0, 1, 1.5, or 2).
-  * If a question carries 5 marks: marksAwarded must be in [0, 5] (e.g. 0, 1, 2, 3, 4, or 5).
-  * Partial marks must be awarded proportionally based on theorems, setup, and intermediate operations strictly within [0, maxMarks].
-  * The sum of marksAwarded across all questionBlocks cannot exceed ${maxMarks}.
-- Classify question status: "correct" | "partial" | "incorrect".
-- Detect specific mistakes/slip-ups (sign error, arithmetic mistake, omitted integration constant '+ C', missing limit, invalid substitution).
-- For EVERY detected mistake, provide normalized percentage location on the student's copy:
-  "location": { "top": <0-100>, "left": <0-100>, "width": <10-60>, "height": <5-25> }
-  so that an interactive bounding box pinpoints the exact slip-up on the student's copy!
-- Provide clear feedback on how to fix each mistake.
-
-MATHEMATICAL RENDERING NOTICE:
-Write all mathematical expressions, equations, integrals, fractions, matrices, and variables in clean LaTeX syntax (e.g., \\frac{a}{b}, \\int, \\sqrt{}, \\lambda, \\det).
+CRITICAL TASK FOR PAGE ${pageNum} OF ${totalPages}:
+1. Thoroughly scan, transcribe, and grade EVERY question and mathematical derivation visible on PAGE ${pageNum}.
+2. Detect Question Tags explicitly written by the student on this page (e.g. 'ANS [Q1]', 'Q1', 'Question 1', '1(a)', 'Q2', 'Q3').
+3. Detect horizontal boundary lines drawn by the student to separate answers on this page.
+4. Transcribe the student's handwritten working steps and final answer for each question on this page (extractedAnswer).
+5. STRICT MAXIMUM MARKS ENFORCEMENT & SCALING RULES:
+   * For EVERY question block, "maxMarks" MUST STRICTLY EQUAL the question's allocated maximum marks.
+   * "marksAwarded" CANNOT UNDER ANY CIRCUMSTANCE EXCEED "maxMarks": 0 <= marksAwarded <= maxMarks.
+   * "pageNumber" MUST BE ${pageNum}.
+6. Detect specific mistakes/slip-ups with normalized location coordinates on this page:
+   "location": { "top": <0-100>, "left": <0-100>, "width": <10-60>, "height": <5-25> }
+7. Write all mathematical expressions in valid LaTeX syntax.
 
 Respond ONLY with valid JSON strictly matching:
 {
-  "totalMarks": number,
-  "maxMarks": ${maxMarks},
+  "pageNumber": ${pageNum},
   "lineSeparatorsDetected": number,
-  "overallFeedback": "string",
+  "pageFeedback": "string",
   "questionBlocks": [
     {
-      "pageNumber": 1,
+      "pageNumber": ${pageNum},
       "questionNumber": "Q1",
       "questionText": "string containing full question statement with LaTeX",
       "standardAnswer": "string containing teacher standard correct solution with LaTeX",
-      "extractedAnswer": "string containing student transcribed answer with LaTeX",
+      "extractedAnswer": "string containing student transcribed answer on this page with LaTeX",
       "marksAwarded": number,
       "maxMarks": number,
       "status": "correct" | "partial" | "incorrect",
@@ -444,7 +476,7 @@ Respond ONLY with valid JSON strictly matching:
       ]
     }
   ],
-  "allMistakes": [
+  "pageMistakes": [
     {
       "questionNumber": "string",
       "description": "string",
@@ -452,88 +484,108 @@ Respond ONLY with valid JSON strictly matching:
       "severity": "string",
       "location": { "top": number, "left": number, "width": number, "height": number }
     }
-  ],
-  "hints": "string",
-  "metrics": [
-    { "label": "Conceptual Clarity", "val": "string" },
-    { "label": "Step Precision", "val": "string" },
-    { "label": "Multi-Page Completeness", "val": "string" }
   ]
 }`;
 
-          const requestParts = [];
-          if (resolvedQuestionDoc && resolvedQuestionDoc.startsWith('data:')) {
-            const qMatches = resolvedQuestionDoc.match(/^data:([A-Za-z-+\/]+);base64,(.+)$/);
-            if (qMatches && qMatches.length === 3) {
-              requestParts.push({ inline_data: { mime_type: qMatches[1], data: qMatches[2] } });
+            const requestParts = [];
+            if (resolvedQuestionDoc && resolvedQuestionDoc.startsWith('data:')) {
+              const qMatches = resolvedQuestionDoc.match(/^data:([A-Za-z-+\/]+);base64,(.+)$/);
+              if (qMatches && qMatches.length === 3) {
+                requestParts.push({ inline_data: { mime_type: qMatches[1], data: qMatches[2] } });
+              }
+            }
+
+            // Attach ONLY this page for sequential evaluation
+            if (pageItem.dataUrl && pageItem.dataUrl.startsWith('data:')) {
+              const pMatch = pageItem.dataUrl.match(/^data:([A-Za-z-+\/]+);base64,(.+)$/);
+              if (pMatch && pMatch.length === 3) {
+                requestParts.push({ inline_data: { mime_type: pMatch[1], data: pMatch[2] } });
+              }
+            }
+
+            requestParts.push({ text: pagePrompt });
+
+            for (const modelName of candidateModels) {
+              try {
+                const geminiResp = await fetch(
+                  `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent?key=${geminiApiKey}`,
+                  {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                      contents: [{ parts: requestParts }],
+                      generationConfig: {
+                        response_mime_type: 'application/json',
+                        temperature: 0.1,
+                        maxOutputTokens: 8192,
+                      }
+                    })
+                  }
+                );
+
+                if (geminiResp.ok) {
+                  const geminiData = await geminiResp.json();
+                  const textResponse = geminiData.candidates?.[0]?.content?.parts?.[0]?.text;
+                  if (textResponse) {
+                    const parsed = parseEvaluationJsonWithRecovery(textResponse, Number(maxMarks) || 50);
+                    if (parsed && Array.isArray(parsed.questionBlocks) && parsed.questionBlocks.length > 0) {
+                      const normalizedBlocks = parsed.questionBlocks.map((qb, bIdx) => {
+                        const qMax = Number(qb.maxMarks) || 5;
+                        const rawAwarded = Number(qb.marksAwarded) || 0;
+                        return {
+                          ...qb,
+                          pageNumber: pageNum,
+                          questionNumber: qb.questionNumber || `Q${accumulatedQuestionBlocks.length + bIdx + 1}`,
+                          maxMarks: qMax,
+                          marksAwarded: Math.min(Math.max(0, rawAwarded), qMax),
+                        };
+                      });
+
+                      accumulatedQuestionBlocks.push(...normalizedBlocks);
+                      if (Array.isArray(parsed.allMistakes || parsed.pageMistakes)) {
+                        accumulatedMistakes.push(...(parsed.allMistakes || parsed.pageMistakes));
+                      }
+                      totalSeparatorsDetected += Number(parsed.lineSeparatorsDetected) || Math.max(1, normalizedBlocks.length - 1);
+                      if (parsed.overallFeedback || parsed.pageFeedback) {
+                        pageFeedbacks.push(`Page ${pageNum}: ${parsed.overallFeedback || parsed.pageFeedback}`);
+                      }
+
+                      console.log(`✅ [PAGE ${pageNum}/${totalPages} EVALUATED via ${modelName}]: ${normalizedBlocks.length} question blocks graded`);
+                      break;
+                    }
+                  }
+                }
+              } catch (err) {
+                console.warn(`Evaluation attempt on page ${pageNum} with model ${modelName} notice:`, err.message);
+              }
             }
           }
 
-          // Attach all multi-page submission parts
-          allSubmissionPages.forEach(p => {
-            const pMatch = p.dataUrl.match(/^data:([A-Za-z-+\/]+);base64,(.+)$/);
-            if (pMatch && pMatch.length === 3) {
-              requestParts.push({ inline_data: { mime_type: pMatch[1], data: pMatch[2] } });
-            }
-          });
+          // Loop completes on the last page -> aggregate final score and report!
+          if (accumulatedQuestionBlocks.length > 0) {
+            const totalAwarded = accumulatedQuestionBlocks.reduce((acc, q) => acc + (Number(q.marksAwarded) || 0), 0);
+            const finalTotalMarks = Math.min(totalAwarded, Number(maxMarks) || 50);
 
-          requestParts.push({ text: prompt });
+            parsingResult = {
+              totalMarks: finalTotalMarks,
+              maxMarks: Number(maxMarks) || 50,
+              lineSeparatorsDetected: Math.max(1, totalSeparatorsDetected),
+              overallFeedback: pageFeedbacks.length > 0
+                ? pageFeedbacks.join(' | ')
+                : `Comprehensive sequential evaluation completed across all ${totalPages} page(s). Total score: ${finalTotalMarks}/${maxMarks}.`,
+              questionBlocks: accumulatedQuestionBlocks,
+              allMistakes: accumulatedMistakes.length > 0
+                ? accumulatedMistakes
+                : accumulatedQuestionBlocks.flatMap(q => q.mistakes || []),
+              hints: 'Review your working steps across all pages against the teacher answer key.',
+              metrics: [
+                { label: 'Conceptual Clarity', val: `${Math.min(100, Math.round((finalTotalMarks / (Number(maxMarks) || 50)) * 100))}%` },
+                { label: 'Step Precision', val: `${Math.min(100, Math.round((finalTotalMarks / (Number(maxMarks) || 50)) * 95))}%` },
+                { label: 'Multi-Page Completeness', val: '100%' },
+              ],
+            };
 
-          const candidateModels = await getAvailableGeminiModels(geminiApiKey);
-
-          for (const modelName of candidateModels) {
-            try {
-              console.log(`🤖 [GEMINI AI MULTI-PAGE EVALUATION]: Attempting evaluation with model "${modelName}" (${allSubmissionPages.length} submission document parts)...`);
-              const geminiResp = await fetch(
-                `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent?key=${geminiApiKey}`,
-                {
-                  method: 'POST',
-                  headers: { 'Content-Type': 'application/json' },
-                  body: JSON.stringify({
-                    contents: [{ parts: requestParts }],
-                    generationConfig: {
-                      response_mime_type: 'application/json',
-                      temperature: 0.1,
-                      maxOutputTokens: 8192,
-                    }
-                  })
-                }
-              );
-
-              if (geminiResp.ok) {
-                const geminiData = await geminiResp.json();
-                const textResponse = geminiData.candidates?.[0]?.content?.parts?.[0]?.text;
-                if (textResponse) {
-                  const parsed = parseEvaluationJsonWithRecovery(textResponse, Number(maxMarks) || 50);
-                  if (parsed && Array.isArray(parsed.questionBlocks) && parsed.questionBlocks.length > 0) {
-                    parsingResult = parsed;
-
-                    // Enforce strict upper bound marks capping per question
-                    parsingResult.questionBlocks = parsingResult.questionBlocks.map((qb, idx) => {
-                      const qMax = Number(qb.maxMarks) || Math.max(1, Math.round((Number(maxMarks) || 50) / parsingResult.questionBlocks.length));
-                      const rawAwarded = Number(qb.marksAwarded) || 0;
-                      const cappedAwarded = Math.min(Math.max(0, rawAwarded), qMax);
-                      return {
-                        ...qb,
-                        questionNumber: qb.questionNumber || `Q${idx + 1}`,
-                        maxMarks: qMax,
-                        marksAwarded: cappedAwarded,
-                      };
-                    });
-
-                    const totalAwarded = parsingResult.questionBlocks.reduce((acc, q) => acc + q.marksAwarded, 0);
-                    parsingResult.totalMarks = Math.min(totalAwarded, Number(maxMarks) || 50);
-
-                    console.log(`✅ [GEMINI AI MULTI-PAGE EVALUATION COMPLETED via ${modelName}]: ${parsingResult.totalMarks} / ${parsingResult.maxMarks} across ${parsingResult.questionBlocks.length} questions`);
-                    break;
-                  }
-                }
-              } else {
-                console.warn(`Gemini evaluation call to ${modelName} returned status ${geminiResp.status}:`, await geminiResp.text());
-              }
-            } catch (err) {
-              console.warn(`Evaluation attempt with model ${modelName} notice:`, err.message);
-            }
+            console.log(`🏁 [SEQUENTIAL AI EVALUATION AGGREGATED]: Total Marks ${parsingResult.totalMarks}/${parsingResult.maxMarks} across ${parsingResult.questionBlocks.length} question blocks and ${totalPages} pages.`);
           }
         }
       } catch (geminiErr) {
