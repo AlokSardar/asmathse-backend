@@ -5,8 +5,10 @@ const contentSchema = new mongoose.Schema({
   title: { type: String, required: true },
   type: { type: String, required: true, index: true }, // 'syllabus', 'materials', 'pyq', 'assignment', 'classtest', etc.
   course: { type: String, index: true }, // 'engineering', 'cbse', 'jee', 'bsc'
+  board: { type: String, index: true }, // 'CBSE', etc.
+  class: { type: String, index: true }, // 'Class 9', 'Class 10', etc.
   stream: { type: String }, // alias / branch
-  branch: { type: String, index: true }, // 'CSE', 'ECE', 'Class 9', 'JEE Main', etc.
+  branch: { type: String, index: true }, // 'CSE', 'ECE', etc.
   semester: { type: mongoose.Schema.Types.Mixed }, // Number or String
   classLevel: { type: String, index: true }, // 'Class 9', 'Class 12', etc.
   subject: { type: String, index: true }, // 'Mathematics', etc.

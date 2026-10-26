@@ -9,22 +9,91 @@ const Evaluation = require('../models/Evaluation');
 // @route   POST /api/admin/content
 // @access  Private/Admin
 const uploadContent = async (req, res) => {
-  const { title, type, stream, branch, semester, course, classLevel, subject, academicYear, fileUrl } = req.body;
+  const { title, type, stream: rawStream, branch: rawBranch, semester: rawSemester, course: rawCourse, board: rawBoard, classLevel: rawClassLevel, class: rawClass, subject: rawSubject, academicYear, fileUrl } = req.body;
   try {
-    const isCommon = Boolean(
-      (branch && /common/i.test(branch)) ||
-      (stream && /common/i.test(stream)) ||
-      (Number(semester) <= 2 && (/common/i.test(branch || '') || /common/i.test(stream || '')))
-    );
+    const rawC = String(rawCourse || rawBoard || rawStream || '').trim().toLowerCase();
+    const rawCl = rawClassLevel || rawClass;
+    
+    let course = 'engineering';
+    let board = rawBoard || null;
+    let isCbse = false;
+    let isJee = false;
+    let isBsc = false;
+    let isEng = false;
+
+    if (rawC.includes('cbse') || rawC.includes('school') || (rawCl && /class/i.test(rawCl))) {
+      course = 'cbse';
+      board = board || 'CBSE';
+      isCbse = true;
+    } else if (rawC.includes('jee') || rawC.includes('iit')) {
+      course = 'jee';
+      isJee = true;
+    } else if (rawC.includes('bsc') || rawC.includes('science')) {
+      course = 'bsc';
+      isBsc = true;
+    } else {
+      course = 'engineering';
+      isEng = true;
+    }
+
+    let branch = null;
+    let stream = null;
+    let semester = null;
+    let classLevel = null;
+    let targetClass = null;
+    let subject = rawSubject || (isCbse ? 'Mathematics' : (isJee ? 'JEE Mathematics' : 'Engineering Mathematics'));
+    let isCommon = false;
+
+    if (isCbse) {
+      board = 'CBSE';
+      branch = null;
+      stream = 'CBSE';
+      semester = null;
+      classLevel = rawClassLevel || rawClass || 'Class 9';
+      targetClass = classLevel;
+      subject = rawSubject || 'Mathematics';
+      isCommon = false;
+    } else if (isJee) {
+      branch = rawBranch || 'JEE';
+      stream = 'JEE';
+      semester = null;
+      classLevel = rawClassLevel || rawClass || 'JEE Mains & Advanced';
+      targetClass = classLevel;
+      subject = rawSubject || 'JEE Mathematics';
+      isCommon = false;
+    } else if (isBsc) {
+      branch = rawBranch || rawStream || 'BSc (Honours) (Major)';
+      stream = branch;
+      semester = rawSemester !== undefined && rawSemester !== null && rawSemester !== '' ? rawSemester : 1;
+      classLevel = null;
+      targetClass = null;
+      subject = rawSubject || 'Mathematics';
+      isCommon = false;
+    } else {
+      branch = rawBranch || rawStream || 'CSE';
+      stream = rawStream || rawBranch || 'CSE';
+      semester = rawSemester !== undefined && rawSemester !== null && rawSemester !== '' ? rawSemester : 1;
+      classLevel = null;
+      targetClass = null;
+      subject = rawSubject || 'Engineering Mathematics';
+      isCommon = Boolean(
+        (branch && /common/i.test(branch)) ||
+        (stream && /common/i.test(stream)) ||
+        (Number(semester) <= 2 && (/common/i.test(branch || '') || /common/i.test(stream || '')))
+      );
+    }
+
     const content = await Content.create({
       title,
       type: type || 'materials',
-      course: course || 'engineering',
-      stream: stream || branch || 'CSE',
-      branch: branch || stream || 'CSE',
-      semester: semester !== undefined ? semester : 1,
-      classLevel: classLevel || null,
-      subject: subject || 'Mathematics',
+      board,
+      course,
+      stream,
+      branch,
+      semester,
+      classLevel,
+      class: targetClass,
+      subject,
       academicYear: academicYear || '2026-2027',
       isCommonFirstYear: isCommon,
       fileUrl,
