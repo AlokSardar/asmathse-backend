@@ -931,13 +931,20 @@ Respond ONLY with valid JSON strictly matching:
           (kq.id && String(kq.id) === String(block.questionId || ''))
         ) || keyQuestions[idx];
 
-        let qMax = Number(matchKey?.max_marks || matchKey?.marks || block.maxMarks);
-        if (!qMax || isNaN(qMax) || qMax <= 0) {
+        const parseNum = (v, def = 0) => {
+          if (typeof v === 'number') return isNaN(v) ? def : v;
+          if (!v) return def;
+          const m = String(v).match(/(\d+(?:\.\d+)?)/);
+          return m ? parseFloat(m[1]) : def;
+        };
+
+        let qMax = parseNum(matchKey?.max_marks || matchKey?.marks || block.maxMarks, 0);
+        if (!qMax || qMax <= 0) {
           qMax = Math.max(1, Math.floor(targetMaxFinal / parsingResult.questionBlocks.length));
         }
 
-        let awarded = Number(block.marksAwarded);
-        if (isNaN(awarded) || awarded < 0) awarded = 0;
+        let awarded = parseNum(block.marksAwarded, 0);
+        if (awarded < 0) awarded = 0;
 
         // Strict clamp: awarded score can NEVER exceed maxMarks
         if (awarded > qMax) {
@@ -1206,6 +1213,121 @@ const publishEvaluationResults = async (req, res) => {
   }
 };
 
+// In-Memory Active Proctoring Streams Registry
+const activeProctoringStreams = new Map();
+
+// @desc    Update / publish live student proctoring stream & camera snapshot
+// @route   POST /api/evaluations/proctoring-stream
+// @access  Public
+const updateProctoringStream = async (req, res) => {
+  try {
+    const { studentEmail, studentId, studentName, testId, testTitle, snapshot, status, strikes, duration } = req.body;
+    if (!studentEmail && !studentId) {
+      return res.status(400).json({ success: false, message: 'Student identifier required' });
+    }
+    const key = String(studentEmail || studentId).toLowerCase().trim();
+    const existing = activeProctoringStreams.get(key) || {};
+
+    const record = {
+      ...existing,
+      studentEmail: studentEmail || existing.studentEmail || key,
+      studentId: studentId || existing.studentId,
+      studentName: studentName || existing.studentName || 'Student',
+      testId: testId || existing.testId || 'test',
+      testTitle: testTitle || existing.testTitle || 'Class Test',
+      snapshot: snapshot || existing.snapshot || null,
+      status: status || existing.status || 'active',
+      strikes: strikes !== undefined ? strikes : (existing.strikes || 0),
+      duration: duration || existing.duration || 0,
+      lastHeartbeat: Date.now(),
+      startTime: existing.startTime || Date.now(),
+      videoUrl: req.body.videoUrl || existing.videoUrl || null,
+    };
+
+    activeProctoringStreams.set(key, record);
+    res.json({ success: true, record });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+// @desc    Get all active student proctoring streams & recent sessions
+// @route   GET /api/evaluations/proctoring-streams
+// @access  Public
+const getActiveProctoringStreams = async (req, res) => {
+  try {
+    const now = Date.now();
+    const list = [];
+    for (const [key, item] of activeProctoringStreams.entries()) {
+      // Mark as safely disconnected if no heartbeat for 40 seconds
+      if (item.status === 'active' && (now - item.lastHeartbeat) > 40000) {
+        item.status = 'disconnected';
+      }
+      list.push(item);
+    }
+    res.json({ success: true, streams: list });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+// @desc    Upload & store student proctoring webcam recording video
+// @route   POST /api/evaluations/proctoring-video
+// @access  Public
+const saveProctoringVideo = async (req, res) => {
+  try {
+    const { studentEmail, studentId, studentName, testId, testTitle, videoDataUrl, evaluationId } = req.body;
+    if (!videoDataUrl) {
+      return res.status(400).json({ success: false, message: 'videoDataUrl is required' });
+    }
+
+    const uploadsDir = path.join(__dirname, '..', 'uploads');
+    const proctorDir = path.join(uploadsDir, 'proctoring');
+    if (!fs.existsSync(proctorDir)) {
+      fs.mkdirSync(proctorDir, { recursive: true });
+    }
+
+    const cleanEmail = (studentEmail || 'student').replace(/[^a-zA-Z0-9]/g, '_');
+    const fileName = `proctor_${Date.now()}_${cleanEmail}.webm`;
+    const filePath = path.join(proctorDir, fileName);
+
+    const matches = videoDataUrl.match(/^data:([A-Za-z0-9-+/]+);base64,(.+)$/);
+    if (matches && matches.length === 3) {
+      fs.writeFileSync(filePath, Buffer.from(matches[2], 'base64'));
+    } else {
+      fs.writeFileSync(filePath, videoDataUrl);
+    }
+
+    const publicUrl = `/uploads/proctoring/${fileName}`;
+
+    const key = String(studentEmail || studentId).toLowerCase().trim();
+    if (activeProctoringStreams.has(key)) {
+      const item = activeProctoringStreams.get(key);
+      item.videoUrl = publicUrl;
+      item.status = 'concluded';
+      activeProctoringStreams.set(key, item);
+    }
+
+    // Attach to Evaluation record if present
+    if (evaluationId || (testId && studentEmail)) {
+      const query = evaluationId
+        ? { id: evaluationId }
+        : { studentEmail, $or: [{ testId }, { testTitle }] };
+      await Evaluation.updateMany(query, {
+        $set: {
+          proctoringVideoUrl: publicUrl,
+          proctoringRecordedAt: new Date()
+        }
+      }).catch(() => null);
+    }
+
+    res.json({ success: true, videoUrl: publicUrl, fileName });
+  } catch (err) {
+    console.error('Error saving proctoring video:', err);
+    res.status(500).json({ success: false, message: err.message });
+  }
+};
+
 module.exports = {
   getAllEvaluations,
   getEvaluationById,
@@ -1215,5 +1337,8 @@ module.exports = {
   batchSyncEvaluations,
   clearAllEvaluations,
   deleteEvaluationById,
-  deleteEvaluationsBatch
+  deleteEvaluationsBatch,
+  updateProctoringStream,
+  getActiveProctoringStreams,
+  saveProctoringVideo,
 };

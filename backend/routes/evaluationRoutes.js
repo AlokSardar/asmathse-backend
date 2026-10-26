@@ -10,9 +10,15 @@ const {
   clearAllEvaluations,
   deleteEvaluationById,
   deleteEvaluationsBatch,
+  updateProctoringStream,
+  getActiveProctoringStreams,
+  saveProctoringVideo,
 } = require('../controllers/evaluationController');
 
 router.get('/', getAllEvaluations);
+router.get('/proctoring-streams', getActiveProctoringStreams);
+router.post('/proctoring-stream', updateProctoringStream);
+router.post('/proctoring-video', saveProctoringVideo);
 router.get('/:id', getEvaluationById);
 router.post('/', saveEvaluation);
 router.post('/evaluate-handwritten', evaluateHandwrittenAnswerSheet);
