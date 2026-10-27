@@ -12,23 +12,28 @@ const uploadContent = async (req, res) => {
   const { title, type, stream: rawStream, branch: rawBranch, semester: rawSemester, course: rawCourse, board: rawBoard, classLevel: rawClassLevel, class: rawClass, subject: rawSubject, academicYear, fileUrl } = req.body;
   try {
     const rawC = String(rawCourse || rawBoard || rawStream || '').trim().toLowerCase();
-    const rawCl = rawClassLevel || rawClass;
+    const rawCl = rawClassLevel || rawClass || req.body.class_name || req.body.className;
     
     let course = 'engineering';
     let board = rawBoard || null;
-    let isCbse = false;
-    let isJee = false;
-    let isBsc = false;
-    let isEng = false;
+    let isIcse = rawC.includes('icse') || rawC.includes('isc') || (rawBoard && /icse/i.test(rawBoard));
+    let isCbse = !isIcse && (rawC.includes('cbse') || rawC.includes('school') || (rawBoard && /cbse/i.test(rawBoard)) || (rawCl && /class/i.test(rawCl)));
+    let isSchool = isIcse || isCbse || (rawCl && /class/i.test(rawCl));
+    let isJee = !isSchool && (rawC.includes('jee') || rawC.includes('iit'));
+    let isBsc = !isSchool && !isJee && (rawC.includes('bsc') || rawC.includes('science'));
+    let isEng = !isSchool && !isJee && !isBsc;
 
-    if (rawC.includes('cbse') || rawC.includes('school') || (rawCl && /class/i.test(rawCl))) {
+    if (isIcse) {
+      course = 'icse';
+      board = rawBoard || 'ICSE';
+    } else if (isCbse || isSchool) {
       course = 'cbse';
-      board = board || 'CBSE';
+      board = rawBoard || 'CBSE';
       isCbse = true;
-    } else if (rawC.includes('jee') || rawC.includes('iit')) {
+    } else if (isJee) {
       course = 'jee';
       isJee = true;
-    } else if (rawC.includes('bsc') || rawC.includes('science')) {
+    } else if (isBsc) {
       course = 'bsc';
       isBsc = true;
     } else {
@@ -41,13 +46,12 @@ const uploadContent = async (req, res) => {
     let semester = null;
     let classLevel = null;
     let targetClass = null;
-    let subject = rawSubject || (isCbse ? 'Mathematics' : (isJee ? 'JEE Mathematics' : 'Engineering Mathematics'));
+    let subject = rawSubject || (isSchool ? 'Mathematics' : (isJee ? 'JEE Mathematics' : 'Engineering Mathematics'));
     let isCommon = false;
 
-    if (isCbse) {
-      board = 'CBSE';
+    if (isSchool) {
       branch = null;
-      stream = 'CBSE';
+      stream = board;
       semester = null;
       classLevel = rawClassLevel || rawClass || req.body.class_name || req.body.className || 'Class 9';
       targetClass = classLevel;
@@ -138,9 +142,31 @@ const createAssignment = async (req, res) => {
 const getStudents = async (req, res) => {
   const { stream, semester } = req.params;
   try {
-    // Include WhatsApp numbers so Admin can message them
-    const students = await User.find({ role: 'student', stream, semester: Number(semester) })
-                               .select('-password');
+    const isNum = !isNaN(Number(semester));
+    const query = { role: 'student' };
+    if (/cbse|icse|school/i.test(stream) || !isNum) {
+      query.$or = [
+        { stream: new RegExp(`^${stream}$`, 'i') },
+        { board: new RegExp(`^${stream}$`, 'i') },
+        { targetCourse: new RegExp(`^${stream}$`, 'i') },
+        { course: new RegExp(`^${stream}$`, 'i') }
+      ];
+      if (semester && semester !== 'all') {
+        query.$and = [{
+          $or: [
+            { classLevel: new RegExp(`^${semester}$`, 'i') },
+            { class: new RegExp(`^${semester}$`, 'i') },
+            { class_name: new RegExp(`^${semester}$`, 'i') },
+            { className: new RegExp(`^${semester}$`, 'i') },
+            { semester: semester }
+          ]
+        }];
+      }
+    } else {
+      query.stream = new RegExp(`^${stream}$`, 'i');
+      query.semester = Number(semester);
+    }
+    const students = await User.find(query).select('-password');
     res.json(students);
   } catch (error) {
     res.status(500).json({ message: error.message });

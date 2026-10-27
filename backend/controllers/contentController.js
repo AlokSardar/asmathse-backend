@@ -44,15 +44,30 @@ const getAllContent = async (req, res) => {
     const query = {};
 
     const rawCourse = String(course || board || req.query.stream || '').trim().toLowerCase();
-    const isCbse = rawCourse.includes('cbse') || rawCourse.includes('school') || (classLevel && /class/i.test(String(classLevel))) || (queryClass && /class/i.test(String(queryClass)));
-    const isJee = !isCbse && (rawCourse.includes('jee') || rawCourse.includes('iit'));
-    const isBsc = !isCbse && !isJee && (rawCourse.includes('bsc') || rawCourse.includes('b.sc') || rawCourse.includes('science'));
-    const isEng = !isCbse && !isJee && !isBsc && (rawCourse.includes('eng') || rawCourse.includes('btech') || rawCourse.includes('makaut'));
+    const isIcse = rawCourse.includes('icse') || rawCourse.includes('isc') || (board && /icse/i.test(String(board)));
+    const isCbse = !isIcse && (rawCourse.includes('cbse') || rawCourse.includes('school') || (board && /cbse/i.test(String(board))) || (classLevel && /class/i.test(String(classLevel))) || (queryClass && /class/i.test(String(queryClass))));
+    const isSchool = isIcse || isCbse || (classLevel && /class/i.test(String(classLevel))) || (queryClass && /class/i.test(String(queryClass)));
+    const isJee = !isSchool && (rawCourse.includes('jee') || rawCourse.includes('iit'));
+    const isBsc = !isSchool && !isJee && (rawCourse.includes('bsc') || rawCourse.includes('b.sc') || rawCourse.includes('science'));
+    const isEng = !isSchool && !isJee && !isBsc && (rawCourse.includes('eng') || rawCourse.includes('btech') || rawCourse.includes('makaut'));
 
-    if (isCbse) {
-      // 1. Strict CBSE Board / Course matching (Zero leakage from course:null engineering records)
-      const cbseClauses = [
-        {
+    if (isSchool) {
+      const schoolBoard = isIcse ? 'icse' : (isCbse ? 'cbse' : (board ? String(board).toLowerCase() : null));
+      const schoolClauses = [];
+
+      if (schoolBoard === 'icse') {
+        schoolClauses.push({
+          $or: [
+            { board: /^icse$/i },
+            { course: /^icse$/i },
+            { stream: /^icse$/i },
+            { board: /icse/i },
+            { course: /icse/i },
+            { stream: /icse/i }
+          ]
+        });
+      } else if (schoolBoard === 'cbse') {
+        schoolClauses.push({
           $or: [
             { board: /^cbse$/i },
             { course: /^cbse$/i },
@@ -61,8 +76,18 @@ const getAllContent = async (req, res) => {
             { course: /cbse/i },
             { stream: /cbse/i }
           ]
-        }
-      ];
+        });
+      } else {
+        schoolClauses.push({
+          $or: [
+            { board: /cbse|icse|school/i },
+            { course: /cbse|icse|school/i },
+            { stream: /cbse|icse|school/i },
+            { classLevel: /class/i },
+            { class: /class/i }
+          ]
+        });
+      }
 
       // 2. Exact Class Filtering: matches "Class 9", "9", 9, class_name, className, classNumber
       const targetClass = classLevel || queryClass || req.query.class_name || req.query.className;
@@ -97,7 +122,7 @@ const getAllContent = async (req, res) => {
             { className: numRegex }
           );
         }
-        cbseClauses.push({ $or: classConditions });
+        schoolClauses.push({ $or: classConditions });
       }
 
       // 3. Exact Subject Filtering: matches "Mathematics", "Maths", "Both"
@@ -114,10 +139,10 @@ const getAllContent = async (req, res) => {
           subConditions.push({ subject: /math/i });
           subConditions.push({ subject: /both/i });
         }
-        cbseClauses.push({ $or: subConditions });
+        schoolClauses.push({ $or: subConditions });
       }
 
-      query.$and = cbseClauses;
+      query.$and = schoolClauses;
 
     } else if (isJee) {
       query.$or = [
@@ -168,6 +193,9 @@ const getAllContent = async (req, res) => {
             { course: '' },
             { course: /all/i }
           ]
+        },
+        {
+          board: { $nin: [/^cbse$/i, /^icse$/i] }
         }
       ];
 
@@ -441,28 +469,30 @@ const saveContent = async (req, res) => {
     // 1. Precise Course / Board Determination
     const rawCourse = String(itemData.course || itemData.board || itemData.targetCourse || '').trim().toLowerCase();
     const rawStream = String(itemData.stream || '').trim().toLowerCase();
-    const rawClass = itemData.classLevel || itemData.class;
+    const rawClass = itemData.classLevel || itemData.class || itemData.class_name || itemData.className;
 
     let course = 'engineering';
     let board = itemData.board || null;
-    let isCbse = false;
-    let isJee = false;
-    let isBsc = false;
-    let isEng = false;
+    let isIcse = rawCourse.includes('icse') || rawCourse.includes('isc') || rawStream.includes('icse') || (itemData.board && /icse/i.test(itemData.board));
+    let isCbse = !isIcse && (rawCourse.includes('cbse') || rawCourse.includes('school') || rawStream.includes('cbse') || (itemData.board && /cbse/i.test(itemData.board)) || (rawClass && /class/i.test(rawClass)));
+    let isSchool = isIcse || isCbse || (rawClass && /class/i.test(rawClass));
+    let isJee = !isSchool && (rawCourse.includes('jee') || rawCourse.includes('iit') || rawStream.includes('jee'));
+    let isBsc = !isSchool && !isJee && (rawCourse.includes('bsc') || rawCourse.includes('science') || rawStream.includes('bsc'));
+    let isEng = !isSchool && !isJee && !isBsc;
 
-    if (rawCourse.includes('cbse') || rawCourse.includes('school') || rawStream.includes('cbse') || (rawClass && /class/i.test(rawClass))) {
+    if (isIcse) {
+      course = 'icse';
+      board = itemData.board || 'ICSE';
+    } else if (isCbse || isSchool) {
       course = 'cbse';
-      board = board || 'CBSE';
+      board = itemData.board || 'CBSE';
       isCbse = true;
-    } else if (rawCourse.includes('jee') || rawCourse.includes('iit') || rawStream.includes('jee')) {
+    } else if (isJee) {
       course = 'jee';
-      isJee = true;
-    } else if (rawCourse.includes('bsc') || rawCourse.includes('science') || rawStream.includes('bsc')) {
+    } else if (isBsc) {
       course = 'bsc';
-      isBsc = true;
     } else {
       course = 'engineering';
-      isEng = true;
     }
 
     // 2. Exact Hierarchical Path Metadata Binding (Strict Isolation to Prevent Cross-Contamination)
@@ -471,19 +501,19 @@ const saveContent = async (req, res) => {
     let semester = null;
     let classLevel = null;
     let targetClass = null;
-    let subject = itemData.subject || (isCbse ? 'Mathematics' : (isJee ? 'JEE Mathematics' : 'Engineering Mathematics'));
+    let subject = itemData.subject || (isSchool ? 'Mathematics' : (isJee ? 'JEE Mathematics' : 'Engineering Mathematics'));
     let isCommon1stYr = false;
 
-    if (isCbse) {
-      board = 'CBSE';
+    if (isSchool) {
       branch = null; // Explicitly null to prevent cross-contamination as CSE
-      stream = 'CBSE';
+      stream = board;
       semester = null; // Explicitly null to prevent cross-contamination as Sem 1
       classLevel = itemData.classLevel || itemData.class || itemData.class_name || itemData.className || 'Class 9';
       targetClass = classLevel;
       subject = itemData.subject || 'Mathematics';
       isCommon1stYr = false;
     } else if (isJee) {
+      board = null;
       branch = itemData.branch || 'JEE';
       stream = 'JEE';
       semester = null;
@@ -492,6 +522,7 @@ const saveContent = async (req, res) => {
       subject = itemData.subject || 'JEE Mathematics';
       isCommon1stYr = false;
     } else if (isBsc) {
+      board = null;
       branch = itemData.branch || itemData.stream || 'BSc (Honours) (Major)';
       stream = branch;
       semester = itemData.semester !== undefined && itemData.semester !== null && itemData.semester !== '' ? itemData.semester : 1;
@@ -500,6 +531,7 @@ const saveContent = async (req, res) => {
       subject = itemData.subject || 'Mathematics';
       isCommon1stYr = false;
     } else {
+      board = null;
       branch = itemData.branch || itemData.stream || 'CSE';
       stream = itemData.stream || itemData.branch || 'CSE';
       semester = itemData.semester !== undefined && itemData.semester !== null && itemData.semester !== '' ? itemData.semester : 1;
@@ -538,7 +570,7 @@ const saveContent = async (req, res) => {
       class: targetClass,
       class_name: targetClass,
       className: targetClass,
-      classNumber: isCbse && targetClass ? (parseInt(String(targetClass).replace(/[^0-9]/g, ''), 10) || 9) : null,
+      classNumber: isSchool && targetClass ? (parseInt(String(targetClass).replace(/[^0-9]/g, ''), 10) || null) : null,
       subject,
       targetAudience: itemData.targetAudience || itemData.deploymentTarget || 'all',
       deploymentTarget: itemData.deploymentTarget || itemData.targetAudience || 'all',

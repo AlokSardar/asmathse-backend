@@ -12,7 +12,8 @@ const getStudentContent = async (req, res) => {
 
     // Determine active curriculum/board context
     const rawCourse = String(q.course || q.board || user.targetCourse || user.course || user.board || user.stream || '').trim().toLowerCase();
-    const isCbse = rawCourse.includes('cbse') || rawCourse.includes('school') ||
+    const isIcse = rawCourse.includes('icse') || rawCourse.includes('isc') || (user.board && /icse/i.test(user.board)) || (q.board && /icse/i.test(q.board));
+    const isCbse = !isIcse && (rawCourse.includes('cbse') || rawCourse.includes('school') || (user.board && /cbse/i.test(user.board)) || (q.board && /cbse/i.test(q.board)) ||
       (q.classLevel && /class/i.test(String(q.classLevel))) ||
       (q.class && /class/i.test(String(q.class))) ||
       (q.class_name && /class/i.test(String(q.class_name))) ||
@@ -20,9 +21,10 @@ const getStudentContent = async (req, res) => {
       (user.classLevel && /class/i.test(String(user.classLevel))) ||
       (user.class_name && /class/i.test(String(user.class_name))) ||
       (user.class && /class/i.test(String(user.class))) ||
-      (user.className && /class/i.test(String(user.className)));
-    const isJee = rawCourse.includes('jee') || rawCourse.includes('iit');
-    const isBsc = rawCourse.includes('bsc') || rawCourse.includes('b.sc') || rawCourse.includes('science');
+      (user.className && /class/i.test(String(user.className))));
+    const isSchool = isIcse || isCbse;
+    const isJee = !isSchool && (rawCourse.includes('jee') || rawCourse.includes('iit'));
+    const isBsc = !isSchool && !isJee && (rawCourse.includes('bsc') || rawCourse.includes('b.sc') || rawCourse.includes('science'));
 
     const query = {};
 
@@ -45,14 +47,19 @@ const getStudentContent = async (req, res) => {
       }
     }
 
-    if (isCbse) {
-      // Precise CBSE active context: Board, Class Level, Subject (strictly isolated from engineering/semesters)
+    if (isSchool) {
+      // Precise School active context: Board, Class Level, Subject (strictly isolated from engineering/semesters)
       const activeClass = q.classLevel || q.class || q.class_name || q.className || user.classLevel || user.class || user.class_name || user.className;
       const activeSubject = q.subject || user.subject || 'Mathematics';
+      const targetBoard = isIcse ? 'icse' : 'cbse';
 
-      const cbseClauses = [
+      const schoolClauses = [
         {
-          $or: [
+          $or: targetBoard === 'icse' ? [
+            { board: /^icse$/i },
+            { course: /^icse$/i },
+            { stream: /^icse$/i }
+          ] : [
             { board: /^cbse$/i },
             { course: /^cbse$/i },
             { stream: /^cbse$/i }
@@ -88,7 +95,7 @@ const getStudentContent = async (req, res) => {
             { className: new RegExp(`(^|\\b|class\\s*)${numLevel}(th)?($|\\b)`, 'i') }
           );
         }
-        cbseClauses.push({ $or: classConditions });
+        schoolClauses.push({ $or: classConditions });
       }
 
       if (activeSubject) {
@@ -102,15 +109,15 @@ const getStudentContent = async (req, res) => {
             { subject: /both/i }
           );
         }
-        cbseClauses.push({ $or: subConditions });
+        schoolClauses.push({ $or: subConditions });
       }
 
       if (query.type) {
-        cbseClauses.push({ type: query.type });
+        schoolClauses.push({ type: query.type });
         delete query.type;
       }
 
-      query.$and = cbseClauses;
+      query.$and = schoolClauses;
 
     } else if (isJee) {
       const jeeClauses = [
@@ -245,16 +252,21 @@ const getStudentAssignments = async (req, res) => {
   try {
     const user = req.user || {};
     const rawCourse = String(user.targetCourse || user.course || user.board || user.stream || '').trim().toLowerCase();
-    const isCbse = rawCourse.includes('cbse') || rawCourse.includes('school') ||
+    const isIcse = rawCourse.includes('icse') || rawCourse.includes('isc') || (user.board && /icse/i.test(user.board));
+    const isCbse = !isIcse && (rawCourse.includes('cbse') || rawCourse.includes('school') || (user.board && /cbse/i.test(user.board)) ||
       (user.classLevel && /class/i.test(String(user.classLevel))) ||
       (user.class_name && /class/i.test(String(user.class_name))) ||
       (user.class && /class/i.test(String(user.class))) ||
-      (user.className && /class/i.test(String(user.className)));
+      (user.className && /class/i.test(String(user.className))));
+    const isSchool = isIcse || isCbse;
+    const isJee = !isSchool && (rawCourse.includes('jee') || rawCourse.includes('iit'));
+    const isBsc = !isSchool && !isJee && (rawCourse.includes('bsc') || rawCourse.includes('b.sc') || rawCourse.includes('science'));
 
-    if (isCbse) {
+    if (isSchool) {
       const activeClass = user.classLevel || user.class || user.class_name || user.className;
       const numLevel = activeClass ? String(activeClass).replace(/[^0-9]/g, '') : '';
       const numVal = numLevel ? Number(numLevel) : null;
+      const targetBoard = isIcse ? 'icse' : 'cbse';
 
       const classFilter = [];
       if (activeClass) {
@@ -276,16 +288,17 @@ const getStudentAssignments = async (req, res) => {
         }
       }
 
+      const boardRegex = targetBoard === 'icse' ? /^icse$/i : /^cbse$/i;
       const contentQuery = {
         type: { $in: ['assignment', 'assignments'] },
-        $or: [{ board: /^cbse$/i }, { course: /^cbse$/i }, { stream: /^cbse$/i }]
+        $or: [{ board: boardRegex }, { course: boardRegex }, { stream: boardRegex }]
       };
       if (classFilter.length > 0) {
         contentQuery.$and = [{ $or: classFilter }];
       }
 
       const [assignments, contentAssignments] = await Promise.all([
-        Assignment.find({ $or: [{ stream: /cbse/i }, { board: /cbse/i }] }).sort({ createdAt: -1 }).catch(() => []),
+        Assignment.find({ $or: [{ stream: boardRegex }, { board: boardRegex }] }).sort({ createdAt: -1 }).catch(() => []),
         Content.find(contentQuery).sort({ uploadedAt: -1 }).catch(() => [])
       ]);
 
@@ -298,21 +311,101 @@ const getStudentAssignments = async (req, res) => {
       return res.json(Array.from(map.values()));
     }
 
-    const stream = user.stream || user.branch;
-    const branch = user.branch || user.stream;
+    if (isJee) {
+      const [assignments, contentAssignments] = await Promise.all([
+        Assignment.find({ $or: [{ stream: /jee/i }, { branch: /jee/i }] }).sort({ createdAt: -1 }).catch(() => []),
+        Content.find({
+          type: { $in: ['assignment', 'assignments'] },
+          $or: [{ course: /jee/i }, { stream: /jee/i }, { branch: /jee/i }]
+        }).sort({ uploadedAt: -1 }).catch(() => [])
+      ]);
+      const map = new Map();
+      [...assignments, ...contentAssignments].forEach(a => {
+        const id = String(a.id || a._id || a.title);
+        if (!map.has(id)) map.set(id, a);
+      });
+      return res.json(Array.from(map.values()));
+    }
+
+    if (isBsc) {
+      const branch = user.branch || user.stream || 'BSc (Honours) (Major)';
+      const isHon = /hon|major/i.test(branch);
+      const sem = user.semester ? String(user.semester).replace(/[^0-9]/g, '') : '';
+      const contentQuery = {
+        type: { $in: ['assignment', 'assignments'] },
+        $or: [{ course: /bsc|b\.sc|science/i }, { stream: /bsc/i }],
+        branch: isHon ? /hon|major/i : /gen|pass/i
+      };
+      if (sem) {
+        contentQuery.$and = [{ $or: [{ semester: sem }, { semester: Number(sem) }, { semester: /all/i }, { semester: null }] }];
+      }
+      const [assignments, contentAssignments] = await Promise.all([
+        Assignment.find({ $or: [{ stream: /bsc/i }, { branch: isHon ? /hon|major/i : /gen|pass/i }] }).sort({ createdAt: -1 }).catch(() => []),
+        Content.find(contentQuery).sort({ uploadedAt: -1 }).catch(() => [])
+      ]);
+      const map = new Map();
+      [...assignments, ...contentAssignments].forEach(a => {
+        const id = String(a.id || a._id || a.title);
+        if (!map.has(id)) map.set(id, a);
+      });
+      return res.json(Array.from(map.values()));
+    }
+
+    // Engineering Curriculum
+    const stream = user.stream || user.branch || 'CSE';
+    const branch = user.branch || user.stream || 'CSE';
     const semester = user.semester;
+    const cleanSem = semester !== undefined && semester !== null && semester !== '' ? String(semester).replace(/[^0-9]/g, '') : '';
+    const semNum = Number(cleanSem);
+    const isCommon1stYr = semNum === 1 || semNum === 2;
+
+    const branchConds = [
+      new RegExp(`^${branch}$`, 'i'),
+      /common/i,
+      /^all/i,
+      /unified/i
+    ];
+    if (/cse|computer/i.test(branch)) branchConds.push(/cse|computer|comp/i);
+    else if (/it|information/i.test(branch)) branchConds.push(/it|information|info/i);
+    else if (/ece|electronic/i.test(branch)) branchConds.push(/ece|electronic|comm/i);
+    else if (/ee|electrical/i.test(branch)) branchConds.push(/ee|electrical/i);
+    else if (/me|mech/i.test(branch)) branchConds.push(/me|mech/i);
+    else if (/ce|civil/i.test(branch)) branchConds.push(/ce|civil/i);
+
+    const branchClauses = [
+      ...branchConds.map(r => ({ branch: r })),
+      ...branchConds.map(r => ({ stream: r }))
+    ];
+    if (isCommon1stYr) {
+      branchClauses.push({ isCommonFirstYear: true });
+    }
+
+    const engContentQuery = {
+      type: { $in: ['assignment', 'assignments'] },
+      $or: branchClauses,
+      board: { $nin: [/^cbse$/i, /^icse$/i] }
+    };
+
+    if (cleanSem) {
+      const semConditions = [
+        { semester: cleanSem },
+        { semester: semNum },
+        { semester: /all/i },
+        { semester: null }
+      ];
+      if (isCommon1stYr) {
+        semConditions.push({ branch: /common/i });
+        semConditions.push({ isCommonFirstYear: true });
+      }
+      engContentQuery.$and = [{ $or: semConditions }];
+    }
 
     const [assignments, contentAssignments] = await Promise.all([
-      Assignment.find({ $or: [{ stream }, { stream: branch }, { branch }] }).sort({ createdAt: -1 }).catch(() => []),
-      Content.find({
-        type: { $in: ['assignment', 'assignments'] },
-        $or: [
-          { branch: new RegExp(`^${branch || stream}$`, 'i') },
-          { stream: new RegExp(`^${stream || branch}$`, 'i') },
-          { branch: /common/i },
-          { isCommonFirstYear: true }
-        ]
-      }).sort({ uploadedAt: -1 }).catch(() => [])
+      Assignment.find({
+        $or: [{ stream }, { stream: branch }, { branch }],
+        ...(cleanSem ? { semester: semNum || cleanSem } : {})
+      }).sort({ createdAt: -1 }).catch(() => []),
+      Content.find(engContentQuery).sort({ uploadedAt: -1 }).catch(() => [])
     ]);
 
     const map = new Map();

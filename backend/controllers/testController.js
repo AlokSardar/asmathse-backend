@@ -16,23 +16,27 @@ exports.getTests = async (req, res) => {
   try {
     const { stream, semester, branch, course, board, classLevel, class_name, className, subject, academicYear, academic_year } = req.query;
     const rawCourse = String(course || board || stream || '').trim().toLowerCase();
-    const isCbse = rawCourse.includes('cbse') || rawCourse.includes('school') ||
+    const isIcse = rawCourse.includes('icse') || rawCourse.includes('isc') || (board && /icse/i.test(String(board)));
+    const isCbse = !isIcse && (rawCourse.includes('cbse') || rawCourse.includes('school') || (board && /cbse/i.test(String(board))) ||
       (classLevel && /class/i.test(String(classLevel))) ||
       (req.query.class && /class/i.test(String(req.query.class))) ||
       (class_name && /class/i.test(String(class_name))) ||
-      (className && /class/i.test(String(className)));
+      (className && /class/i.test(String(className))));
+    const isSchool = isIcse || isCbse;
 
     let query = {};
 
-    if (isCbse) {
+    if (isSchool) {
       const activeClass = classLevel || req.query.class || class_name || className;
       const numLevel = activeClass ? String(activeClass).replace(/[^0-9]/g, '') : '';
       const numVal = numLevel ? Number(numLevel) : null;
+      const targetBoard = isIcse ? 'icse' : 'cbse';
+      const boardRegex = targetBoard === 'icse' ? /^icse$/i : /^cbse$/i;
 
-      const cbseConditions = [
-        { board: /^cbse$/i },
-        { course: /^cbse$/i },
-        { stream: /^cbse$/i }
+      const schoolConditions = [
+        { board: boardRegex },
+        { course: boardRegex },
+        { stream: boardRegex }
       ];
 
       const classConditions = [];
@@ -79,22 +83,41 @@ exports.getTests = async (req, res) => {
         }
       }
 
-      const cbseAndClauses = [{ $or: cbseConditions }];
-      if (classConditions.length > 0) cbseAndClauses.push({ $or: classConditions });
-      if (subjectConditions.length > 0) cbseAndClauses.push({ $or: subjectConditions });
+      const schoolAndClauses = [{ $or: schoolConditions }];
+      if (classConditions.length > 0) schoolAndClauses.push({ $or: classConditions });
+      if (subjectConditions.length > 0) schoolAndClauses.push({ $or: subjectConditions });
 
-      query.$and = cbseAndClauses;
+      query.$and = schoolAndClauses;
 
     } else {
+      const andClauses = [];
       if (course) {
-        query.course = new RegExp(`^${course}$`, 'i');
+        if (/bsc|b\.sc|science/i.test(course)) {
+          andClauses.push({ $or: [{ course: /bsc|b\.sc|science/i }, { stream: /bsc/i }] });
+        } else if (/jee|iit/i.test(course)) {
+          andClauses.push({ $or: [{ course: /jee|iit/i }, { stream: /jee/i }] });
+        } else {
+          andClauses.push({
+            $or: [
+              { course: /engineering|btech|b\.tech|makaut|^all$/i },
+              { course: null },
+              { course: { $exists: false } }
+            ]
+          });
+          andClauses.push({ board: { $nin: [/^cbse$/i, /^icse$/i] } });
+        }
       }
 
       const targetBranch = branch || stream;
       if (targetBranch) {
         if (course === 'bsc') {
           const isHonours = /honour|major/i.test(targetBranch);
-          query.branch = isHonours ? /honour|major/i : /general|pass/i;
+          andClauses.push({
+            $or: [
+              { branch: isHonours ? /honour|major/i : /general|pass/i },
+              { stream: isHonours ? /honour|major/i : /general|pass/i }
+            ]
+          });
         } else if (course === 'jee') {
           // Unified JEE matches all JEE tests
         } else {
@@ -118,11 +141,13 @@ exports.getTests = async (req, res) => {
           } else if (/ce|civil/i.test(b)) {
             branchConditions.push(/ce|civil/i);
           }
-          query.$or = [
-            ...branchConditions.map(r => ({ branch: r })),
-            ...branchConditions.map(r => ({ stream: r })),
-            { isCommonFirstYear: true }
-          ];
+          andClauses.push({
+            $or: [
+              ...branchConditions.map(r => ({ branch: r })),
+              ...branchConditions.map(r => ({ stream: r })),
+              { isCommonFirstYear: true }
+            ]
+          });
         }
       }
 
@@ -144,30 +169,28 @@ exports.getTests = async (req, res) => {
           semConditions.push({ branch: /common/i });
           semConditions.push({ isCommonFirstYear: true });
         }
-
-        if (query.$or) {
-          query.$and = [{ $or: query.$or }, { $or: semConditions }];
-          delete query.$or;
-        } else {
-          query.$or = semConditions;
-        }
+        andClauses.push({ $or: semConditions });
       }
 
       if (classLevel && course !== 'jee') {
         const numLevel = String(classLevel).replace(/[^0-9]/g, '');
         if (numLevel) {
-          query.classLevel = new RegExp(`${numLevel}`, 'i');
+          andClauses.push({ classLevel: new RegExp(`${numLevel}`, 'i') });
         } else {
-          query.classLevel = new RegExp(`^${classLevel}$`, 'i');
+          andClauses.push({ classLevel: new RegExp(`^${classLevel}$`, 'i') });
         }
       }
 
       if (subject && course !== 'jee') {
         if (/math/i.test(subject)) {
-          query.subject = /math/i;
+          andClauses.push({ subject: /math/i });
         } else {
-          query.subject = new RegExp(`^${subject}$`, 'i');
+          andClauses.push({ subject: new RegExp(`^${subject}$`, 'i') });
         }
+      }
+
+      if (andClauses.length > 0) {
+        query.$and = andClauses;
       }
     }
 
