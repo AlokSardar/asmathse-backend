@@ -52,95 +52,96 @@ const getAllContent = async (req, res) => {
     const isEng = !isSchool && !isJee && !isBsc && (rawCourse.includes('eng') || rawCourse.includes('btech') || rawCourse.includes('makaut'));
 
     if (isSchool) {
-      const schoolBoard = isIcse ? 'icse' : (isCbse ? 'cbse' : (board ? String(board).toLowerCase() : null));
-      const schoolClauses = [];
+      // 1. Board / Course matching (exact normalized array)
+      const targetBoard = isIcse ? 'icse' : (isCbse ? 'cbse' : (board ? String(board).toLowerCase() : 'cbse'));
+      const boardValues = targetBoard === 'icse'
+        ? ['ICSE', 'icse', 'ISC', 'isc', 'School', 'school', 'All', 'all']
+        : ['CBSE', 'cbse', 'School', 'school', 'NCERT', 'ncert', 'All', 'all'];
 
-      if (schoolBoard === 'icse') {
-        schoolClauses.push({
-          $or: [
-            { board: /^icse$/i },
-            { course: /^icse$/i },
-            { stream: /^icse$/i },
-            { board: /icse/i },
-            { course: /icse/i },
-            { stream: /icse/i }
-          ]
-        });
-      } else if (schoolBoard === 'cbse') {
-        schoolClauses.push({
-          $or: [
-            { board: /^cbse$/i },
-            { course: /^cbse$/i },
-            { stream: /^cbse$/i },
-            { board: /cbse/i },
-            { course: /cbse/i },
-            { stream: /cbse/i }
-          ]
-        });
-      } else {
-        schoolClauses.push({
-          $or: [
-            { board: /cbse|icse|school/i },
-            { course: /cbse|icse|school/i },
-            { stream: /cbse|icse|school/i },
-            { classLevel: /class/i },
-            { class: /class/i }
-          ]
-        });
-      }
+      const boardClause = {
+        $or: [
+          { board: { $in: boardValues } },
+          { course: { $in: boardValues } },
+          { stream: { $in: boardValues } }
+        ]
+      };
 
-      // 2. Exact Class Filtering: matches "Class 9", "9", 9, class_name, className, classNumber
+      // 2. Class Level matching (exact normalized array)
       const targetClass = classLevel || queryClass || req.query.class_name || req.query.className;
+      let classClause = null;
       if (targetClass) {
+        const numLevel = parseInt(String(targetClass).replace(/[^0-9]/g, ''), 10);
         const strVal = String(targetClass).trim();
-        const numLevel = parseInt(strVal.replace(/[^0-9]/g, ''), 10);
-        const classConditions = [
-          { classLevel: new RegExp(`^${escapeRegex(strVal)}$`, 'i') },
-          { class: new RegExp(`^${escapeRegex(strVal)}$`, 'i') },
-          { class_name: new RegExp(`^${escapeRegex(strVal)}$`, 'i') },
-          { className: new RegExp(`^${escapeRegex(strVal)}$`, 'i') },
-          { classLevel: /all/i },
-          { class: /all/i },
-          { class_name: /all/i }
+        const classValues = [
+          strVal,
+          strVal.toLowerCase(),
+          'All',
+          'all',
+          'All Classes',
+          'all classes'
         ];
-
         if (!isNaN(numLevel) && numLevel > 0) {
-          // Exact numeric data type matching in MongoDB Atlas
-          classConditions.push(
-            { classLevel: numLevel },
-            { class: numLevel },
-            { class_name: numLevel },
-            { className: numLevel },
-            { classNumber: numLevel }
-          );
-          // Word boundary regex matching for "Class 9", "9", "9th", "Class 9th"
-          const numRegex = new RegExp(`(^|\\b|class\\s*)${numLevel}(th)?($|\\b)`, 'i');
-          classConditions.push(
-            { classLevel: numRegex },
-            { class: numRegex },
-            { class_name: numRegex },
-            { className: numRegex }
+          classValues.push(
+            `Class ${numLevel}`,
+            `class ${numLevel}`,
+            `Class ${numLevel < 10 ? '0' + numLevel : numLevel}`,
+            `class ${numLevel < 10 ? '0' + numLevel : numLevel}`,
+            String(numLevel),
+            numLevel,
+            `${numLevel}th`,
+            `${numLevel}TH`,
+            `Class ${numLevel}th`,
+            `class ${numLevel}th`
           );
         }
-        schoolClauses.push({ $or: classConditions });
+
+        const classOrConditions = [
+          { class: { $in: classValues } },
+          { classLevel: { $in: classValues } },
+          { class_name: { $in: classValues } },
+          { className: { $in: classValues } }
+        ];
+        if (!isNaN(numLevel) && numLevel > 0) {
+          classOrConditions.push({ classNumber: numLevel });
+        }
+        classClause = { $or: classOrConditions };
       }
 
-      // 3. Exact Subject Filtering: matches "Mathematics", "Maths", "Both"
-      if (subject) {
-        const subStr = String(subject).trim();
-        const subConditions = [
-          { subject: new RegExp(`^${escapeRegex(subStr)}$`, 'i') },
-          { subject: /all/i },
-          { subject: null },
-          { subject: { $exists: false } },
-          { subject: '' }
+      // 3. Subject matching:
+      // If subject is "Both" or "All", all curriculum subjects match
+      // If subject is a specific subject, matches that subject OR "Both" / "All" / null
+      const normSub = String(subject || '').trim().toLowerCase();
+      const isBothOrAll = !normSub || normSub === 'both' || normSub === 'all';
+      let subjectClause = null;
+
+      if (!isBothOrAll && subject) {
+        const subjectValues = [
+          subject,
+          String(subject).trim(),
+          'Both',
+          'both',
+          'All',
+          'all',
+          null,
+          ''
         ];
-        if (/math/i.test(subStr) || /both/i.test(subStr)) {
-          subConditions.push({ subject: /math/i });
-          subConditions.push({ subject: /both/i });
+        if (normSub.includes('math')) {
+          subjectValues.push('Mathematics', 'mathematics', 'Maths', 'maths', 'Math', 'math');
+        } else if (normSub.includes('sci')) {
+          subjectValues.push('Science', 'science', 'General Science', 'general science');
         }
-        schoolClauses.push({ $or: subConditions });
+        subjectClause = {
+          $or: [
+            { subject: { $in: subjectValues } },
+            { subject: { $exists: false } },
+            { subject: null }
+          ]
+        };
       }
+
+      const schoolClauses = [boardClause];
+      if (classClause) schoolClauses.push(classClause);
+      if (subjectClause) schoolClauses.push(subjectClause);
 
       query.$and = schoolClauses;
 

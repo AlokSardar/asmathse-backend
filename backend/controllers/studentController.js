@@ -53,71 +53,91 @@ const getStudentContent = async (req, res) => {
     }
 
     if (isSchool) {
-      // Precise School active context: Board, Class Level, Subject (strictly isolated from engineering/semesters)
-      const activeClass = q.classLevel || q.class || q.class_name || q.className || user.classLevel || user.class || user.class_name || user.className;
-      const activeSubject = q.subject || user.subject || 'Mathematics';
+      // 1. Board / Course matching (exact normalized array)
       const targetBoard = isIcse ? 'icse' : 'cbse';
+      const boardValues = targetBoard === 'icse'
+        ? ['ICSE', 'icse', 'ISC', 'isc', 'School', 'school', 'All', 'all']
+        : ['CBSE', 'cbse', 'School', 'school', 'NCERT', 'ncert', 'All', 'all'];
 
-      const schoolClauses = [
-        {
-          $or: targetBoard === 'icse' ? [
-            { board: /^icse$/i },
-            { course: /^icse$/i },
-            { stream: /^icse$/i }
-          ] : [
-            { board: /^cbse$/i },
-            { course: /^cbse$/i },
-            { stream: /^cbse$/i }
-          ]
-        }
+      const boardClause = {
+        $or: [
+          { board: { $in: boardValues } },
+          { course: { $in: boardValues } },
+          { stream: { $in: boardValues } }
+        ]
+      };
+
+      // 2. Class Level matching (exact normalized array)
+      const activeClass = q.classLevel || q.class || q.class_name || q.className || user.classLevel || user.class || user.class_name || user.className || 'Class 9';
+      const numLevel = parseInt(String(activeClass).replace(/[^0-9]/g, ''), 10);
+      const strClass = String(activeClass).trim();
+
+      const classValues = [
+        strClass,
+        strClass.toLowerCase(),
+        'All',
+        'all',
+        'All Classes',
+        'all classes'
       ];
-
-      if (activeClass) {
-        const numLevel = String(activeClass).replace(/[^0-9]/g, '');
-        const classConditions = [
-          { classLevel: new RegExp(`^${activeClass}$`, 'i') },
-          { class: new RegExp(`^${activeClass}$`, 'i') },
-          { class_name: new RegExp(`^${activeClass}$`, 'i') },
-          { className: new RegExp(`^${activeClass}$`, 'i') },
-          { classLevel: /all/i },
-          { class: /all/i }
-        ];
-        if (numLevel) {
-          const numVal = Number(numLevel);
-          classConditions.push(
-            { classLevel: numVal },
-            { class: numVal },
-            { class_name: numVal },
-            { className: numVal },
-            { classNumber: numVal },
-            { classLevel: numLevel },
-            { class: numLevel },
-            { class_name: numLevel },
-            { className: numLevel },
-            { classLevel: new RegExp(`(^|\\b|class\\s*)${numLevel}(th)?($|\\b)`, 'i') },
-            { class: new RegExp(`(^|\\b|class\\s*)${numLevel}(th)?($|\\b)`, 'i') },
-            { class_name: new RegExp(`(^|\\b|class\\s*)${numLevel}(th)?($|\\b)`, 'i') },
-            { className: new RegExp(`(^|\\b|class\\s*)${numLevel}(th)?($|\\b)`, 'i') }
-          );
-        }
-        schoolClauses.push({ $or: classConditions });
+      if (!isNaN(numLevel) && numLevel > 0) {
+        classValues.push(
+          `Class ${numLevel}`,
+          `class ${numLevel}`,
+          `Class ${numLevel < 10 ? '0' + numLevel : numLevel}`,
+          `class ${numLevel < 10 ? '0' + numLevel : numLevel}`,
+          String(numLevel),
+          numLevel,
+          `${numLevel}th`,
+          `${numLevel}TH`,
+          `Class ${numLevel}th`,
+          `class ${numLevel}th`
+        );
       }
 
-      if (activeSubject) {
-        const subConditions = [
-          { subject: new RegExp(`^${escapeRegex(activeSubject)}$`, 'i') },
-          { subject: /all/i },
-          { subject: null },
-          { subject: { $exists: false } },
-          { subject: '' }
+      const classOrConditions = [
+        { class: { $in: classValues } },
+        { classLevel: { $in: classValues } },
+        { class_name: { $in: classValues } },
+        { className: { $in: classValues } }
+      ];
+      if (!isNaN(numLevel) && numLevel > 0) {
+        classOrConditions.push({ classNumber: numLevel });
+      }
+      const classClause = { $or: classOrConditions };
+
+      // 3. Subject matching:
+      // If student is registered for "Both" or "All", they receive all curriculum subjects
+      // If student is registered for a specific subject, document must match that subject OR be "Both" / "All" / null
+      const activeSubject = q.subject || user.subject || '';
+      const normSub = String(activeSubject).trim().toLowerCase();
+      const isBothOrAll = !normSub || normSub === 'both' || normSub === 'all';
+
+      const schoolClauses = [boardClause, classClause];
+
+      if (!isBothOrAll) {
+        const subjectValues = [
+          activeSubject,
+          String(activeSubject).trim(),
+          'Both',
+          'both',
+          'All',
+          'all',
+          null,
+          ''
         ];
-        if (/math/i.test(activeSubject) || /^both$/i.test(activeSubject)) {
-          subConditions.push(
-            { subject: /math/i },
-            { subject: /both/i }
-          );
+        if (normSub.includes('math')) {
+          subjectValues.push('Mathematics', 'mathematics', 'Maths', 'maths', 'Math', 'math');
+        } else if (normSub.includes('sci')) {
+          subjectValues.push('Science', 'science', 'General Science', 'general science');
         }
-        schoolClauses.push({ $or: subConditions });
+        schoolClauses.push({
+          $or: [
+            { subject: { $in: subjectValues } },
+            { subject: { $exists: false } },
+            { subject: null }
+          ]
+        });
       }
 
       if (query.type) {
@@ -286,35 +306,59 @@ const getStudentAssignments = async (req, res) => {
     const isBsc = !isSchool && !isJee && (rawCourse.includes('bsc') || rawCourse.includes('b.sc') || rawCourse.includes('science'));
 
     if (isSchool) {
-      const activeClass = user.classLevel || user.class || user.class_name || user.className;
-      const numLevel = activeClass ? String(activeClass).replace(/[^0-9]/g, '') : '';
-      const numVal = numLevel ? Number(numLevel) : null;
       const targetBoard = isIcse ? 'icse' : 'cbse';
+      const boardValues = targetBoard === 'icse'
+        ? ['ICSE', 'icse', 'ISC', 'isc', 'School', 'school', 'All', 'all']
+        : ['CBSE', 'cbse', 'School', 'school', 'NCERT', 'ncert', 'All', 'all'];
+
+      const activeClass = user.classLevel || user.class || user.class_name || user.className;
+      const numLevel = activeClass ? parseInt(String(activeClass).replace(/[^0-9]/g, ''), 10) : null;
+      const strClass = activeClass ? String(activeClass).trim() : '';
+
+      const classValues = activeClass ? [
+        strClass,
+        strClass.toLowerCase(),
+        'All',
+        'all',
+        'All Classes',
+        'all classes'
+      ] : [];
+
+      if (numLevel && !isNaN(numLevel) && numLevel > 0) {
+        classValues.push(
+          `Class ${numLevel}`,
+          `class ${numLevel}`,
+          `Class ${numLevel < 10 ? '0' + numLevel : numLevel}`,
+          `class ${numLevel < 10 ? '0' + numLevel : numLevel}`,
+          String(numLevel),
+          numLevel,
+          `${numLevel}th`,
+          `${numLevel}TH`,
+          `Class ${numLevel}th`,
+          `class ${numLevel}th`
+        );
+      }
 
       const classFilter = [];
-      if (activeClass) {
+      if (classValues.length > 0) {
         classFilter.push(
-          { classLevel: new RegExp(`^${activeClass}$`, 'i') },
-          { class: new RegExp(`^${activeClass}$`, 'i') },
-          { class_name: new RegExp(`^${activeClass}$`, 'i') },
-          { className: new RegExp(`^${activeClass}$`, 'i') }
+          { class: { $in: classValues } },
+          { classLevel: { $in: classValues } },
+          { class_name: { $in: classValues } },
+          { className: { $in: classValues } }
         );
-        if (numVal !== null) {
-          classFilter.push(
-            { classNumber: numVal },
-            { classLevel: numVal },
-            { class_name: numVal },
-            { className: numVal },
-            { classLevel: new RegExp(`(^|\\b|class\\s*)${numLevel}(th)?($|\\b)`, 'i') },
-            { class_name: new RegExp(`(^|\\b|class\\s*)${numLevel}(th)?($|\\b)`, 'i') }
-          );
+        if (numLevel && !isNaN(numLevel) && numLevel > 0) {
+          classFilter.push({ classNumber: numLevel });
         }
       }
 
-      const boardRegex = targetBoard === 'icse' ? /^icse$/i : /^cbse$/i;
       const contentQuery = {
         type: { $in: ['assignment', 'assignments'] },
-        $or: [{ board: boardRegex }, { course: boardRegex }, { stream: boardRegex }]
+        $or: [
+          { board: { $in: boardValues } },
+          { course: { $in: boardValues } },
+          { stream: { $in: boardValues } }
+        ]
       };
       if (classFilter.length > 0) {
         contentQuery.$and = [{ $or: classFilter }];
