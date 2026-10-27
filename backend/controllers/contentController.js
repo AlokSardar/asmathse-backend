@@ -296,6 +296,11 @@ const getAllContent = async (req, res) => {
       }
     }
 
+    console.log('[ALL_CONTENT_FETCH_QUERY]', JSON.stringify({
+      incomingQuery: req.query,
+      mongoFilter: query
+    }, null, 2));
+
     const items = await Content.find(query).sort({ uploadedAt: -1, createdAt: -1 });
     res.json(items);
   } catch (error) {
@@ -583,6 +588,21 @@ const saveContent = async (req, res) => {
     // Retain existing answerKey or save provided answerKey without blocking upload modal
     payload.answerKey = itemData.answerKey || existingRecord?.answerKey || null;
     payload.publishedResults = itemData.publishedResults !== undefined ? itemData.publishedResults : (existingRecord?.publishedResults || false);
+
+    console.log('[TEACHER_UPLOAD_PAYLOAD]', JSON.stringify({
+      title: payload.title,
+      type: payload.type,
+      board: payload.board,
+      course: payload.course,
+      classLevel: payload.classLevel,
+      class: payload.class,
+      class_name: payload.class_name,
+      classNumber: payload.classNumber,
+      subject: payload.subject,
+      stream: payload.stream,
+      branch: payload.branch,
+      semester: payload.semester
+    }, null, 2));
 
     // Upsert by custom id or testId
     const saved = await Content.findOneAndUpdate(

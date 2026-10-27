@@ -90,6 +90,21 @@ const uploadContent = async (req, res) => {
     const cleanNum = classLevel ? String(classLevel).replace(/[^0-9]/g, '') : '';
     const classNum = cleanNum ? Number(cleanNum) : null;
 
+    console.log('[ADMIN_UPLOAD_PAYLOAD]', JSON.stringify({
+      title,
+      type: type || 'materials',
+      board,
+      course,
+      classLevel,
+      class: targetClass,
+      class_name: targetClass,
+      classNumber: classNum,
+      subject,
+      stream,
+      branch,
+      semester
+    }, null, 2));
+
     const content = await Content.create({
       title,
       type: type || 'materials',

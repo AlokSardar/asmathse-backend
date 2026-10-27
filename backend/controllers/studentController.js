@@ -2,6 +2,11 @@ const Content = require('../models/Content');
 const Assignment = require('../models/Assignment');
 const Submission = require('../models/Submission');
 
+const escapeRegex = (str) => {
+  if (typeof str !== 'string') return '';
+  return str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+};
+
 // @desc    Get content based on student's stream, branch, course and semester
 // @route   GET /api/student/content
 // @access  Private/Student
@@ -100,8 +105,11 @@ const getStudentContent = async (req, res) => {
 
       if (activeSubject) {
         const subConditions = [
-          { subject: new RegExp(`^${activeSubject}$`, 'i') },
-          { subject: /all/i }
+          { subject: new RegExp(`^${escapeRegex(activeSubject)}$`, 'i') },
+          { subject: /all/i },
+          { subject: null },
+          { subject: { $exists: false } },
+          { subject: '' }
         ];
         if (/math/i.test(activeSubject) || /^both$/i.test(activeSubject)) {
           subConditions.push(
@@ -237,6 +245,21 @@ const getStudentContent = async (req, res) => {
 
       query.$and = engClauses;
     }
+
+    console.log('[STUDENT_PORTAL_FETCH_QUERY]', JSON.stringify({
+      student: {
+        name: user.name,
+        email: user.email,
+        stream: user.stream,
+        board: user.board,
+        targetCourse: user.targetCourse,
+        classLevel: user.classLevel,
+        class: user.class,
+        subject: user.subject
+      },
+      incomingQuery: q,
+      mongoFilter: query
+    }, null, 2));
 
     const contents = await Content.find(query).sort({ uploadedAt: -1, createdAt: -1 });
     res.json(contents);
