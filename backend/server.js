@@ -14,22 +14,30 @@ connectDB();
 
 const app = express();
 
+// Enable CORS globally across all endpoints and static assets
+app.use(cors());
+
 // Ensure local uploads directory exists (Atlas Free Tier file system storage)
 const uploadsDir = path.join(__dirname, 'uploads');
 if (!fs.existsSync(uploadsDir)) {
   fs.mkdirSync(uploadsDir, { recursive: true });
 }
 
-// Serve uploaded files statically (both /uploads and /api/uploads paths supported)
+// Serve uploaded files statically with cross-origin headers (both /uploads and /api/uploads paths supported)
+app.use(['/uploads', '/api/uploads'], (req, res, next) => {
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, HEAD, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', '*');
+  res.setHeader('Cross-Origin-Resource-Policy', 'cross-origin');
+  res.setHeader('X-Frame-Options', 'ALLOWALL');
+  next();
+});
 app.use('/uploads', express.static(uploadsDir));
 app.use('/api/uploads', express.static(uploadsDir));
 
 // High-capacity body parser for base64 documents (PDFs, question sheets, diagrams)
 app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ limit: '50mb', extended: true }));
-
-// Enable CORS
-app.use(cors());
 
 // Route files
 const authRoutes = require('./routes/authRoutes');
@@ -48,6 +56,7 @@ app.use('/api/content', contentRoutes);
 app.use('/api/evaluations', evaluationRoutes);
 app.use('/api/analytics', activityRoutes);
 app.use('/api/notifications', notificationRoutes);
+app.use('/api/notices', notificationRoutes);
 app.use('/api/admin', adminRoutes);
 app.use('/api/student', studentRoutes);
 app.use('/api/tests', testRoutes);

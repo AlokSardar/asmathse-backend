@@ -1,3 +1,4 @@
+const mongoose = require('mongoose');
 const ClassTest = require('../models/ClassTest');
 const Content = require('../models/Content');
 const TestSubmission = require('../models/TestSubmission');
@@ -226,6 +227,27 @@ exports.getTests = async (req, res) => {
     });
 
     res.status(200).json({ success: true, data: mergedTests });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+};
+
+exports.getTestById = async (req, res) => {
+  try {
+    const targetId = req.params.id;
+    const orConditions = [{ id: targetId }, { testId: targetId }];
+    if (mongoose.Types.ObjectId.isValid(targetId)) {
+      orConditions.push({ _id: targetId });
+    }
+    const query = { $or: orConditions };
+    let test = await ClassTest.findOne(query);
+    if (!test) {
+      test = await Content.findOne({ ...query, type: { $in: ['classtest', 'classtests', 'test'] } });
+    }
+    if (!test) {
+      return res.status(404).json({ success: false, message: 'Test not found' });
+    }
+    res.status(200).json({ success: true, data: test });
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
   }
