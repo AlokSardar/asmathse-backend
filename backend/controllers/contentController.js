@@ -185,10 +185,17 @@ const getAllContent = async (req, res) => {
       query.$and = bscClauses;
 
     } else if (isEng || course) {
+      const cleanSem = semester !== undefined && semester !== null && semester !== '' ? String(semester).replace(/[^0-9]/g, '') : '';
+      const semNum = Number(cleanSem);
+      const isSem1 = semNum === 1 || cleanSem === '1';
+
       const engClauses = [
         {
           $or: [
             { course: /engineering|btech|b\.tech|makaut|^all$/i },
+            { board: /engineering/i },
+            { isCommon: true },
+            { targetScope: 'engineering_first_year_common' },
             { course: null },
             { course: { $exists: false } },
             { course: '' },
@@ -200,7 +207,7 @@ const getAllContent = async (req, res) => {
         }
       ];
 
-      if (branch) {
+      if (isSem1 && branch) {
         const b = branch.trim();
         const branchConditions = [
           new RegExp(`^${escapeRegex(b)}$`, 'i'),
@@ -214,34 +221,91 @@ const getAllContent = async (req, res) => {
         else if (/ee|electrical/i.test(b)) branchConditions.push(/ee|electrical/i);
         else if (/me|mech/i.test(b)) branchConditions.push(/me|mech/i);
         else if (/ce|civil/i.test(b)) branchConditions.push(/ce|civil/i);
+        else if (/ai|ds|data/i.test(b)) branchConditions.push(/ai|ds|data/i);
 
-        const branchClauses = [
-          ...branchConditions.map(r => ({ branch: r })),
-          ...branchConditions.map(r => ({ stream: r })),
-          { isCommonFirstYear: true }
-        ];
-        engClauses.push({ $or: branchClauses });
-      }
+        const specificMatch = {
+          $and: [
+            {
+              $or: [
+                ...branchConditions.map(r => ({ branch: r })),
+                ...branchConditions.map(r => ({ stream: r }))
+              ]
+            },
+            {
+              $or: [
+                { semester: cleanSem },
+                { semester: semNum },
+                { semester: String(semester) },
+                { semester: /all/i },
+                { semester: null },
+                { semester: { $exists: false } }
+              ]
+            }
+          ]
+        };
 
-      if (semester !== undefined && semester !== null && semester !== '') {
-        const cleanSem = String(semester).replace(/[^0-9]/g, '');
-        const semNum = Number(cleanSem);
-        const semConditions = [
-          { semester: cleanSem },
-          { semester: String(semester) },
-          { semester: new RegExp(`^${escapeRegex(String(semester))}$`, 'i') },
-          { semester: /all/i },
-          { semester: null },
-          { semester: { $exists: false } }
-        ];
-        if (!isNaN(semNum) && semNum > 0) {
-          semConditions.push({ semester: semNum });
+        const commonMatch = {
+          $or: [
+            { isCommon: true, semester: 1 },
+            { isCommon: true, semester: '1' },
+            { isCommon: true, semester: null },
+            { targetScope: 'engineering_first_year_common' },
+            { board: 'Engineering', semester: 1, isCommon: true },
+            { board: 'Engineering', semester: '1', isCommon: true },
+            { isCommonFirstYear: true },
+            { branch: /common/i },
+            { stream: /common/i }
+          ]
+        };
+
+        engClauses.push({ $or: [specificMatch, commonMatch] });
+      } else {
+        if (branch) {
+          const b = branch.trim();
+          const branchConditions = [
+            new RegExp(`^${escapeRegex(b)}$`, 'i'),
+            /common/i,
+            /^all/i,
+            /unified/i
+          ];
+          if (/cse|computer/i.test(b)) branchConditions.push(/cse|computer|comp/i);
+          else if (/it|information/i.test(b)) branchConditions.push(/it|information|info/i);
+          else if (/ece|electronic/i.test(b)) branchConditions.push(/ece|electronic|comm/i);
+          else if (/ee|electrical/i.test(b)) branchConditions.push(/ee|electrical/i);
+          else if (/me|mech/i.test(b)) branchConditions.push(/me|mech/i);
+          else if (/ce|civil/i.test(b)) branchConditions.push(/ce|civil/i);
+          else if (/ai|ds|data/i.test(b)) branchConditions.push(/ai|ds|data/i);
+
+          const branchClauses = [
+            ...branchConditions.map(r => ({ branch: r })),
+            ...branchConditions.map(r => ({ stream: r })),
+            { isCommonFirstYear: true },
+            { isCommon: true },
+            { targetScope: 'engineering_first_year_common' }
+          ];
+          engClauses.push({ $or: branchClauses });
         }
-        if (semNum === 1 || semNum === 2) {
-          semConditions.push({ branch: /common/i });
-          semConditions.push({ isCommonFirstYear: true });
+
+        if (semester !== undefined && semester !== null && semester !== '') {
+          const semConditions = [
+            { semester: cleanSem },
+            { semester: String(semester) },
+            { semester: new RegExp(`^${escapeRegex(String(semester))}$`, 'i') },
+            { semester: /all/i },
+            { semester: null },
+            { semester: { $exists: false } }
+          ];
+          if (!isNaN(semNum) && semNum > 0) {
+            semConditions.push({ semester: semNum });
+          }
+          if (semNum === 1 || semNum === 2) {
+            semConditions.push({ branch: /common/i });
+            semConditions.push({ isCommonFirstYear: true });
+            semConditions.push({ isCommon: true });
+            semConditions.push({ targetScope: 'engineering_first_year_common' });
+          }
+          engClauses.push({ $or: semConditions });
         }
-        engClauses.push({ $or: semConditions });
       }
 
       query.$and = engClauses;
@@ -537,20 +601,41 @@ const saveContent = async (req, res) => {
       subject = itemData.subject || 'Mathematics';
       isCommon1stYr = false;
     } else {
-      board = null;
       branch = itemData.branch || itemData.stream || 'CSE';
       stream = itemData.stream || itemData.branch || 'CSE';
       semester = itemData.semester !== undefined && itemData.semester !== null && itemData.semester !== '' ? itemData.semester : 1;
       classLevel = null;
       targetClass = null;
       subject = itemData.subject || 'Engineering Mathematics';
-      isCommon1stYr = Boolean(
-        itemData.isCommonFirstYear ||
-        /common/i.test(branch) ||
-        /common/i.test(stream) ||
+
+      const isCommonExplicit = Boolean(
+        itemData.isCommon === true ||
+        itemData.targetScope === 'engineering_first_year_common' ||
+        itemData.isCommonFirstYear === true ||
+        itemData.branch === 'Common 1st Year' ||
+        itemData.stream === 'Common 1st Year' ||
+        itemData.targetAudience === 'common_1st_year' ||
+        itemData.branch === 'All Branches' ||
         (Number(semester) <= 2 && (/common/i.test(branch || '') || /common/i.test(stream || '')))
       );
+
+      if (isCommonExplicit) {
+        board = 'Engineering';
+        semester = 1;
+        branch = itemData.branch || 'Common 1st Year';
+        stream = itemData.stream || itemData.branch || 'Common 1st Year';
+        isCommon1stYr = true;
+      } else {
+        board = null;
+        isCommon1stYr = false;
+      }
     }
+
+    const isEngCommon = Boolean(
+      itemData.isCommon === true ||
+      itemData.targetScope === 'engineering_first_year_common' ||
+      isCommon1stYr
+    ) && !isSchool && !isJee && !isBsc;
 
     const payload = {
       ...itemData,
@@ -568,19 +653,21 @@ const saveContent = async (req, res) => {
       academicYear: targetAcademicYear,
       academic_year: targetAcademicYear,
       course,
-      board,
+      board: isEngCommon ? 'Engineering' : board,
+      isCommon: isEngCommon,
+      targetScope: isEngCommon ? 'engineering_first_year_common' : (itemData.targetScope || null),
       branch,
       stream,
-      semester,
+      semester: isEngCommon ? 1 : semester,
       classLevel,
       class: targetClass,
       class_name: targetClass,
       className: targetClass,
       classNumber: isSchool && targetClass ? (parseInt(String(targetClass).replace(/[^0-9]/g, ''), 10) || null) : null,
       subject,
-      targetAudience: itemData.targetAudience || itemData.deploymentTarget || 'all',
-      deploymentTarget: itemData.deploymentTarget || itemData.targetAudience || 'all',
-      isCommonFirstYear: isCommon1stYr,
+      targetAudience: isEngCommon ? 'common_1st_year' : (itemData.targetAudience || itemData.deploymentTarget || 'all'),
+      deploymentTarget: isEngCommon ? 'common_1st_year' : (itemData.deploymentTarget || itemData.targetAudience || 'all'),
+      isCommonFirstYear: isEngCommon,
     };
 
     // Check if this is an update vs new creation
@@ -602,7 +689,10 @@ const saveContent = async (req, res) => {
       subject: payload.subject,
       stream: payload.stream,
       branch: payload.branch,
-      semester: payload.semester
+      semester: payload.semester,
+      isCommon: payload.isCommon,
+      targetScope: payload.targetScope,
+      isCommonFirstYear: payload.isCommonFirstYear
     }, null, 2));
 
     // Upsert by custom id or testId
@@ -619,6 +709,8 @@ const saveContent = async (req, res) => {
           title: saved.title,
           course: saved.course,
           board: saved.board,
+          isCommon: saved.isCommon,
+          targetScope: saved.targetScope,
           branch: saved.branch,
           stream: saved.stream || saved.branch,
           semester: saved.semester,
@@ -635,7 +727,7 @@ const saveContent = async (req, res) => {
           targetAudience: saved.targetAudience || 'all',
           deploymentTarget: saved.deploymentTarget || 'all',
           targetStudentEmails: Array.isArray(saved.targetStudentEmails) ? saved.targetStudentEmails : [],
-          isCommonFirstYear: isCommon1stYr,
+          isCommonFirstYear: saved.isCommonFirstYear,
           isOnlineTest: Boolean(saved.isOnlineTest),
           questions: Array.isArray(saved.questions) ? saved.questions : [],
           fullMarks: saved.fullMarks || saved.marks || 50,

@@ -206,23 +206,29 @@ const getStudentContent = async (req, res) => {
       // Engineering
       const branch = q.branch || user.branch || user.stream || 'CSE';
       const semester = q.semester !== undefined ? q.semester : user.semester;
+      const cleanSem = semester !== undefined && semester !== null && semester !== '' ? String(semester).replace(/[^0-9]/g, '') : '';
+      const semNum = Number(cleanSem);
+      const isSem1 = semNum === 1 || cleanSem === '1';
+
       const engClauses = [
         {
           $or: [
             { course: /engineering|btech|b\.tech|makaut|^all$/i },
+            { board: /engineering/i },
+            { isCommon: true },
+            { targetScope: 'engineering_first_year_common' },
             { course: null },
             { course: { $exists: false } }
           ]
+        },
+        {
+          board: { $nin: [/^cbse$/i, /^icse$/i] }
         }
       ];
 
-      const cleanSem = semester !== undefined && semester !== null && semester !== '' ? String(semester).replace(/[^0-9]/g, '') : '';
-      const semNum = Number(cleanSem);
-      const isCommon1stYr = semNum === 1 || semNum === 2;
-
-      if (branch) {
+      if (isSem1 && branch) {
         const branchConds = [
-          new RegExp(`^${branch}$`, 'i'),
+          new RegExp(`^${escapeRegex(branch)}$`, 'i'),
           /common/i,
           /^all/i,
           /unified/i
@@ -233,29 +239,84 @@ const getStudentContent = async (req, res) => {
         else if (/ee|electrical/i.test(branch)) branchConds.push(/ee|electrical/i);
         else if (/me|mech/i.test(branch)) branchConds.push(/me|mech/i);
         else if (/ce|civil/i.test(branch)) branchConds.push(/ce|civil/i);
+        else if (/ai|ds|data/i.test(branch)) branchConds.push(/ai|ds|data/i);
 
-        const branchClauses = [
-          ...branchConds.map(r => ({ branch: r })),
-          ...branchConds.map(r => ({ stream: r }))
-        ];
-        if (isCommon1stYr) {
-          branchClauses.push({ isCommonFirstYear: true });
-        }
-        engClauses.push({ $or: branchClauses });
-      }
+        const specificMatch = {
+          $and: [
+            {
+              $or: [
+                ...branchConds.map(r => ({ branch: r })),
+                ...branchConds.map(r => ({ stream: r }))
+              ]
+            },
+            {
+              $or: [
+                { semester: 1 },
+                { semester: '1' },
+                { semester: /all/i },
+                { semester: null },
+                { semester: { $exists: false } }
+              ]
+            }
+          ]
+        };
 
-      if (cleanSem) {
-        const semConditions = [
-          { semester: cleanSem },
-          { semester: semNum },
-          { semester: /all/i },
-          { semester: null }
-        ];
-        if (isCommon1stYr) {
-          semConditions.push({ branch: /common/i });
-          semConditions.push({ isCommonFirstYear: true });
+        const commonMatch = {
+          $or: [
+            { isCommon: true, semester: 1 },
+            { isCommon: true, semester: '1' },
+            { isCommon: true, semester: null },
+            { targetScope: 'engineering_first_year_common' },
+            { board: 'Engineering', semester: 1, isCommon: true },
+            { board: 'Engineering', semester: '1', isCommon: true },
+            { isCommonFirstYear: true },
+            { branch: /common/i },
+            { stream: /common/i }
+          ]
+        };
+
+        engClauses.push({ $or: [specificMatch, commonMatch] });
+      } else {
+        if (branch) {
+          const branchConds = [
+            new RegExp(`^${escapeRegex(branch)}$`, 'i'),
+            /common/i,
+            /^all/i,
+            /unified/i
+          ];
+          if (/cse|computer/i.test(branch)) branchConds.push(/cse|computer|comp/i);
+          else if (/it|information/i.test(branch)) branchConds.push(/it|information|info/i);
+          else if (/ece|electronic/i.test(branch)) branchConds.push(/ece|electronic|comm/i);
+          else if (/ee|electrical/i.test(branch)) branchConds.push(/ee|electrical/i);
+          else if (/me|mech/i.test(branch)) branchConds.push(/me|mech/i);
+          else if (/ce|civil/i.test(branch)) branchConds.push(/ce|civil/i);
+          else if (/ai|ds|data/i.test(branch)) branchConds.push(/ai|ds|data/i);
+
+          const branchClauses = [
+            ...branchConds.map(r => ({ branch: r })),
+            ...branchConds.map(r => ({ stream: r })),
+            { isCommonFirstYear: true },
+            { isCommon: true },
+            { targetScope: 'engineering_first_year_common' }
+          ];
+          engClauses.push({ $or: branchClauses });
         }
-        engClauses.push({ $or: semConditions });
+
+        if (cleanSem) {
+          const semConditions = [
+            { semester: cleanSem },
+            { semester: semNum },
+            { semester: /all/i },
+            { semester: null }
+          ];
+          if (semNum === 1 || semNum === 2) {
+            semConditions.push({ branch: /common/i });
+            semConditions.push({ isCommonFirstYear: true });
+            semConditions.push({ isCommon: true });
+            semConditions.push({ targetScope: 'engineering_first_year_common' });
+          }
+          engClauses.push({ $or: semConditions });
+        }
       }
 
       if (query.type) {
@@ -445,6 +506,8 @@ const getStudentAssignments = async (req, res) => {
     ];
     if (isCommon1stYr) {
       branchClauses.push({ isCommonFirstYear: true });
+      branchClauses.push({ isCommon: true });
+      branchClauses.push({ targetScope: 'engineering_first_year_common' });
     }
 
     const engContentQuery = {
@@ -463,6 +526,8 @@ const getStudentAssignments = async (req, res) => {
       if (isCommon1stYr) {
         semConditions.push({ branch: /common/i });
         semConditions.push({ isCommonFirstYear: true });
+        semConditions.push({ isCommon: true });
+        semConditions.push({ targetScope: 'engineering_first_year_common' });
       }
       engContentQuery.$and = [{ $or: semConditions }];
     }

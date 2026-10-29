@@ -17,6 +17,12 @@ const contentSchema = new mongoose.Schema({
   academicYear: { type: String }, // '2026-2027', etc.
   description: { type: String },
   
+  // Common Engineering & Scope Tags
+  isCommon: { type: Boolean, default: false, index: true },
+  targetScope: { type: String, index: true },
+  isCommonFirstYear: { type: Boolean, default: false, index: true },
+  targetAudience: { type: String, index: true },
+  
   // Resource Type & YouTube Integration
   resourceType: { 
     type: String, 

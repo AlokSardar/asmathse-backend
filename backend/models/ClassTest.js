@@ -12,6 +12,10 @@ const classTestSchema = new mongoose.Schema({
   classLevel: { type: String, index: true },
   subject: { type: String, index: true },
   semester: { type: mongoose.Schema.Types.Mixed },
+  isCommon: { type: Boolean, default: false, index: true },
+  targetScope: { type: String, index: true },
+  isCommonFirstYear: { type: Boolean, default: false, index: true },
+  targetAudience: { type: String, index: true },
   durationMinutes: { type: Number },
   examDate: { type: Date },
   questionPaperUrl: { type: String }, // PDF or image url

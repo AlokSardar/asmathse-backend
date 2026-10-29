@@ -100,6 +100,9 @@ exports.getTests = async (req, res) => {
           andClauses.push({
             $or: [
               { course: /engineering|btech|b\.tech|makaut|^all$/i },
+              { board: /engineering/i },
+              { isCommon: true },
+              { targetScope: 'engineering_first_year_common' },
               { course: null },
               { course: { $exists: false } }
             ]
@@ -140,12 +143,16 @@ exports.getTests = async (req, res) => {
             branchConditions.push(/me|mech/i);
           } else if (/ce|civil/i.test(b)) {
             branchConditions.push(/ce|civil/i);
+          } else if (/ai|ds|data/i.test(b)) {
+            branchConditions.push(/ai|ds|data/i);
           }
           andClauses.push({
             $or: [
               ...branchConditions.map(r => ({ branch: r })),
               ...branchConditions.map(r => ({ stream: r })),
-              { isCommonFirstYear: true }
+              { isCommonFirstYear: true },
+              { isCommon: true },
+              { targetScope: 'engineering_first_year_common' }
             ]
           });
         }
@@ -168,6 +175,8 @@ exports.getTests = async (req, res) => {
         if (semNum === 1 || semNum === 2) {
           semConditions.push({ branch: /common/i });
           semConditions.push({ isCommonFirstYear: true });
+          semConditions.push({ isCommon: true });
+          semConditions.push({ targetScope: 'engineering_first_year_common' });
         }
         andClauses.push({ $or: semConditions });
       }
