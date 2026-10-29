@@ -186,6 +186,10 @@ const evaluateHandwrittenAnswerSheet = async (req, res) => {
           { label: 'Exam Integrity', val: 'Violation' },
         ],
         cheated: true,
+        status: 'disqualified',
+        integrityStatus: 'disqualified',
+        submittedDueToViolation: true,
+        violationReason: 'Anti-cheat security violation: student exited the examination window or switched browser tabs.',
         submittedAt: new Date(),
       };
 

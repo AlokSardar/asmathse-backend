@@ -264,7 +264,7 @@ exports.submitAndEvaluate = async (req, res) => {
       isOnlineTest: Boolean(isOnlineTest),
       studentName,
       studentEmail,
-      status: isOnlineTest ? 'evaluated' : 'evaluating',
+      status: isDisqualified ? 'disqualified' : (isOnlineTest ? 'evaluated' : 'evaluating'),
       aiEvaluation: isOnlineTest ? {
         marksAwarded: isDisqualified ? 0 : (typeof score === 'number' ? score : 0),
         totalMarks: totalMarks,
@@ -277,8 +277,8 @@ exports.submitAndEvaluate = async (req, res) => {
     });
     await submission.save();
 
-    // 2. Mock AI Evaluation Process for handwritten uploads
-    if (!isOnlineTest) {
+    // 2. Mock AI Evaluation Process for handwritten uploads (strictly bypass for disqualified tests)
+    if (!isOnlineTest && !isDisqualified) {
       setTimeout(async () => {
         try {
           const aiEvaluatedSubmission = await TestSubmission.findById(submission._id);

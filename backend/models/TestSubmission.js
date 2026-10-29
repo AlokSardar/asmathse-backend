@@ -18,7 +18,7 @@ const testSubmissionSchema = new mongoose.Schema({
     mistakes: [{ type: String }],
     evaluatedAt: { type: Date }
   },
-  status: { type: String, enum: ['submitted', 'evaluating', 'evaluated'], default: 'submitted' }
+  status: { type: String, enum: ['submitted', 'evaluating', 'evaluated', 'disqualified'], default: 'submitted' }
 }, {
   timestamps: true,
   strict: false
