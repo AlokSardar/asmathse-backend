@@ -649,6 +649,10 @@ const batchSyncUsers = async (req, res) => {
     let synced = 0;
     for (const p of profiles) {
       if (!p.email) continue;
+      // Only sync verified/approved accounts or staff/admin; do not re-create deleted or pending registrations
+      if (p.isApproved === false || p.isApproved === 'false' || p.isRejected === true || p.status === 'rejected') {
+        continue;
+      }
       const existing = await User.findOne({ email: p.email.toLowerCase() });
       if (!existing) {
         await User.create({
@@ -664,6 +668,7 @@ const batchSyncUsers = async (req, res) => {
           stream: p.stream,
           targetCourse: p.targetCourse,
           branch: p.targetCourse,
+          isApproved: p.isApproved !== undefined ? Boolean(p.isApproved) : true,
         });
         synced++;
       }
@@ -786,16 +791,69 @@ const completeOnboarding = async (req, res) => {
 };
 
 // @desc    Get all students pending registration approval
-// @route   GET /api/auth/pending-approvals
+// @route   GET /api/auth/pending-approvals, GET /api/approvals
 // @access  Public / Admin
 const getPendingApprovals = async (req, res) => {
   try {
-    const pendingStudents = await User.find({
-      role: 'student',
+    const pendingQuery = {
       isApproved: false,
-    }).select('-password').sort({ createdAt: -1 });
+      isRejected: { $ne: true },
+      status: { $nin: ['approved', 'rejected'] },
+    };
 
-    res.json(pendingStudents);
+    const pendingUsers = await User.find({
+      role: { $in: ['student', 'Student'] },
+      ...pendingQuery,
+    }).select('-password').sort({ createdAt: -1 }).lean();
+
+    const pendingStudents = await Student.find(pendingQuery).sort({ createdAt: -1 }).lean();
+
+    const seenEmails = new Set();
+    const merged = [];
+
+    // Prioritize users from User collection
+    for (const u of pendingUsers) {
+      const email = (u.email || '').toLowerCase().trim();
+      if (email && !seenEmails.has(email)) {
+        seenEmails.add(email);
+        merged.push({
+          ...u,
+          id: u._id,
+          _id: u._id,
+          name: u.name || 'Student',
+          email: u.email,
+          stream: u.stream || 'Engineering',
+          branch: u.branch || u.targetCourse || '',
+          whatsapp: u.whatsapp || u.phone || u.studentWhatsapp || u.mobile || '',
+          mobile: u.mobile || u.whatsapp || u.phone || '',
+          fatherContact: u.fatherContact || u.fatherWhatsapp || '',
+          registrationDate: u.registrationDate || u.createdAt || new Date(),
+        });
+      }
+    }
+
+    // Add any student records not already present in User collection
+    for (const s of pendingStudents) {
+      const email = (s.email || '').toLowerCase().trim();
+      if (email && !seenEmails.has(email)) {
+        seenEmails.add(email);
+        merged.push({
+          ...s,
+          id: s._id,
+          _id: s._id,
+          name: s.name || 'Student',
+          email: s.email,
+          stream: s.stream || 'Engineering',
+          branch: s.branch || s.targetCourse || '',
+          whatsapp: s.whatsapp || s.studentWhatsapp || '',
+          mobile: s.whatsapp || s.studentWhatsapp || '',
+          fatherContact: s.fatherContact || s.fatherWhatsapp || '',
+          registrationDate: s.registrationDate || s.createdAt || new Date(),
+        });
+      }
+    }
+
+    res.json(merged);
   } catch (error) {
     console.error('Fetch pending approvals error:', error);
     res.status(500).json({ message: error.message });
@@ -803,28 +861,72 @@ const getPendingApprovals = async (req, res) => {
 };
 
 // @desc    Approve a student registration
-// @route   PUT /api/auth/approve/:id
+// @route   PUT /api/auth/approve/:id, PUT /api/approvals/:id
 // @access  Public / Admin
 const approveStudent = async (req, res) => {
   try {
     const { id } = req.params;
-    const user = await User.findById(id);
-    if (!user) {
-      return res.status(404).json({ message: 'Student not found' });
+    const bodyEmail = req.body?.email;
+    const queryEmail = req.query?.email;
+    const isValidId = mongoose.Types.ObjectId.isValid(id);
+
+    let user = null;
+    let student = null;
+
+    if (isValidId) {
+      user = await User.findById(id);
+      student = await Student.findById(id);
     }
 
-    user.isApproved = true;
-    await user.save();
+    const candidateEmail = (user?.email || student?.email || (id && id.includes('@') ? id : '') || bodyEmail || queryEmail || '').toLowerCase().trim();
 
-    await Student.findOneAndUpdate(
-      { email: user.email.toLowerCase() },
-      { isApproved: true },
-      { new: true }
-    ).catch(() => {});
+    if (!user && candidateEmail) {
+      user = await User.findOne({ email: candidateEmail });
+    }
+    if (!student && candidateEmail) {
+      student = await Student.findOne({ email: candidateEmail });
+    }
+
+    if (!user && !student && !isValidId && !candidateEmail) {
+      return res.status(404).json({ message: 'Student approval record not found' });
+    }
+
+    // Update in User collection
+    if (user) {
+      user.isApproved = true;
+      user.isRejected = false;
+      user.status = 'approved';
+      await user.save();
+    } else if (candidateEmail) {
+      await User.updateMany(
+        { email: candidateEmail },
+        { $set: { isApproved: true, isRejected: false, status: 'approved' } }
+      );
+    }
+
+    // Update in Student collection
+    if (student) {
+      student.isApproved = true;
+      student.isRejected = false;
+      student.status = 'approved';
+      await student.save();
+    }
+    if (candidateEmail) {
+      await Student.updateMany(
+        { email: candidateEmail },
+        { $set: { isApproved: true, isRejected: false, status: 'approved' } }
+      );
+    } else if (isValidId) {
+      await Student.findByIdAndUpdate(id, { $set: { isApproved: true, isRejected: false, status: 'approved' } });
+    }
+
+    const approvedName = user?.name || student?.name || 'Student';
+    console.log(`[APPROVAL APPROVE] Activated student account "${approvedName}" (${candidateEmail || id}).`);
 
     res.json({
-      message: `Account for ${user.name} approved successfully. Student can now log in.`,
-      user,
+      success: true,
+      message: `Account for ${approvedName} approved successfully. Student can now log in.`,
+      user: user || student,
     });
   } catch (error) {
     console.error('Approve student error:', error);
@@ -833,21 +935,70 @@ const approveStudent = async (req, res) => {
 };
 
 // @desc    Reject / Delete a pending student registration
-// @route   DELETE /api/auth/reject/:id
+// @route   DELETE /api/auth/reject/:id, DELETE /api/approvals/:id, PUT /api/approvals/:id (with status=rejected)
 // @access  Public / Admin
 const rejectStudent = async (req, res) => {
   try {
     const { id } = req.params;
-    const user = await User.findById(id);
-    if (!user) {
-      return res.status(404).json({ message: 'Student not found' });
+    const bodyEmail = req.body?.email;
+    const queryEmail = req.query?.email;
+    const isValidId = mongoose.Types.ObjectId.isValid(id);
+
+    let user = null;
+    let student = null;
+
+    if (isValidId) {
+      user = await User.findById(id);
+      student = await Student.findById(id);
     }
 
-    const email = user.email.toLowerCase();
-    await User.findByIdAndDelete(id);
-    await Student.findOneAndDelete({ email }).catch(() => {});
+    const targetEmail = (user?.email || student?.email || (id && id.includes('@') ? id : '') || bodyEmail || queryEmail || '').toLowerCase().trim();
 
-    res.json({ message: `Registration for ${user.name} rejected and deleted.` });
+    if (!user && targetEmail) {
+      user = await User.findOne({ email: targetEmail });
+    }
+    if (!student && targetEmail) {
+      student = await Student.findOne({ email: targetEmail });
+    }
+
+    const studentName = user?.name || student?.name || 'Student';
+
+    // Build deletion queries for both User and Student collections
+    const userOr = [];
+    if (isValidId) userOr.push({ _id: id });
+    if (user?._id) userOr.push({ _id: user._id });
+    if (targetEmail) userOr.push({ email: targetEmail });
+
+    let deletedUsersCount = 0;
+    if (userOr.length > 0) {
+      const delUserResult = await User.deleteMany({ $or: userOr });
+      deletedUsersCount = delUserResult.deletedCount || 0;
+    }
+
+    const studentOr = [];
+    if (isValidId) {
+      studentOr.push({ _id: id });
+      studentOr.push({ userId: id });
+    }
+    if (student?._id) studentOr.push({ _id: student._id });
+    if (targetEmail) studentOr.push({ email: targetEmail });
+
+    let deletedStudentsCount = 0;
+    if (studentOr.length > 0) {
+      const delStudentResult = await Student.deleteMany({ $or: studentOr });
+      deletedStudentsCount = delStudentResult.deletedCount || 0;
+    }
+
+    console.log(`[APPROVAL REJECT] Permanently deleted pending student registration for "${studentName}" (${targetEmail || id}). Removed ${deletedUsersCount} user(s) and ${deletedStudentsCount} student(s).`);
+
+    res.json({
+      success: true,
+      message: `Registration for ${studentName} rejected and permanently deleted.`,
+      deletedId: id,
+      deletedEmail: targetEmail,
+      deletedUsersCount,
+      deletedStudentsCount,
+    });
   } catch (error) {
     console.error('Reject student error:', error);
     res.status(500).json({ message: error.message });

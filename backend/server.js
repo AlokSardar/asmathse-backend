@@ -49,9 +49,11 @@ const adminRoutes = require('./routes/adminRoutes');
 const studentRoutes = require('./routes/studentRoutes');
 const testRoutes = require('./routes/testRoutes');
 const feeRoutes = require('./routes/feeRoutes');
+const approvalRoutes = require('./routes/approvalRoutes');
 
 // Mount routers
 app.use('/api/auth', authRoutes);
+app.use('/api/approvals', approvalRoutes);
 app.use('/api/content', contentRoutes);
 app.use('/api/evaluations', evaluationRoutes);
 app.use('/api/analytics', activityRoutes);

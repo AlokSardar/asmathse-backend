@@ -43,9 +43,16 @@ router.post('/batch', batchSyncUsers);
 router.post('/forgot-password', forgotPassword);
 router.post('/reset-password/:token', resetPassword);
 
-// Student Registration Approvals
+// Student Registration Approvals (With full HTTP verb and alias support)
 router.get('/pending-approvals', getPendingApprovals);
+router.get('/approvals', getPendingApprovals);
 router.put('/approve/:id', approveStudent);
+router.post('/approve/:id', approveStudent);
+router.put('/approvals/:id', approveStudent);
 router.delete('/reject/:id', rejectStudent);
+router.put('/reject/:id', rejectStudent);
+router.post('/reject/:id', rejectStudent);
+router.delete('/approvals/:id', rejectStudent);
+router.delete('/pending-approvals/:id', rejectStudent);
 
 module.exports = router;
