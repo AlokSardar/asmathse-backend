@@ -848,31 +848,102 @@ const batchSyncContent = async (req, res) => {
 const deleteContent = async (req, res) => {
   try {
     const targetId = req.params.id;
-    const item = await Content.findOne(buildIdQuery(targetId));
-    if (!item) {
-      return res.status(404).json({ message: 'Content item not found' });
+    if (!targetId) {
+      return res.status(400).json({ success: false, message: 'Target ID is required' });
     }
 
-    // Clean up file on disk if stored locally
-    if (item.filePath) {
+    const idQuery = buildIdQuery(targetId);
+
+    // Search both Content and ClassTest collections for target item
+    const [contentItem, classTestItem] = await Promise.all([
+      Content.findOne(idQuery).catch(() => null),
+      ClassTest.findOne(idQuery).catch(() => null)
+    ]);
+
+    if (!contentItem && !classTestItem) {
+      // Direct deletion attempt by ID across collections
+      const [delC, delT] = await Promise.all([
+        Content.deleteMany(idQuery),
+        ClassTest.deleteMany(idQuery).catch(() => ({ deletedCount: 0 }))
+      ]);
+      if ((delC && delC.deletedCount > 0) || (delT && delT.deletedCount > 0)) {
+        return res.json({ success: true, message: 'Item permanently deleted from MongoDB Atlas' });
+      }
+      return res.status(404).json({ success: false, message: 'Content item not found' });
+    }
+
+    // Collect all identifying keys to ensure full cross-collection cascade deletion
+    const allIds = new Set([targetId]);
+    const allTitles = new Set();
+    const allTestIds = new Set();
+    const filePathsToClean = new Set();
+
+    if (contentItem) {
+      if (contentItem.id) allIds.add(String(contentItem.id));
+      if (contentItem._id) allIds.add(String(contentItem._id));
+      if (contentItem.testId) allTestIds.add(String(contentItem.testId));
+      if (contentItem.title) allTitles.add(String(contentItem.title));
+      if (contentItem.filePath) filePathsToClean.add(contentItem.filePath);
+    }
+
+    if (classTestItem) {
+      if (classTestItem.id) allIds.add(String(classTestItem.id));
+      if (classTestItem._id) allIds.add(String(classTestItem._id));
+      if (classTestItem.testId) allTestIds.add(String(classTestItem.testId));
+      if (classTestItem.title) allTitles.add(String(classTestItem.title));
+      if (classTestItem.questionPaperUrl && !classTestItem.questionPaperUrl.startsWith('data:') && !classTestItem.questionPaperUrl.startsWith('http')) {
+        filePathsToClean.add(path.basename(classTestItem.questionPaperUrl));
+      }
+    }
+
+    const deleteOr = [];
+    allIds.forEach(idVal => {
+      deleteOr.push({ id: idVal });
+      if (mongoose.Types.ObjectId.isValid(idVal)) {
+        deleteOr.push({ _id: new mongoose.Types.ObjectId(idVal) });
+      }
+    });
+    allTestIds.forEach(tId => {
+      deleteOr.push({ testId: tId });
+    });
+
+    const isTestItem = (contentItem && ['classtest', 'classtests', 'test'].includes(contentItem.type)) || Boolean(classTestItem);
+    if (isTestItem && allTitles.size > 0) {
+      allTitles.forEach(t => {
+        deleteOr.push({ title: t });
+      });
+    }
+
+    const finalDeleteFilter = { $or: deleteOr };
+
+    // Execute permanent deletion on MongoDB Atlas
+    await Promise.all([
+      Content.deleteMany(finalDeleteFilter),
+      ClassTest.deleteMany(finalDeleteFilter).catch(() => null),
+      Notification.deleteMany({
+        $or: [
+          { contentId: { $in: Array.from(allIds) } },
+          { title: { $in: Array.from(allTitles) } }
+        ]
+      }).catch(() => null)
+    ]);
+
+    // Clean up local disk file if any
+    filePathsToClean.forEach(fp => {
       try {
-        const fullDiskPath = path.join(uploadsDir, item.filePath);
+        const fullDiskPath = path.join(uploadsDir, fp);
         if (fs.existsSync(fullDiskPath)) {
           fs.unlinkSync(fullDiskPath);
         }
       } catch (fileErr) {
         console.warn('Notice: Local file cleanup:', fileErr.message);
       }
-    }
+    });
 
-    await Content.deleteOne({ _id: item._id });
-
-    // Clean up associated notifications
-    await Notification.deleteMany({ contentId: item.id }).catch(() => {});
-
-    res.json({ success: true, message: 'Item and file permanently deleted' });
+    res.json({ success: true, message: 'Item and file permanently deleted from MongoDB Atlas' });
   } catch (error) {
-    res.status(500).json({ message: error.message });
+    console.error('Delete content error:', error);
+    res.status(500).json({ success: false, message: error.message });
   }
 };
 
@@ -881,11 +952,14 @@ const deleteContent = async (req, res) => {
 // @access  Public
 const clearAllContent = async (req, res) => {
   try {
-    await Content.deleteMany({});
-    await Notification.deleteMany({});
-    res.json({ success: true, message: 'All content cleared from MongoDB Atlas' });
+    await Promise.all([
+      Content.deleteMany({}),
+      ClassTest.deleteMany({}),
+      Notification.deleteMany({})
+    ]);
+    res.json({ success: true, message: 'All content and class tests permanently cleared from MongoDB Atlas' });
   } catch (error) {
-    res.status(500).json({ message: error.message });
+    res.status(500).json({ success: false, message: error.message });
   }
 };
 

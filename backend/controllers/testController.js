@@ -2,6 +2,7 @@ const mongoose = require('mongoose');
 const ClassTest = require('../models/ClassTest');
 const Content = require('../models/Content');
 const TestSubmission = require('../models/TestSubmission');
+const Notification = require('../models/Notification');
 
 exports.createTest = async (req, res) => {
   try {
@@ -334,6 +335,107 @@ exports.submitAndEvaluate = async (req, res) => {
       isDisqualified,
       submission
     });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+};
+
+// @desc    Delete a class test permanently
+// @route   DELETE /api/tests/:id
+// @access  Public
+exports.deleteTest = async (req, res) => {
+  try {
+    const targetId = req.params.id;
+    if (!targetId) {
+      return res.status(400).json({ success: false, message: 'Test ID is required' });
+    }
+
+    const deleteOr = [{ id: targetId }, { testId: targetId }];
+    if (mongoose.Types.ObjectId.isValid(targetId)) {
+      deleteOr.push({ _id: new mongoose.Types.ObjectId(targetId) });
+    }
+    const idQuery = { $or: deleteOr };
+
+    const [classTestItem, contentItem] = await Promise.all([
+      ClassTest.findOne(idQuery).catch(() => null),
+      Content.findOne(idQuery).catch(() => null)
+    ]);
+
+    const allIds = new Set([targetId]);
+    const allTitles = new Set();
+    const allTestIds = new Set([targetId]);
+
+    if (classTestItem) {
+      if (classTestItem.id) allIds.add(String(classTestItem.id));
+      if (classTestItem._id) allIds.add(String(classTestItem._id));
+      if (classTestItem.testId) allTestIds.add(String(classTestItem.testId));
+      if (classTestItem.title) allTitles.add(String(classTestItem.title));
+    }
+
+    if (contentItem) {
+      if (contentItem.id) allIds.add(String(contentItem.id));
+      if (contentItem._id) allIds.add(String(contentItem._id));
+      if (contentItem.testId) allTestIds.add(String(contentItem.testId));
+      if (contentItem.title) allTitles.add(String(contentItem.title));
+    }
+
+    const finalOr = [];
+    allIds.forEach(idVal => {
+      finalOr.push({ id: idVal });
+      if (mongoose.Types.ObjectId.isValid(idVal)) {
+        finalOr.push({ _id: new mongoose.Types.ObjectId(idVal) });
+      }
+    });
+    allTestIds.forEach(tId => {
+      finalOr.push({ testId: tId });
+    });
+    allTitles.forEach(t => {
+      finalOr.push({ title: t });
+    });
+
+    const finalFilter = { $or: finalOr };
+
+    // Execute permanent deletion on MongoDB Atlas
+    const [delTest, delContent] = await Promise.all([
+      ClassTest.deleteMany(finalFilter),
+      Content.deleteMany(finalFilter),
+      TestSubmission.deleteMany({
+        $or: [
+          { testId: { $in: Array.from(allTestIds).concat(Array.from(allIds)) } }
+        ]
+      }).catch(() => null),
+      Notification.deleteMany({
+        $or: [
+          { contentId: { $in: Array.from(allIds) } },
+          { title: { $in: Array.from(allTitles) } }
+        ]
+      }).catch(() => null)
+    ]);
+
+    res.json({
+      success: true,
+      message: 'Class test permanently deleted from MongoDB Atlas',
+      deletedClassTests: delTest?.deletedCount || 0,
+      deletedContent: delContent?.deletedCount || 0
+    });
+  } catch (err) {
+    console.error('Delete test error:', err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+};
+
+// @desc    Clear all class tests permanently
+// @route   DELETE /api/tests
+// @access  Public
+exports.clearAllTests = async (req, res) => {
+  try {
+    await Promise.all([
+      ClassTest.deleteMany({}),
+      Content.deleteMany({ type: { $in: ['classtest', 'classtests', 'test'] } }),
+      TestSubmission.deleteMany({}),
+      Notification.deleteMany({ type: { $in: ['test', 'classtest'] } }).catch(() => null)
+    ]);
+    res.json({ success: true, message: 'All class tests permanently cleared from MongoDB Atlas' });
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
   }
