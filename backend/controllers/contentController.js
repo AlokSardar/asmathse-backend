@@ -673,6 +673,37 @@ const saveContent = async (req, res) => {
     // Check if this is an update vs new creation
     const existingRecord = await Content.findOne({ $or: [{ id }, ...(testId ? [{ testId }] : [])] });
 
+    // ── Duplicate Test Name Validation & Prevention ─────────────────
+    if (isClassTest) {
+      const candidateTitle = String(payload.title || '').trim();
+      const titleRegex = new RegExp(`^${escapeRegex(candidateTitle)}$`, 'i');
+
+      const courseFilter = payload.course ? { course: new RegExp(`^${escapeRegex(String(payload.course))}$`, 'i') } : {};
+      const semFilter = payload.semester !== undefined && payload.semester !== null ? { semester: payload.semester } : {};
+      const classFilter = payload.classLevel ? { $or: [{ classLevel: payload.classLevel }, { class: payload.classLevel }] } : {};
+
+      const existingDup = await Content.findOne({
+        type: { $in: ['classtest', 'classtests', 'test'] },
+        title: titleRegex,
+        ...courseFilter,
+        ...semFilter,
+        ...classFilter
+      });
+
+      if (existingDup) {
+        const isSelf = String(existingDup.id) === String(id) || 
+                       String(existingDup._id) === String(id) || 
+                       (existingRecord && String(existingDup._id) === String(existingRecord._id)) ||
+                       (existingDup.testId && testId && String(existingDup.testId) === String(testId));
+        if (!isSelf) {
+          return res.status(409).json({
+            success: false,
+            message: 'A test with this name already exists. Please use a unique title.'
+          });
+        }
+      }
+    }
+
     // Retain existing answerKey or save provided answerKey without blocking upload modal
     payload.answerKey = itemData.answerKey || existingRecord?.answerKey || null;
     payload.publishedResults = itemData.publishedResults !== undefined ? itemData.publishedResults : (existingRecord?.publishedResults || false);
@@ -695,9 +726,20 @@ const saveContent = async (req, res) => {
       isCommonFirstYear: payload.isCommonFirstYear
     }, null, 2));
 
-    // Upsert by custom id or testId
+    // Upsert by custom id, testId, or title to strictly prevent twin copies
+    const upsertFilter = {
+      $or: [
+        { id },
+        ...(testId ? [{ testId }] : []),
+        ...(isClassTest && payload.title ? [{ 
+          title: new RegExp(`^${escapeRegex(payload.title.trim())}$`, 'i'), 
+          type: { $in: ['classtest', 'classtests', 'test'] } 
+        }] : [])
+      ]
+    };
+
     const saved = await Content.findOneAndUpdate(
-      { $or: [{ id }, ...(testId ? [{ testId }] : [])] },
+      upsertFilter,
       { $set: payload },
       { new: true, upsert: true, runValidators: false }
     );
@@ -706,6 +748,8 @@ const saveContent = async (req, res) => {
     if (isClassTest) {
       try {
         const ctDoc = {
+          id: saved.id,
+          testId: saved.testId || saved.id,
           title: saved.title,
           course: saved.course,
           board: saved.board,
@@ -814,9 +858,15 @@ const batchSyncContent = async (req, res) => {
         normalized.classLevel = item.classLevel || item.class || 'Class 9';
         normalized.class = normalized.classLevel;
       }
+
+      const isTest = ['classtest', 'classtests', 'test'].includes(String(item.type).toLowerCase());
+      const filter = isTest && item.title
+        ? { $or: [{ id }, { title: item.title, course: normalized.course }] }
+        : { id };
+
       return {
         updateOne: {
-          filter: { id },
+          filter,
           update: { 
             $set: { 
               ...normalized, 

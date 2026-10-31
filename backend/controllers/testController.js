@@ -6,6 +6,20 @@ const Notification = require('../models/Notification');
 
 exports.createTest = async (req, res) => {
   try {
+    const { title, course, semester, classLevel } = req.body;
+    if (title) {
+      const candidateTitle = String(title).trim();
+      const existing = await ClassTest.findOne({
+        title: new RegExp(`^${candidateTitle.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i'),
+        ...(course ? { course: new RegExp(`^${String(course).trim()}$`, 'i') } : {})
+      });
+      if (existing) {
+        return res.status(409).json({
+          success: false,
+          message: 'A test with this name already exists. Please use a unique title.'
+        });
+      }
+    }
     const test = new ClassTest(req.body);
     await test.save();
     res.status(201).json({ success: true, data: test });
@@ -437,6 +451,151 @@ exports.clearAllTests = async (req, res) => {
     ]);
     res.json({ success: true, message: 'All class tests permanently cleared from MongoDB Atlas' });
   } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+};
+
+// @desc    Purge dummy / debug tests and deduplicate twin copies
+// @route   POST /api/tests/cleanup-dummy
+// @access  Public
+exports.cleanupDummyTests = async (req, res) => {
+  try {
+    const dummyPatterns = [
+      /^test$/i,
+      /^test\s*\d+$/i,
+      /^test_for_final_exam/i,
+      /final\s*(test|design\s*test)/i,
+      /debug/i,
+      /dummy/i,
+      /sample\s*test/i,
+      /demo\s*test/i,
+      /^q\s*check$/i,
+      /^path\s*check$/i,
+      /^ff$/i,
+      /^fr$/i,
+      /^kaka$/i,
+      /^hijibiji$/i,
+      /^arnab$/i,
+      /^ganesh$/i,
+      /^pramila$/i,
+      /^suman_test$/i
+    ];
+
+    const dummyQuery = {
+      $or: [
+        ...dummyPatterns.map(p => ({ title: p })),
+        { title: { $exists: false } },
+        { title: '' },
+        { title: null }
+      ]
+    };
+
+    // 1. Permanently delete all tests matching dummy/debug patterns
+    const [matchingContent, matchingClassTests] = await Promise.all([
+      Content.find({
+        type: { $in: ['classtest', 'classtests', 'test'] },
+        ...dummyQuery
+      }).lean(),
+      ClassTest.find(dummyQuery).lean()
+    ]);
+
+    const allDummyIds = new Set();
+    const allDummyTitles = new Set();
+    const allDummyTestIds = new Set();
+
+    [...matchingContent, ...matchingClassTests].forEach(item => {
+      if (item._id) allDummyIds.add(String(item._id));
+      if (item.id) allDummyIds.add(String(item.id));
+      if (item.testId) allDummyTestIds.add(String(item.testId));
+      if (item.title) allDummyTitles.add(item.title);
+    });
+
+    let deletedDummyCount = 0;
+    if (allDummyIds.size > 0 || allDummyTitles.size > 0) {
+      const deleteFilter = {
+        $or: [
+          ...Array.from(allDummyIds).map(idVal => {
+            const cond = [{ id: idVal }];
+            if (mongoose.Types.ObjectId.isValid(idVal)) {
+              cond.push({ _id: new mongoose.Types.ObjectId(idVal) });
+            }
+            return cond;
+          }).flat(),
+          ...Array.from(allDummyTestIds).map(tId => ({ testId: tId })),
+          ...Array.from(allDummyTitles).map(t => ({ title: t }))
+        ]
+      };
+
+      const [delC, delCT] = await Promise.all([
+        Content.deleteMany(deleteFilter),
+        ClassTest.deleteMany(deleteFilter),
+        TestSubmission.deleteMany({
+          $or: [
+            { testId: { $in: Array.from(allDummyTestIds).concat(Array.from(allDummyIds)) } },
+            { testTitle: { $in: Array.from(allDummyTitles) } }
+          ]
+        }).catch(() => null),
+        Notification.deleteMany({
+          $or: [
+            { contentId: { $in: Array.from(allDummyIds) } },
+            { title: { $in: Array.from(allDummyTitles) } }
+          ]
+        }).catch(() => null)
+      ]);
+      deletedDummyCount = (delC.deletedCount || 0) + (delCT.deletedCount || 0);
+    }
+
+    // 2. Twin / Duplicate Copy Deduplication on Remaining Verified Tests
+    const remainingContentTests = await Content.find({
+      type: { $in: ['classtest', 'classtests', 'test'] }
+    }).sort({ createdAt: -1, uploadedAt: -1 });
+
+    const seenTests = new Map();
+    const duplicateIdsToDelete = [];
+
+    remainingContentTests.forEach(testDoc => {
+      const normTitle = String(testDoc.title || '').trim().toLowerCase();
+      const groupKey = `${testDoc.course || ''}_${testDoc.semester || testDoc.classLevel || ''}_${normTitle}`;
+      if (seenTests.has(groupKey)) {
+        duplicateIdsToDelete.push(testDoc._id);
+      } else {
+        seenTests.set(groupKey, testDoc);
+      }
+    });
+
+    if (duplicateIdsToDelete.length > 0) {
+      await Content.deleteMany({ _id: { $in: duplicateIdsToDelete } });
+    }
+
+    const remainingClassTests = await ClassTest.find({}).sort({ createdAt: -1, examDate: -1 });
+    const seenClassTests = new Map();
+    const duplicateClassTestIdsToDelete = [];
+
+    remainingClassTests.forEach(testDoc => {
+      const normTitle = String(testDoc.title || '').trim().toLowerCase();
+      const groupKey = `${testDoc.course || ''}_${testDoc.semester || testDoc.classLevel || ''}_${normTitle}`;
+      if (seenClassTests.has(groupKey)) {
+        duplicateClassTestIdsToDelete.push(testDoc._id);
+      } else {
+        seenClassTests.set(groupKey, testDoc);
+      }
+    });
+
+    if (duplicateClassTestIdsToDelete.length > 0) {
+      await ClassTest.deleteMany({ _id: { $in: duplicateClassTestIdsToDelete } });
+    }
+
+    const totalCleaned = deletedDummyCount + duplicateIdsToDelete.length + duplicateClassTestIdsToDelete.length;
+
+    res.json({
+      success: true,
+      message: `Cleaned up ${totalCleaned} dummy and duplicate test entries from MongoDB Atlas.`,
+      deletedDummyCount,
+      deletedDuplicatesCount: duplicateIdsToDelete.length + duplicateClassTestIdsToDelete.length,
+      cleanedTitles: Array.from(allDummyTitles)
+    });
+  } catch (err) {
+    console.error('Error cleaning dummy tests:', err);
     res.status(500).json({ success: false, error: err.message });
   }
 };
