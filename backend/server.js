@@ -95,6 +95,19 @@ app.use('/api/fees', feeRoutes);
 const { solveStudentDoubt } = require('./controllers/studentController');
 app.post(['/api/solve-doubt', '/api/doubt'], doubtLimiter, solveStudentDoubt);
 
+// ── Lightweight Health Routes for External Uptime Pingers ────────────────────────
+// Responds with instant 200 OK without database queries or rate limiting.
+// Used by uptime monitoring services (e.g. UptimeRobot, BetterUptime, cron-job.org)
+// to keep Render free-tier instances active and prevent cold starts.
+app.all(['/health', '/healthz', '/api/health/ping'], (req, res) => {
+  res.status(200).json({
+    status: 'ok',
+    uptime: Math.floor(process.uptime()),
+    timestamp: new Date().toISOString(),
+    service: 'as-maths-educator-backend',
+  });
+});
+
 // Database Health & Status check endpoint
 app.get('/api/health', async (req, res) => {
   const state = mongoose.connection.readyState;

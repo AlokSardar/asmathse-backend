@@ -18,10 +18,12 @@ const apiLimiter = rateLimit({
     message: 'Too many requests from this IP address. Please try again after 15 minutes.',
   },
   skip: (req) => {
-    // Do not rate-limit health checks or static uploads
+    // Do not rate-limit health checks, pingers, or static uploads
     return (
       req.path === '/api/health' ||
       req.path === '/health' ||
+      req.path === '/healthz' ||
+      req.path === '/api/health/ping' ||
       req.path.startsWith('/uploads') ||
       req.path.startsWith('/api/uploads')
     );
