@@ -5,6 +5,7 @@ const Evaluation = require('../models/Evaluation');
 const Content = require('../models/Content');
 const ClassTest = require('../models/ClassTest');
 const { getGeminiApiKey, getAvailableGeminiModels, parseGeminiJsonWithRecovery, splitDocumentIntoPages } = require('../services/geminiService');
+const { uploadBase64ToCloudinary, uploadBufferToCloudinary } = require('../services/cloudinaryService');
 
 // Helper: Ensure uploads folder exists
 const uploadsDir = path.join(__dirname, '..', 'uploads');
@@ -110,35 +111,47 @@ const evaluateHandwrittenAnswerSheet = async (req, res) => {
       return res.status(400).json({ success: false, message: 'Please upload a handwritten answer sheet image or document' });
     }
 
-    // Persist file to local disk if base64 to allow direct URL downloads
+    // Persist file directly to Cloudinary (zero Base64 payloads in MongoDB Atlas)
     let persistentUrl = '';
     let savedFileName = fileName;
     if (file && typeof file === 'string') {
       try {
-        if (file.startsWith('data:')) {
-          const matches = file.match(/^data:([A-Za-z-+\/]+);base64,(.+)$/);
-          if (matches && matches.length === 3) {
-            const extension = matches[1].includes('pdf') ? 'pdf' : matches[1].includes('png') ? 'png' : 'jpg';
-            savedFileName = `eval_${Date.now()}_${Math.random().toString(36).substr(2, 5)}.${extension}`;
-            const filePath = path.join(uploadsDir, savedFileName);
-            const buffer = Buffer.from(matches[2], 'base64');
-            fs.writeFileSync(filePath, buffer);
-            persistentUrl = `/uploads/${savedFileName}`;
-          }
-        } else if (!file.startsWith('http') && !file.startsWith('/uploads') && file.length > 100) {
-          const isPdf = file.startsWith('JVBERi');
-          const isPng = file.startsWith('iVBORw');
-          const extension = isPdf ? 'pdf' : isPng ? 'png' : 'jpg';
-          savedFileName = `eval_${Date.now()}_${Math.random().toString(36).substr(2, 5)}.${extension}`;
-          const filePath = path.join(uploadsDir, savedFileName);
-          const buffer = Buffer.from(file, 'base64');
-          fs.writeFileSync(filePath, buffer);
-          persistentUrl = `/uploads/${savedFileName}`;
+        if (file.startsWith('data:') || (!file.startsWith('http') && !file.startsWith('/uploads') && file.length > 100)) {
+          const cloudRes = await uploadBase64ToCloudinary(file, {
+            fileName,
+            folder: 'as_maths/evaluations',
+          });
+          persistentUrl = cloudRes.secure_url;
+          savedFileName = cloudRes.public_id || fileName;
         } else {
           persistentUrl = file;
         }
       } catch (saveErr) {
-        console.warn('Failed to write uploaded answer sheet to disk:', saveErr.message);
+        console.warn('Cloudinary evaluation upload error, engaging fallback:', saveErr.message);
+        try {
+          if (file.startsWith('data:')) {
+            const matches = file.match(/^data:([A-Za-z-+\/]+);base64,(.+)$/);
+            if (matches && matches.length === 3) {
+              const extension = matches[1].includes('pdf') ? 'pdf' : matches[1].includes('png') ? 'png' : 'jpg';
+              savedFileName = `eval_${Date.now()}_${Math.random().toString(36).substr(2, 5)}.${extension}`;
+              const filePath = path.join(uploadsDir, savedFileName);
+              fs.writeFileSync(filePath, Buffer.from(matches[2], 'base64'));
+              persistentUrl = `/uploads/${savedFileName}`;
+            }
+          } else if (!file.startsWith('http') && !file.startsWith('/uploads') && file.length > 100) {
+            const isPdf = file.startsWith('JVBERi');
+            const isPng = file.startsWith('iVBORw');
+            const extension = isPdf ? 'pdf' : isPng ? 'png' : 'jpg';
+            savedFileName = `eval_${Date.now()}_${Math.random().toString(36).substr(2, 5)}.${extension}`;
+            const filePath = path.join(uploadsDir, savedFileName);
+            fs.writeFileSync(filePath, Buffer.from(file, 'base64'));
+            persistentUrl = `/uploads/${savedFileName}`;
+          } else {
+            persistentUrl = file;
+          }
+        } catch (_) {
+          persistentUrl = file.startsWith('http') || file.startsWith('/uploads') ? file : '';
+        }
       }
     }
 
@@ -163,7 +176,7 @@ const evaluateHandwrittenAnswerSheet = async (req, res) => {
         maxMarks: Number(maxMarks) || 50,
         percentage: 0,
         answerSheetUrl: persistentUrl || null,
-        answerSheetDataUrl: file || null,
+        answerSheetDataUrl: null, // Zero Base64 payload stored in MongoDB!
         fileName: savedFileName,
         fileType,
         lineSeparatorsDetected: 0,
@@ -1150,7 +1163,7 @@ Respond ONLY with valid JSON strictly matching:
       maxMarks: maxMarksFinal,
       percentage,
       answerSheetUrl: persistentUrl || null,
-      answerSheetDataUrl: file || null,
+      answerSheetDataUrl: null, // Zero Base64 payload stored in MongoDB!
       fileName: savedFileName,
       fileType,
       lineSeparatorsDetected: parsingResult.lineSeparatorsDetected || 0,
@@ -1450,16 +1463,26 @@ const saveProctoringVideo = async (req, res) => {
 
     const cleanEmail = (studentEmail || 'student').replace(/[^a-zA-Z0-9]/g, '_');
     const fileName = `proctor_${Date.now()}_${cleanEmail}.webm`;
-    const filePath = path.join(proctorDir, fileName);
+    let publicUrl = '';
 
-    const matches = videoDataUrl.match(/^data:([A-Za-z0-9-+/]+);base64,(.+)$/);
-    if (matches && matches.length === 3) {
-      fs.writeFileSync(filePath, Buffer.from(matches[2], 'base64'));
-    } else {
-      fs.writeFileSync(filePath, videoDataUrl);
+    try {
+      const cloudRes = await uploadBase64ToCloudinary(videoDataUrl, {
+        fileName,
+        folder: 'as_maths/proctoring',
+        resource_type: 'video',
+      });
+      publicUrl = cloudRes.secure_url;
+    } catch (vidErr) {
+      console.warn('Cloudinary proctoring video upload fallback to disk:', vidErr.message);
+      const filePath = path.join(proctorDir, fileName);
+      const matches = videoDataUrl.match(/^data:([A-Za-z0-9-+/]+);base64,(.+)$/);
+      if (matches && matches.length === 3) {
+        fs.writeFileSync(filePath, Buffer.from(matches[2], 'base64'));
+      } else {
+        fs.writeFileSync(filePath, videoDataUrl);
+      }
+      publicUrl = `/uploads/proctoring/${fileName}`;
     }
-
-    const publicUrl = `/uploads/proctoring/${fileName}`;
 
     const key = String(studentEmail || studentId).toLowerCase().trim();
     if (activeProctoringStreams.has(key)) {

@@ -6,6 +6,7 @@ const Content = require('../models/Content');
 const ClassTest = require('../models/ClassTest');
 const Notification = require('../models/Notification');
 const { generateAnswerKeyForQuestionPaper, streamAnswerKeyForQuestionPaper } = require('../services/geminiService');
+const { uploadBufferToCloudinary } = require('../services/cloudinaryService');
 
 // Ensure uploads directory exists
 const uploadsDir = path.join(__dirname, '..', 'uploads');
@@ -434,28 +435,34 @@ const saveContent = async (req, res) => {
       fileHash = null;
     }
 
-    // ── 2. Multipart File Upload (req.file) ─────────────────────────────
+    // ── 2. Multipart File Upload (req.file) via Cloudinary Streaming ──
     else if (req.file) {
       try {
-        const diskPath = req.file.path;
-        const fileBuffer = fs.readFileSync(diskPath);
+        const fileBuffer = req.file.buffer || (req.file.path ? fs.readFileSync(req.file.path) : null);
         uploadedBuffer = fileBuffer;
-        uploadedDiskPath = diskPath;
 
-        fileHash = crypto.createHash('sha256').update(fileBuffer).digest('hex');
+        if (fileBuffer) {
+          fileHash = crypto.createHash('sha256').update(fileBuffer).digest('hex');
+        }
 
-        // Check MongoDB for existing identical file
-        const duplicateItem = await Content.findOne({ fileHash });
-        if (duplicateItem && duplicateItem.filePath && fs.existsSync(path.join(uploadsDir, duplicateItem.filePath))) {
-          console.log(`[UPLOAD REUSE] Duplicate file detected (${fileHash.substring(0, 8)}). Reusing existing file: ${duplicateItem.title}`);
-          filePath = duplicateItem.filePath;
-          fileUrl = duplicateItem.fileUrl;
+        // Check MongoDB for existing identical file URL to reuse
+        const duplicateItem = fileHash ? await Content.findOne({ fileHash }) : null;
+        if (duplicateItem && (duplicateItem.fileUrl || duplicateItem.filePath)) {
+          console.log(`[UPLOAD REUSE] Duplicate file detected (${fileHash.substring(0, 8)}). Reusing: ${duplicateItem.title}`);
+          filePath = duplicateItem.filePath || duplicateItem.fileUrl;
+          fileUrl = duplicateItem.fileUrl || duplicateItem.filePath;
           resourceType = duplicateItem.resourceType || resourceType;
-          // Remove duplicate file on disk to save storage
-          try { fs.unlinkSync(diskPath); } catch (_) {}
-        } else {
-          filePath = path.basename(diskPath);
-          fileUrl = `/uploads/${filePath}`;
+        } else if (fileBuffer) {
+          // Stream directly to Cloudinary
+          const cloudResult = await uploadBufferToCloudinary(fileBuffer, {
+            fileName: req.file.originalname,
+            mimeType: req.file.mimetype,
+            folder: 'as_maths/content',
+          });
+
+          filePath = cloudResult.secure_url;
+          fileUrl = cloudResult.secure_url;
+
           const ext = path.extname(req.file.originalname).toLowerCase();
           if (ext === '.pdf') {
             resourceType = 'pdf';
@@ -476,7 +483,7 @@ const saveContent = async (req, res) => {
       }
     }
 
-    // ── 3. Base64 Document File Hashing & Duplicate Handling ───────────
+    // ── 3. Base64 Document File Direct Cloudinary Streaming ───────────
     else if (itemData.fileDataUrl && itemData.fileDataUrl.startsWith('data:')) {
       try {
         const commaIndex = itemData.fileDataUrl.indexOf(',');
@@ -487,19 +494,17 @@ const saveContent = async (req, res) => {
         // Calculate SHA-256 hash of the uploaded file
         fileHash = crypto.createHash('sha256').update(fileBuffer).digest('hex');
 
-        // Check MongoDB for duplicate hash — reuse existing file to prevent 409 conflict and save storage
+        // Check MongoDB for duplicate hash with valid URL to reuse
         const duplicateItem = await Content.findOne({ fileHash });
-        if (duplicateItem && duplicateItem.filePath && fs.existsSync(path.join(uploadsDir, duplicateItem.filePath))) {
-          console.log(`[UPLOAD REUSE] Duplicate file detected (${fileHash.substring(0, 8)}). Reusing existing file: ${duplicateItem.title}`);
-          filePath = duplicateItem.filePath;
-          fileUrl = duplicateItem.fileUrl;
+        if (duplicateItem && (duplicateItem.fileUrl || duplicateItem.filePath)) {
+          console.log(`[UPLOAD REUSE] Duplicate file detected (${fileHash.substring(0, 8)}). Reusing: ${duplicateItem.title}`);
+          filePath = duplicateItem.filePath || duplicateItem.fileUrl;
+          fileUrl = duplicateItem.fileUrl || duplicateItem.filePath;
           resourceType = duplicateItem.resourceType || resourceType;
         } else {
-          // Save file to backend/uploads on the local file system (avoiding Atlas Free Tier bloat)
           const originalName = itemData.fileName || 'document.pdf';
           const ext = path.extname(originalName) || (originalName.toLowerCase().endsWith('.docx') ? '.docx' : '.pdf');
-          
-          // Auto-detect specific document resourceType
+
           const lowerExt = ext.toLowerCase();
           if (lowerExt === '.pdf') {
             resourceType = 'pdf';
@@ -514,13 +519,14 @@ const saveContent = async (req, res) => {
             resourceType = 'document';
           }
 
-          const safeDiskName = `${Date.now()}_${fileHash.substring(0, 10)}${ext}`;
-          const diskPath = path.join(uploadsDir, safeDiskName);
-          fs.writeFileSync(diskPath, fileBuffer);
-          uploadedDiskPath = diskPath;
+          // Stream directly to Cloudinary
+          const cloudResult = await uploadBufferToCloudinary(fileBuffer, {
+            fileName: originalName,
+            folder: 'as_maths/content',
+          });
 
-          filePath = safeDiskName;
-          fileUrl = `/uploads/${safeDiskName}`;
+          filePath = cloudResult.secure_url;
+          fileUrl = cloudResult.secure_url;
         }
       } catch (err) {
         console.error('File hashing/saving error:', err);

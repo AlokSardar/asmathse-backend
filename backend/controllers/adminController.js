@@ -4,6 +4,7 @@ const Submission = require('../models/Submission');
 const User = require('../models/User');
 const Student = require('../models/Student');
 const Evaluation = require('../models/Evaluation');
+const { uploadBase64ToCloudinary } = require('../services/cloudinaryService');
 
 // @desc    Upload new content (Syllabus, PYQ, Solution, Suggestion)
 // @route   POST /api/admin/content
@@ -105,6 +106,30 @@ const uploadContent = async (req, res) => {
       semester
     }, null, 2));
 
+    // Persist file directly to Cloudinary if Base64
+    let fileUrl = req.body.fileUrl || null;
+    if (req.body.fileDataUrl && req.body.fileDataUrl.startsWith('data:')) {
+      try {
+        const cloudRes = await uploadBase64ToCloudinary(req.body.fileDataUrl, {
+          fileName: req.body.fileName || `${title.replace(/[^a-zA-Z0-9]/g, '_')}.pdf`,
+          folder: 'as_maths/content',
+        });
+        fileUrl = cloudRes.secure_url;
+      } catch (uploadErr) {
+        console.warn('Cloudinary upload error in admin uploadContent:', uploadErr.message);
+      }
+    } else if (fileUrl && fileUrl.startsWith('data:')) {
+      try {
+        const cloudRes = await uploadBase64ToCloudinary(fileUrl, {
+          fileName: `${title.replace(/[^a-zA-Z0-9]/g, '_')}.pdf`,
+          folder: 'as_maths/content',
+        });
+        fileUrl = cloudRes.secure_url;
+      } catch (uploadErr) {
+        console.warn('Cloudinary upload error in admin uploadContent:', uploadErr.message);
+      }
+    }
+
     const content = await Content.create({
       title,
       type: type || 'materials',
@@ -122,6 +147,7 @@ const uploadContent = async (req, res) => {
       academicYear: academicYear || '2026-2027',
       isCommonFirstYear: isCommon,
       fileUrl,
+      fileDataUrl: null, // Zero Base64 payload in MongoDB
       uploadedBy: req.user ? req.user.id : 'admin'
     });
     res.status(201).json(content);
@@ -134,8 +160,20 @@ const uploadContent = async (req, res) => {
 // @route   POST /api/admin/assignments
 // @access  Private/Admin
 const createAssignment = async (req, res) => {
-  const { title, description, stream, semester, questionFileUrl, deadline } = req.body;
+  let { title, description, stream, semester, questionFileUrl, deadline } = req.body;
   try {
+    if (questionFileUrl && questionFileUrl.startsWith('data:')) {
+      try {
+        const cloudRes = await uploadBase64ToCloudinary(questionFileUrl, {
+          fileName: `${(title || 'assignment').replace(/[^a-zA-Z0-9]/g, '_')}.pdf`,
+          folder: 'as_maths/assignments',
+        });
+        questionFileUrl = cloudRes.secure_url;
+      } catch (upErr) {
+        console.warn('Cloudinary assignment upload error:', upErr.message);
+      }
+    }
+
     const assignment = await Assignment.create({
       title,
       description,
@@ -143,7 +181,7 @@ const createAssignment = async (req, res) => {
       semester,
       questionFileUrl,
       deadline,
-      createdBy: req.user.id
+      createdBy: req.user ? req.user.id : null
     });
     res.status(201).json(assignment);
   } catch (error) {

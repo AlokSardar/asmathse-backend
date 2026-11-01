@@ -1,6 +1,7 @@
 const Content = require('../models/Content');
 const Assignment = require('../models/Assignment');
 const Submission = require('../models/Submission');
+const { uploadBase64ToCloudinary } = require('../services/cloudinaryService');
 
 const escapeRegex = (str) => {
   if (typeof str !== 'string') return '';
@@ -556,7 +557,7 @@ const getStudentAssignments = async (req, res) => {
 // @route   POST /api/student/submissions
 // @access  Private/Student
 const submitAssignment = async (req, res) => {
-  const { assignmentId, answerFileUrl } = req.body;
+  let { assignmentId, answerFileUrl } = req.body;
   try {
     // Check if already submitted
     const existingSubmission = await Submission.findOne({
@@ -566,6 +567,18 @@ const submitAssignment = async (req, res) => {
     
     if (existingSubmission) {
       return res.status(400).json({ message: 'Assignment already submitted' });
+    }
+
+    if (answerFileUrl && answerFileUrl.startsWith('data:')) {
+      try {
+        const cloudRes = await uploadBase64ToCloudinary(answerFileUrl, {
+          fileName: `submission_${assignmentId}_${req.user.id}.pdf`,
+          folder: 'as_maths/submissions',
+        });
+        answerFileUrl = cloudRes.secure_url;
+      } catch (upErr) {
+        console.warn('Cloudinary assignment submission upload error:', upErr.message);
+      }
     }
 
     const submission = await Submission.create({
