@@ -100,6 +100,7 @@ const getAllowedOrigins = () => {
     'https://asmathse-frontend.onrender.com',
     'https://as-maths-educator.vercel.app',
     'https://asmaths-educator.vercel.app',
+    'https://asmathseducator.vercel.app',
     'http://localhost:5173',
     'http://localhost:3000',
     'http://localhost:5000',
@@ -125,7 +126,7 @@ const corsOptions = {
     const isAllowed =
       allowed.includes(normalized) ||
       /^https:\/\/([a-zA-Z0-9_-]+\.)?onrender\.com$/.test(normalized) ||
-      /^https:\/\/as-maths-[a-zA-Z0-9_-]+\.vercel\.app$/.test(normalized);
+      /^https:\/\/as-?maths-?[a-zA-Z0-9_-]*\.vercel\.app$/.test(normalized);
 
     if (isAllowed) {
       return callback(null, true);
