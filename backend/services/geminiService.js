@@ -69,6 +69,12 @@ const getAvailableGeminiModels = async (apiKey) => {
 
       console.log(`📋 [GEMINI API]: Server reported ${serverModels.length} models available for key:`, serverModels);
 
+      const isEligibleModel = (m) => {
+        if (!m || !m.startsWith('gemini')) return false;
+        if (m.includes('computer-use') || m.includes('embedding') || m.includes('imagen') || m.includes('audio') || m === 'gemini-pro') return false;
+        return m.includes('flash') || m.includes('pro');
+      };
+
       const resolved = [];
       // Add preferred models that are available on the server
       for (const pref of preferredOrder) {
@@ -76,9 +82,9 @@ const getAvailableGeminiModels = async (apiKey) => {
           resolved.push(pref);
         }
       }
-      // Add any other models starting with gemini (excluding legacy text-only gemini-pro)
+      // Add any other eligible models (flash/pro variants)
       for (const sm of serverModels) {
-        if (sm.startsWith('gemini') && !resolved.includes(sm) && sm !== 'gemini-pro') {
+        if (isEligibleModel(sm) && !resolved.includes(sm)) {
           resolved.push(sm);
         }
       }
@@ -405,6 +411,23 @@ Respond ONLY with valid, raw, parseable JSON matching this exact schema — no m
           if (resp.status === 401 || resp.status === 403) {
             throw new Error(`Google Gemini API authentication failed (HTTP ${resp.status}): Invalid API key or insufficient permissions. Details: ${errBody}`);
           }
+          if (resp.status === 429) {
+            let retryHint = '';
+            try {
+              const parsedErr = JSON.parse(errBody);
+              const retryInfo = parsedErr.error?.details?.find(d => d['@type']?.includes('RetryInfo'));
+              if (retryInfo?.retryDelay) {
+                const seconds = parseInt(retryInfo.retryDelay, 10);
+                if (!isNaN(seconds) && seconds > 60) {
+                  const hours = (seconds / 3600).toFixed(1);
+                  retryHint = ` Google estimated reset in ~${hours} hours (${seconds}s).`;
+                }
+              }
+            } catch (_) {}
+            if (errBody.includes('limit exceeded') || errBody.includes('RESOURCE_EXHAUSTED')) {
+              throw new Error(`Google Gemini API quota exceeded (HTTP 429).${retryHint || ' Please verify plan limits in Google AI Studio or configure an API key with active quota.'}`);
+            }
+          }
           continue;
         }
 
@@ -618,6 +641,23 @@ Respond ONLY with valid, raw, parseable JSON matching this exact schema — no m
           console.warn(`⚠️ [GEMINI STREAM API]: ${lastStreamError}`);
           if (resp.status === 401 || resp.status === 403) {
             throw new Error(`Google Gemini API authentication failed (HTTP ${resp.status}): Invalid API key or insufficient permissions. Details: ${errBody}`);
+          }
+          if (resp.status === 429) {
+            let retryHint = '';
+            try {
+              const parsedErr = JSON.parse(errBody);
+              const retryInfo = parsedErr.error?.details?.find(d => d['@type']?.includes('RetryInfo'));
+              if (retryInfo?.retryDelay) {
+                const seconds = parseInt(retryInfo.retryDelay, 10);
+                if (!isNaN(seconds) && seconds > 60) {
+                  const hours = (seconds / 3600).toFixed(1);
+                  retryHint = ` Google estimated reset in ~${hours} hours (${seconds}s).`;
+                }
+              }
+            } catch (_) {}
+            if (errBody.includes('limit exceeded') || errBody.includes('RESOURCE_EXHAUSTED')) {
+              throw new Error(`Google Gemini API quota exceeded (HTTP 429).${retryHint || ' Please verify plan limits in Google AI Studio or configure an API key with active quota.'}`);
+            }
           }
           continue;
         }
