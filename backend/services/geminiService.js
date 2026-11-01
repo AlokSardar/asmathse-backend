@@ -46,7 +46,6 @@ const getAvailableGeminiModels = async (apiKey) => {
   }
 
   const preferredOrder = [
-    'gemini-2.5-flash',
     'gemini-2.0-flash',
     'gemini-1.5-flash',
     'gemini-1.5-pro',
@@ -307,6 +306,7 @@ const generateAnswerKeyForQuestionPaper = async ({
   const candidateModels = await getAvailableGeminiModels(geminiApiKey);
   const accumulatedQuestions = [];
   let successfulModel = candidateModels[0] || 'gemini-1.5-pro';
+  let lastError = null;
 
   // Sequential Page-by-Page Loop:
   // Process Page 1 -> generate key -> process Page 2 -> generate key -> ... -> loop completes on the last page -> finalize
@@ -364,7 +364,6 @@ Respond ONLY with valid, raw, parseable JSON matching this exact schema — no m
 }`;
 
     let pageQuestions = [];
-    let lastError = null;
 
     for (const modelName of candidateModels) {
       try {
@@ -372,8 +371,8 @@ Respond ONLY with valid, raw, parseable JSON matching this exact schema — no m
 
         if (pageObj.buffer) {
           parts.push({
-            inline_data: {
-              mime_type: pageObj.mime || 'application/pdf',
+            inlineData: {
+              mimeType: pageObj.mime || 'application/pdf',
               data: pageObj.buffer.toString('base64'),
             },
           });
@@ -389,7 +388,7 @@ Respond ONLY with valid, raw, parseable JSON matching this exact schema — no m
           generationConfig: {
             temperature: 0.1,
             maxOutputTokens: 8192,
-            response_mime_type: 'application/json',
+            responseMimeType: 'application/json',
           },
         };
 
@@ -512,6 +511,7 @@ const streamAnswerKeyForQuestionPaper = async ({
   const candidateModels = await getAvailableGeminiModels(geminiApiKey);
   const accumulatedQuestions = [];
   let successfulModel = candidateModels[0] || 'gemini-1.5-pro';
+  let lastStreamError = null;
 
   // Sequential Page-by-Page Streaming Loop:
   // Process Page 1 -> generate key -> process Page 2 -> generate key -> ... -> loop completes on the last page -> finalize
@@ -578,7 +578,6 @@ Respond ONLY with valid, raw, parseable JSON matching this exact schema — no m
 
     let pageQuestions = [];
     let pageStreamed = false;
-    let lastStreamError = null;
 
     for (const modelName of candidateModels) {
       try {
@@ -586,8 +585,8 @@ Respond ONLY with valid, raw, parseable JSON matching this exact schema — no m
 
         if (pageObj.buffer) {
           parts.push({
-            inline_data: {
-              mime_type: pageObj.mime || 'application/pdf',
+            inlineData: {
+              mimeType: pageObj.mime || 'application/pdf',
               data: pageObj.buffer.toString('base64'),
             },
           });
@@ -603,7 +602,7 @@ Respond ONLY with valid, raw, parseable JSON matching this exact schema — no m
           generationConfig: {
             temperature: 0.1,
             maxOutputTokens: 8192,
-            response_mime_type: 'application/json',
+            responseMimeType: 'application/json',
           },
         };
 

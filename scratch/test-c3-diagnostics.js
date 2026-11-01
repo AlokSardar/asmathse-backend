@@ -10,7 +10,7 @@ async function runTests() {
   console.log('1. Checking model candidate order...');
   const models = await getAvailableGeminiModels('dummy-key-for-test');
   console.log('   Models resolved:', models);
-  if (!models.includes('gemini-pro') && models[0] === 'gemini-2.5-flash' && models.includes('gemini-1.5-pro')) {
+  if (!models.includes('gemini-pro') && models[0] === 'gemini-2.0-flash' && models.includes('gemini-1.5-pro')) {
     console.log('   ✅ PASS: Model candidate list prioritizes modern Flash models and excludes deprecated gemini-pro');
   } else {
     console.error('   ❌ FAIL: Unexpected model candidate list:', models);
