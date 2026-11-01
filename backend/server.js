@@ -64,6 +64,10 @@ app.use('/api/student', studentRoutes);
 app.use('/api/tests', testRoutes);
 app.use('/api/fees', feeRoutes);
 
+// Direct Aliases for AI Doubt Solver API
+const { solveStudentDoubt } = require('./controllers/studentController');
+app.post(['/api/solve-doubt', '/api/doubt'], solveStudentDoubt);
+
 // Database Health & Status check endpoint
 app.get('/api/health', async (req, res) => {
   const state = mongoose.connection.readyState;

@@ -592,9 +592,49 @@ const getMySubmissions = async (req, res) => {
   }
 };
 
+const { generateDoubtSolutionForStudent } = require('../services/geminiService');
+
+// @desc    Solve student mathematical doubt with intent-aware Gemini AI
+// @route   POST /api/student/solve-doubt
+// @access  Public / Student
+const solveStudentDoubt = async (req, res) => {
+  try {
+    const { questionText, latexEquation, topic, course, stream, semester } = req.body || {};
+
+    if (!questionText && !latexEquation && !topic) {
+      return res.status(400).json({
+        success: false,
+        message: 'Please provide questionText, latexEquation, or topic to solve.'
+      });
+    }
+
+    const aiSolution = await generateDoubtSolutionForStudent({
+      questionText: String(questionText || '').trim(),
+      latexEquation: String(latexEquation || '').trim(),
+      topic: String(topic || 'Higher Mathematics').trim(),
+      course: course || req.user?.targetCourse || req.user?.course || 'engineering',
+      stream: stream || req.user?.stream || 'CSE',
+      semester: semester || req.user?.semester || 1,
+    });
+
+    return res.json({
+      success: true,
+      aiSolution,
+    });
+  } catch (error) {
+    console.error('Error in solveStudentDoubt API handler:', error);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to generate doubt resolution',
+      error: error.message,
+    });
+  }
+};
+
 module.exports = {
   getStudentContent,
   getStudentAssignments,
   submitAssignment,
-  getMySubmissions
+  getMySubmissions,
+  solveStudentDoubt,
 };

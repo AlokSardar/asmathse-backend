@@ -5,10 +5,15 @@ const {
   getStudentContent,
   getStudentAssignments,
   submitAssignment,
-  getMySubmissions
+  getMySubmissions,
+  solveStudentDoubt,
 } = require('../controllers/studentController');
 
-// All routes here are protected and require student role
+// Intelligent AI Doubt Solving Endpoints (accessible for student inquiries)
+router.post('/solve-doubt', solveStudentDoubt);
+router.post('/doubt', solveStudentDoubt);
+
+// All routes below are protected and require student role
 router.use(protect);
 router.use(authorize('student'));
 
