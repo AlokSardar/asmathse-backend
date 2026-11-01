@@ -934,7 +934,36 @@ Please classify this question into Category A (Theorems, Proofs & Definitions) o
       };
     }
 
-    // 4. Derivatives & Differentiability (First Principles)
+    // 4. Taylor's Theorem with Lagrange's Remainder
+    if (combined.includes('taylor') || combined.includes('maclaurin')) {
+      return {
+        type: 'theoretical',
+        category: 'Theorems, Proofs & Definitions',
+        steps: [
+          {
+            stepNumber: 1,
+            title: '1. Statement (বিবৃতি)',
+            explanation: "Let $f: [a, b] \\to \\mathbb{R}$ be a real function such that:\n(i) $f$ and its derivatives up to order $n$ ($f', f'', \\dots, f^{(n)}$) are continuous on the closed interval $[a, b]$,\n(ii) The $(n+1)$-th derivative $f^{(n+1)}(x)$ exists on the open interval $(a, b)$.\nThen for any $x \\in [a, b]$, there exists at least one interior point $c \\in (a, x)$ such that:",
+            math: "f(x) = f(a) + \\frac{f'(a)}{1!}(x-a) + \\frac{f''(a)}{2!}(x-a)^2 + \\dots + \\frac{f^{(n)}(a)}{n!}(x-a)^n + R_n(x)",
+          },
+          {
+            stepNumber: 2,
+            title: '2. Geometrical / Conceptual Meaning (জ্যামিতিক তাৎপর্য)',
+            explanation: "Geometrically, Taylor's Theorem expresses any sufficiently smooth function curve as a local higher-order polynomial approximation around $x = a$. The tangent line ($n=1$) matches the slope, the osculating parabola ($n=2$) matches curvature, and degree $n$ matches all $n$-th order bending properties. The Lagrange remainder $R_n(x)$ provides the exact error formula evaluated at an intermediate point $c$:",
+            math: "R_n(x) = \\frac{f^{(n+1)}(c)}{(n+1)!}(x-a)^{n+1} \\quad \\text{for some } c \\in (a, x)",
+          },
+          {
+            stepNumber: 3,
+            title: '3. Step-by-Step Proof (ধাপে ধাপে প্রমাণ)',
+            explanation: "1. Define the remainder $R_n(x) = f(x) - \\sum_{k=0}^n \\frac{f^{(k)}(a)}{k!}(x-a)^k$.\n2. Set $R_n(x) = \\frac{(x-a)^{n+1}}{(n+1)!} A$, where constant $A$ is chosen so this holds.\n3. Construct the auxiliary function $\\phi(t)$ on $[a, x]$:\n$\\phi(t) = f(x) - \\left[ f(t) + \\frac{x-t}{1!}f'(t) + \\dots + \\frac{(x-t)^n}{n!}f^{(n)}(t) \\right] - \\frac{(x-t)^{n+1}}{(n+1)!} A$.\n4. Notice $\\phi(x) = 0$ and $\\phi(a) = 0 \\implies \\phi(a) = \\phi(x)$.\n5. Differentiating $\\phi(t)$ with respect to $t$, the intermediate derivative terms telescope and cancel pairwise:\n$\\phi'(t) = -\\frac{(x-t)^n}{n!} f^{(n+1)}(t) + \\frac{(x-t)^n}{n!} A$.\n6. By Rolle's Theorem applied to $\\phi(t)$, there exists $c \\in (a, x)$ such that $\\phi'(c) = 0$:\n$\\phi'(c) = 0 \\implies A = f^{(n+1)}(c)$.\n7. Substituting $A$ back into $R_n(x)$ yields Lagrange's form of remainder identically:\n$R_n(x) = \\frac{f^{(n+1)}(c)}{(n+1)!}(x-a)^{n+1}$. This completes the proof.",
+            math: "R_n(x) = \\frac{f^{(n+1)}(c)}{(n+1)!}(x-a)^{n+1} \\quad \\text{where } c \\in (a, x)",
+          },
+        ],
+        summary: "Taylor's Theorem establishes that any smooth curve equals its n-th degree Taylor polynomial plus an exact Lagrange remainder evaluated at an intermediate point c.",
+      };
+    }
+
+    // 5. Derivatives & Differentiability (First Principles)
     if (combined.includes('derivative') || combined.includes('differentiab')) {
       return {
         type: 'theoretical',
