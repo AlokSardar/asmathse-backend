@@ -1,11 +1,32 @@
 const fs = require('fs');
 const path = require('path');
 const mongoose = require('mongoose');
+const jwt = require('jsonwebtoken');
 const Evaluation = require('../models/Evaluation');
 const Content = require('../models/Content');
 const ClassTest = require('../models/ClassTest');
 const { getGeminiApiKey, getAvailableGeminiModels, parseGeminiJsonWithRecovery, splitDocumentIntoPages } = require('../services/geminiService');
 const { uploadBase64ToCloudinary, uploadBufferToCloudinary } = require('../services/cloudinaryService');
+
+// Helper: Inspect request credentials for administrator / teacher authorization
+const getRequestUser = (req) => {
+  if (req.user) return req.user;
+  const authHeader = req.headers?.authorization;
+  if (authHeader && authHeader.startsWith('Bearer ')) {
+    try {
+      const token = authHeader.split(' ')[1];
+      const secret = process.env.JWT_SECRET || 'asmaths_secret_jwt_key_2026_cluster0';
+      return jwt.verify(token, secret);
+    } catch (_) {}
+  }
+  return null;
+};
+
+const isAuthorizedAdmin = (req) => {
+  const user = getRequestUser(req);
+  const role = String(user?.role || '').toLowerCase();
+  return role === 'admin' || role === 'teacher' || user?.id === 'master_admin_id';
+};
 
 // Helper: Ensure uploads folder exists
 const uploadsDir = path.join(__dirname, '..', 'uploads');
@@ -18,14 +39,36 @@ const escapeRegex = (str) => {
   return str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 };
 
-// @desc    Get all student evaluations
+// @desc    Get all student evaluations (enforces student isolation: students only see their own records)
 // @route   GET /api/evaluations
-// @access  Public
+// @access  Public / Protected
 const getAllEvaluations = async (req, res) => {
   try {
     const { studentEmail, testId } = req.query;
     const query = {};
-    if (studentEmail) query.studentEmail = studentEmail;
+
+    const user = getRequestUser(req);
+    const isAdmin = isAuthorizedAdmin(req);
+
+    if (!isAdmin) {
+      // Non-admin student requester: restrict to their own email or studentId
+      const studentEmailCandidate = user?.email || studentEmail;
+      const studentIdCandidate = user?.id || user?._id;
+      if (!studentEmailCandidate && !studentIdCandidate) {
+        return res.status(401).json({ message: 'Authentication required to view student evaluations' });
+      }
+      const studentClauses = [];
+      if (studentEmailCandidate) {
+        studentClauses.push({ studentEmail: String(studentEmailCandidate).toLowerCase().trim() });
+      }
+      if (studentIdCandidate) {
+        studentClauses.push({ studentId: String(studentIdCandidate) });
+      }
+      query.$or = studentClauses;
+    } else {
+      if (studentEmail) query.studentEmail = String(studentEmail).toLowerCase().trim();
+    }
+
     if (testId) query.testId = testId;
 
     const evals = await Evaluation.find(query).sort({ submittedAt: -1, createdAt: -1 });
@@ -36,9 +79,9 @@ const getAllEvaluations = async (req, res) => {
   }
 };
 
-// @desc    Get single student evaluation by ID
+// @desc    Get single student evaluation by ID (enforces student isolation)
 // @route   GET /api/evaluations/:id
-// @access  Public
+// @access  Public / Protected
 const getEvaluationById = async (req, res) => {
   try {
     const { id } = req.params;
@@ -46,6 +89,19 @@ const getEvaluationById = async (req, res) => {
     if (!ev) {
       return res.status(404).json({ message: 'Evaluation record not found' });
     }
+
+    const user = getRequestUser(req);
+    const isAdmin = isAuthorizedAdmin(req);
+    if (!isAdmin) {
+      const isOwner = user && (
+        (user.email && String(user.email).toLowerCase().trim() === String(ev.studentEmail || '').toLowerCase().trim()) ||
+        (user.id && String(user.id) === String(ev.studentId || ''))
+      );
+      if (!isOwner) {
+        return res.status(403).json({ message: 'Access denied: You can only view your own evaluation records.' });
+      }
+    }
+
     res.json(ev);
   } catch (error) {
     console.error('Error fetching evaluation by id:', error);

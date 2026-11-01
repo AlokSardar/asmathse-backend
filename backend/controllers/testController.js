@@ -1,8 +1,30 @@
 const mongoose = require('mongoose');
+const jwt = require('jsonwebtoken');
 const ClassTest = require('../models/ClassTest');
 const Content = require('../models/Content');
 const TestSubmission = require('../models/TestSubmission');
 const Notification = require('../models/Notification');
+
+// Helper: Inspect request credentials for administrator authorization
+const isAuthorizedAdmin = (req) => {
+  const role = String(req.user?.role || '').toLowerCase();
+  if (role === 'admin' || role === 'teacher' || req.user?.id === 'master_admin_id') {
+    return true;
+  }
+  const authHeader = req.headers?.authorization;
+  if (authHeader && authHeader.startsWith('Bearer ')) {
+    try {
+      const token = authHeader.split(' ')[1];
+      const secret = process.env.JWT_SECRET || 'asmaths_secret_jwt_key_2026_cluster0';
+      const decoded = jwt.verify(token, secret);
+      const decodedRole = String(decoded.role || '').toLowerCase();
+      if (decodedRole === 'admin' || decodedRole === 'teacher' || decoded.id === 'master_admin_id') {
+        return true;
+      }
+    } catch (_) {}
+  }
+  return false;
+};
 
 exports.createTest = async (req, res) => {
   try {
@@ -219,6 +241,34 @@ exports.getTests = async (req, res) => {
       }
     }
 
+    const allowDrafts = Boolean(req.query.includeDrafts === 'true' && isAuthorizedAdmin(req));
+    const draftConditions = [];
+    if (req.query.status) {
+      const qStatus = String(req.query.status).trim().toLowerCase();
+      if (qStatus === 'draft') {
+        if (!allowDrafts) {
+          draftConditions.push({ _id: null }); // block unauthorized draft requests
+        } else {
+          draftConditions.push({ $or: [{ status: 'draft' }, { isDraft: true }] });
+        }
+      } else {
+        draftConditions.push({ status: req.query.status, isDraft: { $ne: true } });
+      }
+    } else if (!allowDrafts) {
+      draftConditions.push({
+        status: { $ne: 'draft' },
+        isDraft: { $ne: true }
+      });
+    }
+
+    if (draftConditions.length > 0) {
+      if (query.$and && Array.isArray(query.$and)) {
+        query.$and.push(...draftConditions);
+      } else {
+        query.$and = draftConditions;
+      }
+    }
+
     const [classTests, contentTests] = await Promise.all([
       ClassTest.find(query).sort({ examDate: -1, createdAt: -1 }).catch(() => []),
       Content.find({
@@ -241,7 +291,23 @@ exports.getTests = async (req, res) => {
       }
     });
 
-    res.status(200).json({ success: true, data: mergedTests });
+    const isAdmin = isAuthorizedAdmin(req);
+    const sanitizedTests = mergedTests.map(t => {
+      const doc = t.toObject ? t.toObject() : { ...t };
+      if (!isAdmin && doc.publishedResults !== true) {
+        delete doc.answerKey;
+        if (Array.isArray(doc.questions)) {
+          doc.questions = doc.questions.map(q => {
+            if (!q || typeof q !== 'object') return q;
+            const { steps, keyFormula, teacherNotes, solution_latex, solution, marking_scheme, partial_credit_guidance, ...safeQ } = q;
+            return safeQ;
+          });
+        }
+      }
+      return doc;
+    });
+
+    res.status(200).json({ success: true, data: sanitizedTests });
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
   }
@@ -262,7 +328,25 @@ exports.getTestById = async (req, res) => {
     if (!test) {
       return res.status(404).json({ success: false, message: 'Test not found' });
     }
-    res.status(200).json({ success: true, data: test });
+    const isDraft = test.status === 'draft' || test.isDraft === true;
+    const isAdmin = isAuthorizedAdmin(req);
+    if (isDraft && !isAdmin) {
+      return res.status(404).json({ success: false, message: 'Test not found or currently unavailable' });
+    }
+
+    const doc = test.toObject ? test.toObject() : { ...test };
+    if (!isAdmin && doc.publishedResults !== true) {
+      delete doc.answerKey;
+      if (Array.isArray(doc.questions)) {
+        doc.questions = doc.questions.map(q => {
+          if (!q || typeof q !== 'object') return q;
+          const { steps, keyFormula, teacherNotes, solution_latex, solution, marking_scheme, partial_credit_guidance, ...safeQ } = q;
+          return safeQ;
+        });
+      }
+    }
+
+    res.status(200).json({ success: true, data: doc });
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
   }
@@ -286,6 +370,13 @@ exports.submitAndEvaluate = async (req, res) => {
     } = req.body;
 
     const studentId = req.user ? req.user.id : (req.body.studentId || '000000000000000000000000');
+
+    // Reject submissions against draft tests
+    const testDoc = await ClassTest.findOne({ $or: [{ id: testId }, { testId }, ...(mongoose.Types.ObjectId.isValid(testId) ? [{ _id: testId }] : [])] })
+      || await Content.findOne({ $or: [{ id: testId }, { testId }, ...(mongoose.Types.ObjectId.isValid(testId) ? [{ _id: testId }] : [])] });
+    if (testDoc && (testDoc.status === 'draft' || testDoc.isDraft === true)) {
+      return res.status(400).json({ success: false, message: 'Cannot submit to an unpublished draft test.' });
+    }
     const isDisqualified = cheatDetected || submittedDueToViolation || strikes >= 3;
 
     // 1. Save initial submission
@@ -314,30 +405,10 @@ exports.submitAndEvaluate = async (req, res) => {
     });
     await submission.save();
 
-    // 2. Mock AI Evaluation Process for handwritten uploads (strictly bypass for disqualified tests)
+    // 2. Handwritten uploads remain pending teacher review or genuine AI OCR evaluation
     if (!isOnlineTest && !isDisqualified) {
-      setTimeout(async () => {
-        try {
-          const aiEvaluatedSubmission = await TestSubmission.findById(submission._id);
-          if (aiEvaluatedSubmission) {
-            aiEvaluatedSubmission.aiEvaluation = {
-              marksAwarded: isDisqualified ? 0 : Math.floor(Math.random() * 15) + 35, // 35-50 marks
-              totalMarks: 50,
-              feedback: isDisqualified
-                ? "Zero marks awarded. Anti-cheat protocol violation detected (Tab switched or window lost focus 3 times)."
-                : "Excellent problem-solving approach. The steps in the calculus section were logically sound.",
-              mistakes: isDisqualified
-                ? ["Strict violation of exam integrity."]
-                : ["Minor calculation error in Q3 part (b).", "Forgot to add constant of integration 'C' in Q4."],
-              evaluatedAt: new Date()
-            };
-            aiEvaluatedSubmission.status = 'evaluated';
-            await aiEvaluatedSubmission.save();
-          }
-        } catch (err) {
-          console.error("AI Evaluation failed:", err);
-        }
-      }, 4000);
+      submission.status = 'submitted';
+      await submission.save();
     }
 
     res.status(200).json({ 
@@ -597,5 +668,102 @@ exports.cleanupDummyTests = async (req, res) => {
   } catch (err) {
     console.error('Error cleaning dummy tests:', err);
     res.status(500).json({ success: false, error: err.message });
+  }
+};
+
+exports.getTestAnswerKey = async (req, res) => {
+  try {
+    const targetId = req.params.id;
+    const orConditions = [{ id: targetId }, { testId: targetId }];
+    if (mongoose.Types.ObjectId.isValid(targetId)) {
+      orConditions.push({ _id: targetId });
+    }
+    const query = { $or: orConditions };
+    let item = await ClassTest.findOne(query) || await Content.findOne(query);
+    if (!item) {
+      return res.status(404).json({ success: false, message: 'Test not found' });
+    }
+
+    const isAdmin = isAuthorizedAdmin(req);
+    if (!isAdmin && item.publishedResults !== true) {
+      return res.status(403).json({ success: false, message: 'Answer key is restricted to teachers until official results are published.' });
+    }
+
+    let answerKey = item.answerKey;
+    if ((!answerKey || !Array.isArray(answerKey.questions) || answerKey.questions.length === 0) && Array.isArray(item.questions) && item.questions.length > 0) {
+      answerKey = {
+        generatedBy: 'Class Test Builder',
+        status: 'draft',
+        questions: item.questions.map((q, idx) => ({
+          q_no: q.q_no || q.qNo || (q.title && /^Q\d+/i.test(q.title) ? q.title : `Q${idx + 1}`),
+          max_marks: Number(q.marks || q.maxMarks) || 5,
+          problem_statement_latex: q.questionText || q.statement || q.text || q.problem_statement_latex || '',
+          solution_latex: q.solution_latex || q.solutionText || q.solution || '',
+          final_answer_latex: q.finalAnswer || q.correctAnswer || '',
+          steps: Array.isArray(q.steps) ? q.steps : [],
+          marking_scheme: q.marking_scheme || q.markingScheme || '',
+          partial_credit_guidance: q.partial_credit_guidance || '',
+          keyFormula: q.keyFormula || '',
+          options: Array.isArray(q.options) ? q.options : [],
+          qType: q.qType || q.type || (Array.isArray(q.options) && q.options.length > 0 ? 'mcq' : 'descriptive'),
+        })),
+        updatedAt: new Date(),
+      };
+    }
+
+    res.json({
+      success: true,
+      testId: item.testId || item.id,
+      title: item.title,
+      marks: item.marks || item.fullMarks || 50,
+      answerKey: answerKey || { questions: [], status: 'draft' },
+    });
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+};
+
+exports.updateTestAnswerKey = async (req, res) => {
+  try {
+    if (!isAuthorizedAdmin(req)) {
+      return res.status(403).json({ success: false, message: 'Unauthorized: Teacher or admin credentials required to update answer keys.' });
+    }
+
+    const targetId = req.params.id;
+    const incomingKey = req.body;
+
+    const orConditions = [{ id: targetId }, { testId: targetId }];
+    if (mongoose.Types.ObjectId.isValid(targetId)) {
+      orConditions.push({ _id: targetId });
+    }
+    const query = { $or: orConditions };
+
+    let item = await ClassTest.findOne(query) || await Content.findOne(query);
+    if (!item) {
+      return res.status(404).json({ success: false, message: 'Test not found' });
+    }
+
+    const currentKey = item.answerKey || {};
+    const updatedKey = {
+      ...currentKey,
+      ...incomingKey,
+      generatedBy: incomingKey.generatedBy || currentKey.generatedBy || 'Google Gemini API',
+      questions: incomingKey.questions || currentKey.questions || [],
+      status: incomingKey.status || currentKey.status || 'draft',
+      lockedAt: incomingKey.status === 'locked' ? new Date() : (incomingKey.status === 'draft' ? null : currentKey.lockedAt),
+      updatedAt: new Date(),
+    };
+
+    item.answerKey = updatedKey;
+    if (incomingKey.status === 'locked') {
+      item.status = 'available';
+      item.isPublished = true;
+    }
+
+    await item.save();
+
+    res.json({ success: true, answerKey: item.answerKey, item });
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
   }
 };
