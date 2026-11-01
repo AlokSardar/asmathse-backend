@@ -67,7 +67,7 @@ const getAllContent = async (req, res) => {
     const isEng = !isSchool && !isJee && !isBsc && (rawCourse.includes('eng') || rawCourse.includes('btech') || rawCourse.includes('makaut'));
 
     if (isSchool) {
-      // 1. Board / Course matching (exact normalized array)
+      // 1. Board / Course matching (exact normalized array + regex fallbacks)
       const targetBoard = isIcse ? 'icse' : (isCbse ? 'cbse' : (board ? String(board).toLowerCase() : 'cbse'));
       const boardValues = targetBoard === 'icse'
         ? ['ICSE', 'icse', 'ISC', 'isc', 'School', 'school', 'All', 'all']
@@ -77,11 +77,16 @@ const getAllContent = async (req, res) => {
         $or: [
           { board: { $in: boardValues } },
           { course: { $in: boardValues } },
-          { stream: { $in: boardValues } }
+          { stream: { $in: boardValues } },
+          { board: targetBoard === 'icse' ? /icse|isc/i : /cbse|school|ncert/i },
+          { course: targetBoard === 'icse' ? /icse|isc/i : /cbse|school|ncert/i },
+          { stream: targetBoard === 'icse' ? /icse|isc/i : /cbse|school|ncert/i },
+          { board: null, course: null },
+          { board: { $exists: false } }
         ]
       };
 
-      // 2. Class Level matching (exact normalized array)
+      // 2. Class Level matching (exact normalized array + numeric pattern)
       const targetClass = classLevel || queryClass || req.query.class_name || req.query.className;
       let classClause = null;
       if (targetClass) {
@@ -93,7 +98,9 @@ const getAllContent = async (req, res) => {
           'All',
           'all',
           'All Classes',
-          'all classes'
+          'all classes',
+          null,
+          ''
         ];
         if (!isNaN(numLevel) && numLevel > 0) {
           classValues.push(
@@ -114,17 +121,21 @@ const getAllContent = async (req, res) => {
           { class: { $in: classValues } },
           { classLevel: { $in: classValues } },
           { class_name: { $in: classValues } },
-          { className: { $in: classValues } }
+          { className: { $in: classValues } },
+          { class: null },
+          { classLevel: null },
+          { class: { $exists: false } },
+          { classLevel: { $exists: false } }
         ];
         if (!isNaN(numLevel) && numLevel > 0) {
           classOrConditions.push({ classNumber: numLevel });
+          classOrConditions.push({ class: new RegExp(`(^|\\b)0*${numLevel}(\\b|th)`, 'i') });
+          classOrConditions.push({ classLevel: new RegExp(`(^|\\b)0*${numLevel}(\\b|th)`, 'i') });
         }
         classClause = { $or: classOrConditions };
       }
 
       // 3. Subject matching:
-      // If subject is "Both" or "All", all curriculum subjects match
-      // If subject is a specific subject, matches that subject OR "Both" / "All" / null
       const normSub = String(subject || '').trim().toLowerCase();
       const isBothOrAll = !normSub || normSub === 'both' || normSub === 'all';
       let subjectClause = null;
@@ -145,11 +156,17 @@ const getAllContent = async (req, res) => {
         } else if (normSub.includes('sci')) {
           subjectValues.push('Science', 'science', 'General Science', 'general science');
         }
+        const subjectRegex = normSub.includes('math')
+          ? /math/i
+          : (normSub.includes('sci') ? /sci/i : new RegExp(escapeRegex(String(subject).trim()), 'i'));
+
         subjectClause = {
           $or: [
+            { subject: subjectRegex },
             { subject: { $in: subjectValues } },
             { subject: { $exists: false } },
-            { subject: null }
+            { subject: null },
+            { subject: '' }
           ]
         };
       }
@@ -164,7 +181,8 @@ const getAllContent = async (req, res) => {
       query.$or = [
         { course: /jee|iit|^all$/i },
         { stream: /jee|iit/i },
-        { course: null }
+        { course: null },
+        { course: { $exists: false } }
       ];
     } else if (isBsc) {
       const bscClauses = [
@@ -172,7 +190,8 @@ const getAllContent = async (req, res) => {
           $or: [
             { course: /bsc|b\.sc|science|^all$/i },
             { stream: /bsc/i },
-            { course: null }
+            { course: null },
+            { course: { $exists: false } }
           ]
         }
       ];
@@ -182,7 +201,8 @@ const getAllContent = async (req, res) => {
           $or: [
             { branch: isHon ? /hon|major/i : /gen|pass/i },
             { branch: /all/i },
-            { branch: null }
+            { branch: null },
+            { branch: { $exists: false } }
           ]
         });
       }
@@ -193,7 +213,8 @@ const getAllContent = async (req, res) => {
             { semester: cleanSem },
             { semester: Number(cleanSem) },
             { semester: /all/i },
-            { semester: null }
+            { semester: null },
+            { semester: { $exists: false } }
           ]
         });
       }
@@ -243,7 +264,15 @@ const getAllContent = async (req, res) => {
             {
               $or: [
                 ...branchConditions.map(r => ({ branch: r })),
-                ...branchConditions.map(r => ({ stream: r }))
+                ...branchConditions.map(r => ({ stream: r })),
+                { branch: null },
+                { branch: { $exists: false } },
+                { branch: '' },
+                { stream: null },
+                { stream: { $exists: false } },
+                { stream: '' },
+                { isCommon: true },
+                { isCommonFirstYear: true }
               ]
             },
             {
@@ -251,6 +280,7 @@ const getAllContent = async (req, res) => {
                 { semester: cleanSem },
                 { semester: semNum },
                 { semester: String(semester) },
+                { semester: new RegExp(`^0*${cleanSem}$`, 'i') },
                 { semester: /all/i },
                 { semester: null },
                 { semester: { $exists: false } }
@@ -261,15 +291,13 @@ const getAllContent = async (req, res) => {
 
         const commonMatch = {
           $or: [
-            { isCommon: true, semester: 1 },
-            { isCommon: true, semester: '1' },
-            { isCommon: true, semester: null },
-            { targetScope: 'engineering_first_year_common' },
-            { board: 'Engineering', semester: 1, isCommon: true },
-            { board: 'Engineering', semester: '1', isCommon: true },
+            { isCommon: true },
             { isCommonFirstYear: true },
-            { branch: /common/i },
-            { stream: /common/i }
+            { targetScope: 'engineering_first_year_common' },
+            { board: 'Engineering', isCommon: true },
+            { branch: /common|first\s*year|1st\s*year|all/i },
+            { stream: /common|first\s*year|1st\s*year|all/i },
+            { type: { $in: ['pyq', 'questionbank', 'practice', 'questions'] } }
           ]
         };
 
@@ -294,6 +322,12 @@ const getAllContent = async (req, res) => {
           const branchClauses = [
             ...branchConditions.map(r => ({ branch: r })),
             ...branchConditions.map(r => ({ stream: r })),
+            { branch: null },
+            { branch: { $exists: false } },
+            { branch: '' },
+            { stream: null },
+            { stream: { $exists: false } },
+            { stream: '' },
             { isCommonFirstYear: true },
             { isCommon: true },
             { targetScope: 'engineering_first_year_common' }
@@ -312,6 +346,7 @@ const getAllContent = async (req, res) => {
           ];
           if (!isNaN(semNum) && semNum > 0) {
             semConditions.push({ semester: semNum });
+            semConditions.push({ semester: new RegExp(`^0*${semNum}$`, 'i') });
           }
           if (semNum === 1 || semNum === 2) {
             semConditions.push({ branch: /common/i });
@@ -347,24 +382,41 @@ const getAllContent = async (req, res) => {
 
     if (type) {
       const normType = String(type).trim().toLowerCase();
-      let typeClause;
+      let typeClause = null;
       if (normType === 'syllabus' || normType === 'curriculum') {
         typeClause = { type: { $in: [/^syllabus$/i, /^curriculum$/i] } };
       } else if (normType === 'materials' || normType === 'material' || normType === 'notes') {
         typeClause = { type: { $in: [/^materials?$/i, /^notes?$/i, /^study_materials?$/i, /^textbooks?$/i, /^lecture$/i] } };
-      } else if (normType === 'pyq' || normType === 'pyqs') {
-        typeClause = { type: { $in: [/^pyqs?$/i, /^previous_year$/i, /^pyq_solution$/i] } };
+      } else if (normType === 'pyq' || normType === 'pyqs' || normType === 'previous_year') {
+        typeClause = {
+          $or: [
+            { type: { $in: [/^pyqs?$/i, /^previous_year$/i, /^pyq_solution$/i] } },
+            { isPYQ: true },
+            { category: 'pyq' }
+          ]
+        };
+      } else if (['questionbank', 'question_bank', 'question', 'questions', 'qbank', 'practice'].includes(normType)) {
+        typeClause = {
+          $or: [
+            { type: { $in: [/^questionbanks?$/i, /^questions?$/i, /^qbanks?$/i, /^practice$/i, /^pyqs?$/i, /^previous_year$/i] } },
+            { category: { $in: ['practice', 'pyq', 'questionbank', 'test_question'] } },
+            { isPYQ: { $in: [true, false] } },
+            { questionText: { $exists: true, $ne: '' } }
+          ]
+        };
       } else if (normType === 'assignment' || normType === 'assignments') {
         typeClause = { type: { $in: [/^assignments?$/i, /^homework$/i, /^problem_set$/i] } };
       } else if (normType === 'classtest' || normType === 'classtests') {
         typeClause = { type: { $in: [/^classtests?$/i, /^test$/i, /^exam$/i] } };
-      } else {
+      } else if (normType !== 'all') {
         typeClause = { type: new RegExp(`^${escapeRegex(type)}$`, 'i') };
       }
-      if (query.$and) {
-        query.$and.push(typeClause);
-      } else {
-        Object.assign(query, typeClause);
+      if (typeClause) {
+        if (query.$and) {
+          query.$and.push(typeClause);
+        } else {
+          Object.assign(query, typeClause);
+        }
       }
     }
 
@@ -648,12 +700,12 @@ const saveContent = async (req, res) => {
         itemData.stream === 'Common 1st Year' ||
         itemData.targetAudience === 'common_1st_year' ||
         itemData.branch === 'All Branches' ||
-        (Number(semester) <= 2 && (/common/i.test(branch || '') || /common/i.test(stream || '')))
+        (Number(semester) <= 2 && (itemData.type === 'pyq' || itemData.type === 'questionbank' || /common/i.test(branch || '') || /common/i.test(stream || '')))
       );
 
       if (isCommonExplicit) {
         board = 'Engineering';
-        semester = 1;
+        semester = itemData.semester !== undefined && itemData.semester !== null && itemData.semester !== '' ? itemData.semester : 1;
         branch = itemData.branch || 'Common 1st Year';
         stream = itemData.stream || itemData.branch || 'Common 1st Year';
         isCommon1stYr = true;
