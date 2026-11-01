@@ -2,6 +2,8 @@ const mongoose = require('mongoose');
 
 const contentSchema = new mongoose.Schema({
   id: { type: String, unique: true, sparse: true, index: true },
+  itemId: { type: String, index: true, sparse: true },
+  customId: { type: String, index: true, sparse: true },
   title: { type: String, required: true },
   type: { type: String, required: true, index: true }, // 'syllabus', 'materials', 'pyq', 'assignment', 'classtest', etc.
   course: { type: String, index: true }, // 'engineering', 'cbse', 'jee', 'bsc'

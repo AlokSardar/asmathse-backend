@@ -14,11 +14,25 @@ if (!fs.existsSync(uploadsDir)) {
   fs.mkdirSync(uploadsDir, { recursive: true });
 }
 
-// Helper to construct safe ID query (supports id, testId, and _id)
+// Helper: Validate 24-character hexadecimal MongoDB ObjectId
+const isValidObjectId = (val) => {
+  if (!val) return false;
+  const str = String(val).trim();
+  return /^[0-9a-fA-F]{24}$/.test(str) && mongoose.Types.ObjectId.isValid(str);
+};
+
+// Helper to construct safe ID query (supports id, itemId, customId, testId, and _id)
 const buildIdQuery = (targetId) => {
-  const orConditions = [{ id: targetId }, { testId: targetId }];
-  if (mongoose.Types.ObjectId.isValid(targetId)) {
-    orConditions.push({ _id: targetId });
+  if (!targetId) return { _id: null };
+  const strId = String(targetId).trim();
+  const orConditions = [
+    { id: strId },
+    { itemId: strId },
+    { customId: strId },
+    { testId: strId }
+  ];
+  if (isValidObjectId(strId)) {
+    orConditions.push({ _id: new mongoose.Types.ObjectId(strId) });
   }
   return { $or: orConditions };
 };
@@ -404,9 +418,21 @@ const saveContent = async (req, res) => {
     const isAssignment = itemData.type === 'assignment' || itemData.type === 'assignments';
     const isTestItem = isClassTest || isAssignment;
 
+    // Separate custom string ID (such as pyq_..., qb_..., up_...) from MongoDB ObjectId
+    const customStringId = 
+      (itemData.id && typeof itemData.id === 'string' ? itemData.id.trim() : null) ||
+      (itemData.itemId && typeof itemData.itemId === 'string' ? itemData.itemId.trim() : null) ||
+      (itemData.customId && typeof itemData.customId === 'string' ? itemData.customId.trim() : null) ||
+      (itemData._id && !isValidObjectId(itemData._id) ? String(itemData._id).trim() : null);
+
+    // If _id is a valid 24-char ObjectId, preserve it for existing record matching
+    const targetMongoId = isValidObjectId(itemData._id) ? String(itemData._id).trim() : null;
+
     // Unique Test_ID to strictly isolate test submissions, question papers, and answer keys
-    const testId = itemData.testId || (isTestItem ? `TEST_${Date.now()}_${Math.random().toString(36).substr(2, 6).toUpperCase()}` : (itemData.id || `up_${Date.now()}_${Math.random().toString(36).substr(2, 6)}`));
-    const id = itemData.id || testId;
+    const testId = itemData.testId || (isTestItem ? `TEST_${Date.now()}_${Math.random().toString(36).substr(2, 6).toUpperCase()}` : (customStringId || `up_${Date.now()}_${Math.random().toString(36).substr(2, 6)}`));
+    const id = customStringId || testId;
+    const itemId = itemData.itemId || customStringId || id;
+    const customId = itemData.customId || customStringId || id;
 
     let fileHash = itemData.fileHash || null;
     let fileUrl = itemData.fileUrl || null;
@@ -646,6 +672,8 @@ const saveContent = async (req, res) => {
     const payload = {
       ...itemData,
       id,
+      itemId,
+      customId,
       testId: isTestItem ? testId : (itemData.testId || null),
       resourceType,
       videoUrl,
@@ -676,8 +704,21 @@ const saveContent = async (req, res) => {
       isCommonFirstYear: isEngCommon,
     };
 
+    // Guarantee that _id is never set to a custom string ID in the payload.
+    // Also delete _id from $set payload so MongoDB never rejects immutable _id mutation during update.
+    delete payload._id;
+
     // Check if this is an update vs new creation
-    const existingRecord = await Content.findOne({ $or: [{ id }, ...(testId ? [{ testId }] : [])] });
+    const matchConditions = [
+      { id },
+      { itemId: id },
+      { customId: id },
+      ...(testId ? [{ testId }] : [])
+    ];
+    if (targetMongoId) {
+      matchConditions.unshift({ _id: new mongoose.Types.ObjectId(targetMongoId) });
+    }
+    const existingRecord = await Content.findOne({ $or: matchConditions });
 
     // ── Duplicate Test Name Validation & Prevention ─────────────────
     if (isClassTest) {
@@ -698,7 +739,10 @@ const saveContent = async (req, res) => {
 
       if (existingDup) {
         const isSelf = String(existingDup.id) === String(id) || 
+                       String(existingDup.itemId) === String(itemId) || 
+                       String(existingDup.customId) === String(customId) || 
                        String(existingDup._id) === String(id) || 
+                       (targetMongoId && String(existingDup._id) === String(targetMongoId)) ||
                        (existingRecord && String(existingDup._id) === String(existingRecord._id)) ||
                        (existingDup.testId && testId && String(existingDup.testId) === String(testId));
         if (!isSelf) {
@@ -732,17 +776,24 @@ const saveContent = async (req, res) => {
       isCommonFirstYear: payload.isCommonFirstYear
     }, null, 2));
 
-    // Upsert by custom id, testId, or title to strictly prevent twin copies
-    const upsertFilter = {
-      $or: [
-        { id },
-        ...(testId ? [{ testId }] : []),
-        ...(isClassTest && payload.title ? [{ 
-          title: new RegExp(`^${escapeRegex(payload.title.trim())}$`, 'i'), 
-          type: { $in: ['classtest', 'classtests', 'test'] } 
-        }] : [])
-      ]
-    };
+    // Upsert by custom id, itemId, customId, testId, title, or matched document _id
+    const upsertConditions = [
+      { id },
+      { itemId: id },
+      { customId: id },
+      ...(testId ? [{ testId }] : []),
+      ...(isClassTest && payload.title ? [{ 
+        title: new RegExp(`^${escapeRegex(payload.title.trim())}$`, 'i'), 
+        type: { $in: ['classtest', 'classtests', 'test'] } 
+      }] : [])
+    ];
+    if (existingRecord) {
+      upsertConditions.unshift({ _id: existingRecord._id });
+    } else if (targetMongoId) {
+      upsertConditions.unshift({ _id: new mongoose.Types.ObjectId(targetMongoId) });
+    }
+
+    const upsertFilter = existingRecord ? { _id: existingRecord._id } : { $or: upsertConditions };
 
     const saved = await Content.findOneAndUpdate(
       upsertFilter,
@@ -849,12 +900,24 @@ const batchSyncContent = async (req, res) => {
     }
 
     const ops = items.map((item) => {
-      const id = item.id || `up_${Date.now()}_${Math.random().toString(36).substr(2, 6)}`;
+      const customStringId = 
+        (item.id && typeof item.id === 'string' ? item.id.trim() : null) ||
+        (item.itemId && typeof item.itemId === 'string' ? item.itemId.trim() : null) ||
+        (item.customId && typeof item.customId === 'string' ? item.customId.trim() : null) ||
+        (item._id && !isValidObjectId(item._id) ? String(item._id).trim() : null);
+
+      const targetMongoId = isValidObjectId(item._id) ? String(item._id).trim() : null;
+      const id = customStringId || `up_${Date.now()}_${Math.random().toString(36).substr(2, 6)}`;
+      const itemId = item.itemId || customStringId || id;
+      const customId = item.customId || customStringId || id;
+      
       const rawC = String(item.course || item.board || item.targetCourse || '').trim().toLowerCase();
       const rawCl = item.classLevel || item.class;
       const isCbse = rawC.includes('cbse') || rawC.includes('school') || (rawCl && /class/i.test(rawCl));
       
       const normalized = { ...item };
+      delete normalized._id; // Guarantee no CastError or immutable _id error
+
       if (isCbse) {
         normalized.course = 'cbse';
         normalized.board = 'CBSE';
@@ -865,18 +928,29 @@ const batchSyncContent = async (req, res) => {
         normalized.class = normalized.classLevel;
       }
 
+      const orConditions = [
+        { id },
+        { itemId },
+        { customId }
+      ];
+      if (targetMongoId) {
+        orConditions.unshift({ _id: new mongoose.Types.ObjectId(targetMongoId) });
+      }
+
       const isTest = ['classtest', 'classtests', 'test'].includes(String(item.type).toLowerCase());
-      const filter = isTest && item.title
-        ? { $or: [{ id }, { title: item.title, course: normalized.course }] }
-        : { id };
+      if (isTest && item.title) {
+        orConditions.push({ title: item.title, course: normalized.course });
+      }
 
       return {
         updateOne: {
-          filter,
+          filter: { $or: orConditions },
           update: { 
             $set: { 
               ...normalized, 
               id, 
+              itemId,
+              customId,
               uploadedAt: item.uploadedAt || new Date() 
             } 
           },
@@ -936,6 +1010,8 @@ const deleteContent = async (req, res) => {
 
     if (contentItem) {
       if (contentItem.id) allIds.add(String(contentItem.id));
+      if (contentItem.itemId) allIds.add(String(contentItem.itemId));
+      if (contentItem.customId) allIds.add(String(contentItem.customId));
       if (contentItem._id) allIds.add(String(contentItem._id));
       if (contentItem.testId) allTestIds.add(String(contentItem.testId));
       if (contentItem.title) allTitles.add(String(contentItem.title));
@@ -944,6 +1020,8 @@ const deleteContent = async (req, res) => {
 
     if (classTestItem) {
       if (classTestItem.id) allIds.add(String(classTestItem.id));
+      if (classTestItem.itemId) allIds.add(String(classTestItem.itemId));
+      if (classTestItem.customId) allIds.add(String(classTestItem.customId));
       if (classTestItem._id) allIds.add(String(classTestItem._id));
       if (classTestItem.testId) allTestIds.add(String(classTestItem.testId));
       if (classTestItem.title) allTitles.add(String(classTestItem.title));
@@ -955,7 +1033,9 @@ const deleteContent = async (req, res) => {
     const deleteOr = [];
     allIds.forEach(idVal => {
       deleteOr.push({ id: idVal });
-      if (mongoose.Types.ObjectId.isValid(idVal)) {
+      deleteOr.push({ itemId: idVal });
+      deleteOr.push({ customId: idVal });
+      if (isValidObjectId(idVal)) {
         deleteOr.push({ _id: new mongoose.Types.ObjectId(idVal) });
       }
     });
