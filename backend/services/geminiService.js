@@ -756,10 +756,33 @@ The AI MUST output standard step-by-step problem-solving steps:
 - Step 3: Detailed Step-by-Step Computational Evaluation
 - Step 4: Final Exact Mathematical Answer and Verification
 
-LATEX MATH FORMATTING RULES:
-- All inline mathematical symbols, variables, and short expressions MUST be enclosed in single dollar signs ($...$), e.g. $f(x)$, $f'(c)=0$, $[a,b]$, $c \\in (a,b)$, $A$, $\\lambda$.
-- All standalone equations, multiline formulas, and matrices MUST be enclosed in double dollar signs ($$...$$), e.g. $$f'(c) = 0$$, $$\\begin{pmatrix} a & b \\\\ c & d \\end{pmatrix}$$.
-- NEVER leave raw backslashes without delimiters.
+LATEX MATH FORMATTING & TEXT SPACING RULES (CRITICAL):
+- DELIMITERS:
+  * All inline mathematical symbols, variables, and short expressions MUST be enclosed in single dollar signs ($...$), e.g. $f(x)$, $f'(c)=0$, $[a,b]$, $c \\in (a,b)$, $A$, $\\lambda$.
+  * All standalone equations, multiline formulas, and matrices MUST be enclosed in double dollar signs ($$...$$), e.g. $$f'(c) = 0$$, $$\\begin{pmatrix} a & b \\\\ c & d \\end{pmatrix}$$.
+  * NEVER leave raw backslashes without delimiters.
+
+- ENFORCE PROPER TEXT SPACING INSIDE & ALONGSIDE LATEX EQUATIONS:
+  * Rule for Explanatory Text: Any descriptive English words, phrases, or connectors (such as "Since", "for", "we conclude", "where", "and", "such that", "with", "if", "then", "hence", "therefore") appearing inside or alongside mathematical equations MUST NEVER be cramped together without spaces.
+  * Formatting Standard:
+    (a) PREFERRED: Place explanatory text completely OUTSIDE of math delimiters ($ ... $ or $$ ... $$) as normal markdown text in the "explanation" field.
+        Example: "Since $R_4(x) > 0$ for $0 < x < \\frac{\\pi}{2}$, we conclude that $f(x) > P_3(x)$."
+    (b) IF TEXT MUST APPEAR INSIDE A MATH BLOCK (such as in the "math" field or display equations):
+        Enforce the use of proper LaTeX text spacing wrappers with explicit leading and trailing spaces, such as:
+        \\text{ Since } or \\text{Since }
+        \\text{ for }
+        \\text{ we conclude }
+        \\text{ where }
+        \\text{ and }
+        \\quad \\text{...} \\quad
+        Example of CORRECT spacing:
+        \\text{Since } R_4(x) > 0 \\text{ for } 0 < x < \\frac{\\pi}{2}, \\text{ we conclude } f(x) > P_3(x)
+        OR:
+        R_n(x) = \\frac{f^{(n+1)}(c)}{(n+1)!}(x-a)^{n+1} \\quad \\text{for some } c \\in (a, x)
+        Example of INCORRECT cramped spacing (STRICTLY FORBIDDEN):
+        Since R_4(x) > 0 for 0 < x (NEVER write English words in math mode without \\text)
+        \\text{Since}R_4(x)\\text{for}0<x (NEVER omit spacing inside or outside \\text)
+  * Ensure output equations render cleanly with standard human-readable spacing across all screen sizes.
 
 OUTPUT JSON FORMAT:
 Return strictly a valid JSON object matching this schema:
