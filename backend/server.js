@@ -14,8 +14,30 @@ connectDB();
 
 const app = express();
 
-// Enable CORS globally across all endpoints and static assets
-app.use(cors());
+// Trust proxy for accurate client IP identification on Render / cloud reverse proxies
+app.set('trust proxy', 1);
+
+// Security Hardening: HTTP Security Headers via Helmet (XSS, Clickjacking, MIME sniffing protection)
+const {
+  securityHeaders,
+  strictCors,
+  apiLimiter,
+  authLimiter,
+  doubtLimiter,
+} = require('./middleware/securityMiddleware');
+
+const { verifyRoleSegregation } = require('./middleware/authMiddleware');
+
+app.use(securityHeaders);
+
+// Strict CORS Configuration: allows live production frontend domain and authorized origins
+app.use(strictCors);
+
+// Global API Rate Limiter
+app.use('/api', apiLimiter);
+
+// Role-Segregation Guard: strictly blocks student privilege escalation to administrative endpoints
+app.use(verifyRoleSegregation);
 
 // Ensure local uploads directory exists (Atlas Free Tier file system storage)
 const uploadsDir = path.join(__dirname, 'uploads');
@@ -51,8 +73,8 @@ const testRoutes = require('./routes/testRoutes');
 const feeRoutes = require('./routes/feeRoutes');
 const approvalRoutes = require('./routes/approvalRoutes');
 
-// Mount routers
-app.use('/api/auth', authRoutes);
+// Mount routers with sensitive route protection
+app.use('/api/auth', authLimiter, authRoutes);
 app.use('/api/approvals', approvalRoutes);
 app.use('/api/content', contentRoutes);
 app.use('/api/evaluations', evaluationRoutes);
@@ -60,13 +82,16 @@ app.use('/api/analytics', activityRoutes);
 app.use('/api/notifications', notificationRoutes);
 app.use('/api/notices', notificationRoutes);
 app.use('/api/admin', adminRoutes);
+
+// Rate-limit doubt submission endpoints against automated spam/abuse
+app.use(['/api/student/solve-doubt', '/api/student/doubt'], doubtLimiter);
 app.use('/api/student', studentRoutes);
 app.use('/api/tests', testRoutes);
 app.use('/api/fees', feeRoutes);
 
-// Direct Aliases for AI Doubt Solver API
+// Direct Aliases for AI Doubt Solver API with rate limiting
 const { solveStudentDoubt } = require('./controllers/studentController');
-app.post(['/api/solve-doubt', '/api/doubt'], solveStudentDoubt);
+app.post(['/api/solve-doubt', '/api/doubt'], doubtLimiter, solveStudentDoubt);
 
 // Database Health & Status check endpoint
 app.get('/api/health', async (req, res) => {

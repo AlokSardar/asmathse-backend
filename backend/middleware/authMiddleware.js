@@ -49,4 +49,48 @@ const authorize = (...roles) => {
   };
 };
 
-module.exports = { protect, authorize };
+/**
+ * Explicit Role-Segregation Guards:
+ * Segregates Student and Teacher/Admin access to prevent unauthorized privilege escalation.
+ */
+const requireAdmin = [protect, authorize('admin', 'teacher')];
+const requireStudent = [protect, authorize('student')];
+
+/**
+ * Non-destructive Role-Segregation Inspector:
+ * Whenever an authorization header is present, ensures student tokens cannot
+ * execute administrative mutations or approval actions.
+ */
+const verifyRoleSegregation = (req, res, next) => {
+  if (req.headers.authorization && req.headers.authorization.startsWith('Bearer')) {
+    try {
+      const token = req.headers.authorization.split(' ')[1];
+      const secret = process.env.JWT_SECRET || 'asmaths_secret_jwt_key_2026_cluster0';
+      const decoded = jwt.verify(token, secret);
+      const role = (decoded.role || '').toLowerCase();
+
+      const path = req.originalUrl || req.url || '';
+      if (
+        role === 'student' &&
+        (path.includes('/api/admin') || path.includes('/api/approvals') || path.includes('/approve/') || path.includes('/reject/'))
+      ) {
+        return res.status(403).json({
+          success: false,
+          message: 'Forbidden: Student accounts are not permitted to access administrative management endpoints.',
+        });
+      }
+    } catch (_) {
+      // Allow protected handlers to return standard 401 on malformed tokens
+    }
+  }
+  next();
+};
+
+module.exports = {
+  protect,
+  authorize,
+  requireAdmin,
+  requireStudent,
+  requireRole: authorize,
+  verifyRoleSegregation,
+};
