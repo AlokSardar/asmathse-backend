@@ -46,11 +46,10 @@ const getAvailableGeminiModels = async (apiKey) => {
   }
 
   const preferredOrder = [
-    'gemini-1.5-pro',
-    'gemini-pro',
-    'gemini-1.5-flash-latest',
+    'gemini-2.5-flash',
     'gemini-2.0-flash',
     'gemini-1.5-flash',
+    'gemini-1.5-pro',
   ];
 
   try {
@@ -78,9 +77,9 @@ const getAvailableGeminiModels = async (apiKey) => {
           resolved.push(pref);
         }
       }
-      // Add any other models starting with gemini
+      // Add any other models starting with gemini (excluding legacy text-only gemini-pro)
       for (const sm of serverModels) {
-        if (sm.startsWith('gemini') && !resolved.includes(sm)) {
+        if (sm.startsWith('gemini') && !resolved.includes(sm) && sm !== 'gemini-pro') {
           resolved.push(sm);
         }
       }
@@ -365,13 +364,13 @@ Respond ONLY with valid, raw, parseable JSON matching this exact schema — no m
 }`;
 
     let pageQuestions = [];
+    let lastError = null;
 
     for (const modelName of candidateModels) {
       try {
         const parts = [];
-        const isMultimodalSupported = modelName !== 'gemini-pro';
 
-        if (pageObj.buffer && isMultimodalSupported) {
+        if (pageObj.buffer) {
           parts.push({
             inline_data: {
               mime_type: pageObj.mime || 'application/pdf',
@@ -390,12 +389,9 @@ Respond ONLY with valid, raw, parseable JSON matching this exact schema — no m
           generationConfig: {
             temperature: 0.1,
             maxOutputTokens: 8192,
+            response_mime_type: 'application/json',
           },
         };
-
-        if (modelName.includes('1.5') || modelName.includes('2.0') || modelName.includes('flash')) {
-          requestBody.generationConfig.response_mime_type = 'application/json';
-        }
 
         const resp = await fetch(geminiUrl, {
           method: 'POST',
@@ -403,39 +399,55 @@ Respond ONLY with valid, raw, parseable JSON matching this exact schema — no m
           body: JSON.stringify(requestBody),
         });
 
-        if (resp.ok) {
-          const respJson = await resp.json();
-          const candidateText = respJson.candidates?.[0]?.content?.parts?.[0]?.text;
-          if (candidateText) {
-            const parsed = parseGeminiJsonWithRecovery(candidateText);
-            const qList = (parsed && Array.isArray(parsed.questions)) ? parsed.questions : (Array.isArray(parsed) ? parsed : []);
-            if (qList.length > 0) {
-              pageQuestions = qList.map((q, idx) => ({
-                q_no: q.q_no || q.questionNumber || `Q${accumulatedQuestions.length + idx + 1}`,
-                max_marks: Number(q.max_marks || q.marks || q.maxMarks) || Math.max(1, Math.floor(totalMarks / (qList.length * totalPages))),
-                problem_statement_latex: q.problem_statement_latex || q.questionText || q.problem || '',
-                solution_latex: q.solution_latex || q.stepByStepLatex || q.solution || '',
-                final_answer_latex: q.final_answer_latex || q.finalAnswer || q.answer || '',
-                pageNumber: pageNum,
-              }));
-              successfulModel = modelName;
-              console.log(`✅ [PAGE ${pageNum}/${totalPages} SUCCESS]: Extracted ${pageQuestions.length} questions via ${modelName}`);
-              break;
-            }
+        if (!resp.ok) {
+          const errBody = await resp.text().catch(() => '');
+          lastError = `Model ${modelName} returned HTTP ${resp.status}: ${errBody}`;
+          console.warn(`⚠️ [GEMINI API]: ${lastError}`);
+          if (resp.status === 401 || resp.status === 403) {
+            throw new Error(`Google Gemini API authentication failed (HTTP ${resp.status}): Invalid API key or insufficient permissions. Details: ${errBody}`);
+          }
+          continue;
+        }
+
+        const respJson = await resp.json();
+        const candidateText = respJson.candidates?.[0]?.content?.parts?.[0]?.text;
+        if (candidateText) {
+          const parsed = parseGeminiJsonWithRecovery(candidateText);
+          const qList = (parsed && Array.isArray(parsed.questions)) ? parsed.questions : (Array.isArray(parsed) ? parsed : []);
+          if (qList.length > 0) {
+            pageQuestions = qList.map((q, idx) => ({
+              q_no: q.q_no || q.questionNumber || `Q${accumulatedQuestions.length + idx + 1}`,
+              max_marks: Number(q.max_marks || q.marks || q.maxMarks) || Math.max(1, Math.floor(totalMarks / (qList.length * totalPages))),
+              problem_statement_latex: q.problem_statement_latex || q.questionText || q.problem || '',
+              solution_latex: q.solution_latex || q.stepByStepLatex || q.solution || '',
+              final_answer_latex: q.final_answer_latex || q.finalAnswer || q.answer || '',
+              pageNumber: pageNum,
+            }));
+            successfulModel = modelName;
+            console.log(`✅ [PAGE ${pageNum}/${totalPages} SUCCESS]: Extracted ${pageQuestions.length} questions via ${modelName}`);
+            break;
           }
         }
       } catch (err) {
+        if (err.message.includes('authentication failed')) throw err;
+        lastError = err.message;
         console.warn(`Page ${pageNum} model ${modelName} notice:`, err.message);
       }
     }
 
     if (pageQuestions.length > 0) {
       accumulatedQuestions.push(...pageQuestions);
+    } else {
+      console.warn(`⚠️ [PAGE ${pageNum}/${totalPages}]: No questions could be extracted. Last diagnostic: ${lastError || 'None'}`);
     }
   }
 
   // Loop completes on the last page -> finalize
   console.log(`🏁 [ANSWER KEY LOOP COMPLETED]: Extracted total of ${accumulatedQuestions.length} questions across ${totalPages} pages.`);
+
+  if (accumulatedQuestions.length === 0 && totalPages > 0) {
+    throw new Error(`Gemini question extraction completed with 0 questions across all pages. Please verify document readability or API quota.`);
+  }
 
   return {
     generatedBy: `Google Gemini API (${successfulModel}) - Sequential Page-by-Page`,
@@ -566,13 +578,13 @@ Respond ONLY with valid, raw, parseable JSON matching this exact schema — no m
 
     let pageQuestions = [];
     let pageStreamed = false;
+    let lastStreamError = null;
 
     for (const modelName of candidateModels) {
       try {
         const parts = [];
-        const isMultimodalSupported = modelName !== 'gemini-pro';
 
-        if (pageObj.buffer && isMultimodalSupported) {
+        if (pageObj.buffer) {
           parts.push({
             inline_data: {
               mime_type: pageObj.mime || 'application/pdf',
@@ -591,12 +603,9 @@ Respond ONLY with valid, raw, parseable JSON matching this exact schema — no m
           generationConfig: {
             temperature: 0.1,
             maxOutputTokens: 8192,
+            response_mime_type: 'application/json',
           },
         };
-
-        if (modelName.includes('1.5') || modelName.includes('2.0') || modelName.includes('flash')) {
-          requestBody.generationConfig.response_mime_type = 'application/json';
-        }
 
         const resp = await fetch(streamUrl, {
           method: 'POST',
@@ -604,7 +613,15 @@ Respond ONLY with valid, raw, parseable JSON matching this exact schema — no m
           body: JSON.stringify(requestBody),
         });
 
-        if (!resp.ok) continue;
+        if (!resp.ok) {
+          const errBody = await resp.text().catch(() => '');
+          lastStreamError = `Model ${modelName} returned HTTP ${resp.status}: ${errBody}`;
+          console.warn(`⚠️ [GEMINI STREAM API]: ${lastStreamError}`);
+          if (resp.status === 401 || resp.status === 403) {
+            throw new Error(`Google Gemini API authentication failed (HTTP ${resp.status}): Invalid API key or insufficient permissions. Details: ${errBody}`);
+          }
+          continue;
+        }
 
         let pageAccumulatedText = '';
         let pageEmittedCount = 0;
@@ -686,9 +703,15 @@ Respond ONLY with valid, raw, parseable JSON matching this exact schema — no m
           break;
         }
       } catch (streamErr) {
+        if (streamErr.message.includes('authentication failed')) throw streamErr;
+        lastStreamError = streamErr.message;
         console.warn(`Stream attempt for page ${pageNum} with ${modelName} notice:`, streamErr.message);
       }
     }
+  }
+
+  if (accumulatedQuestions.length === 0 && totalPages > 0) {
+    throw new Error(`Gemini streaming extraction completed with 0 questions across all pages. ${lastStreamError || 'Please verify document clarity or API quota.'}`);
   }
 
   // Loop completed on the last page -> finalize

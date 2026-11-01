@@ -1353,8 +1353,17 @@ const generateAnswerKeyStream = async (req, res) => {
   res.flushHeaders?.();
 
   const sendEvent = (event, data) => {
-    res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+    if (!res.writableEnded) {
+      res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+    }
   };
+
+  // Keepalive heartbeat to prevent reverse proxy (Render, Cloudflare, Nginx) timeout
+  const keepaliveTimer = setInterval(() => {
+    if (!res.writableEnded) {
+      res.write(': keepalive\n\n');
+    }
+  }, 8000);
 
   try {
     const targetId = req.params.id;
@@ -1456,6 +1465,8 @@ const generateAnswerKeyStream = async (req, res) => {
     console.error('Error in generateAnswerKeyStream:', err);
     sendEvent('error', { message: err.message || 'Streaming generation failed' });
     res.end();
+  } finally {
+    clearInterval(keepaliveTimer);
   }
 };
 
