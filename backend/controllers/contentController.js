@@ -1599,6 +1599,115 @@ const generateAnswerKeyStream = async (req, res) => {
   }
 };
 
+// @desc    Live AI Question Extraction from uploaded PDF/image/text using Gemini
+// @route   POST /api/content/extract-questions
+// @access  Public / Protected
+const extractQuestions = async (req, res) => {
+  try {
+    let fileBuffer = null;
+    let fileMime = 'application/pdf';
+    let textContent = req.body?.textContent || '';
+
+    if (req.file) {
+      fileBuffer = req.file.buffer;
+      fileMime = req.file.mimetype || 'application/pdf';
+    } else if (req.body?.fileDataUrl && req.body.fileDataUrl.startsWith('data:')) {
+      const parts = req.body.fileDataUrl.split(',');
+      const mimeMatch = parts[0].match(/:(.*?);/);
+      if (mimeMatch) fileMime = mimeMatch[1];
+      fileBuffer = Buffer.from(parts[1], 'base64');
+    }
+
+    const {
+      title = 'Uploaded Source Document',
+      course = 'engineering',
+      branch = 'CSE',
+      subject = 'Mathematics',
+      classLevel = '',
+      marks = 50,
+      customPrompt = ''
+    } = req.body || {};
+
+    console.log(`[AI EXTRACT]: Starting AI question extraction for "${title}" (${fileBuffer ? (fileBuffer.length / 1024).toFixed(1) + ' KB' : 'Text'})`);
+
+    const extractionResult = await generateAnswerKeyForQuestionPaper({
+      title,
+      course,
+      branch,
+      classLevel,
+      subject,
+      marks: Number(marks) || 50,
+      fileBuffer,
+      fileMime,
+      textContent,
+      customPrompt
+    });
+
+    const questions = (extractionResult?.questions || []).map((q, idx) => ({
+      id: `ext-${Date.now()}-${idx + 1}`,
+      qNo: q.q_no || `Q${idx + 1}`,
+      statement: q.problem_statement_latex || q.statement || '',
+      marks: Number(q.max_marks || q.marks || 5),
+      diff: q.marks <= 2 ? 'Easy' : q.marks <= 5 ? 'Medium' : 'Hard',
+      qType: q.marks <= 2 ? 'Short' : q.marks <= 5 ? 'Medium' : 'Long',
+      chapter: q.topic || 'Calculus',
+      topic: q.subCategory || q.topic || 'General',
+      solution: q.solution_latex || '',
+      finalAnswer: q.final_answer_latex || '',
+      formula: q.formula || '',
+      status: 'ready',
+      validationResult: 'valid',
+      validationIssue: '—',
+      validationSuggestion: ''
+    }));
+
+    return res.status(200).json({
+      success: true,
+      count: questions.length,
+      questions,
+      sourceTitle: title,
+      generatedBy: extractionResult.generatedBy || 'Google Gemini API'
+    });
+  } catch (error) {
+    console.error('Error during AI question extraction:', error);
+    return res.status(500).json({
+      success: false,
+      message: error.message || 'Failed to extract questions with Gemini AI'
+    });
+  }
+};
+
+// @desc    Bulk Delete Content items
+// @route   POST /api/content/bulk-delete
+// @access  Public / Protected
+const bulkDeleteContent = async (req, res) => {
+  try {
+    const { ids } = req.body || {};
+    if (!Array.isArray(ids) || ids.length === 0) {
+      return res.status(400).json({ success: false, message: 'Array of ids is required' });
+    }
+
+    const query = {
+      $or: [
+        { id: { $in: ids } },
+        { customId: { $in: ids } },
+        { itemId: { $in: ids } },
+        { _id: { $in: ids.filter(id => mongoose.Types.ObjectId.isValid(id)) } }
+      ]
+    };
+
+    const result = await Content.deleteMany(query);
+    return res.status(200).json({
+      success: true,
+      deletedCount: result.deletedCount,
+      message: `Successfully deleted ${result.deletedCount} items`
+    });
+  } catch (error) {
+    console.error('Error in bulkDeleteContent:', error);
+    return res.status(500).json({ success: false, message: error.message });
+  }
+};
+
 module.exports = {
   getAllContent,
   getContentById,
@@ -1610,4 +1719,6 @@ module.exports = {
   updateAnswerKey,
   generateAnswerKey,
   generateAnswerKeyStream,
+  extractQuestions,
+  bulkDeleteContent,
 };

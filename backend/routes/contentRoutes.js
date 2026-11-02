@@ -11,6 +11,8 @@ const {
   updateAnswerKey,
   generateAnswerKey,
   generateAnswerKeyStream,
+  extractQuestions,
+  bulkDeleteContent,
 } = require('../controllers/contentController');
 
 const { upload } = require('../middleware/uploadMiddleware');
@@ -18,6 +20,8 @@ const { upload } = require('../middleware/uploadMiddleware');
 router.get('/', getAllContent);
 router.post('/', upload.single('file'), saveContent);
 router.post('/batch', batchSyncContent);
+router.post('/extract-questions', upload.single('file'), extractQuestions);
+router.post('/bulk-delete', bulkDeleteContent);
 router.delete('/', clearAllContent);
 router.get('/:id/answer-key', getAnswerKey);
 router.put('/:id/answer-key', updateAnswerKey);

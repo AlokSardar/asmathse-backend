@@ -1,3 +1,4 @@
+const mongoose = require('mongoose');
 const Content = require('../models/Content');
 const Assignment = require('../models/Assignment');
 const Submission = require('../models/Submission');
@@ -355,10 +356,85 @@ const getAcademicYearOverview = async (req, res) => {
   }
 };
 
+// @desc    Delete a single student by id or email
+// @route   DELETE /api/admin/students/:id
+// @access  Protected (Admin)
+const deleteStudent = async (req, res) => {
+  try {
+    const studentId = req.params.id;
+    let student = null;
+    if (studentId && mongoose.Types?.ObjectId?.isValid(studentId)) {
+      student = await Student.findById(studentId);
+    }
+    if (!student) {
+      student = await Student.findOne({ $or: [{ email: studentId }, { _id: studentId }] });
+    }
+
+    if (student) {
+      await Student.deleteOne({ _id: student._id });
+      if (student.email) {
+        await User.deleteOne({ email: student.email.toLowerCase() });
+      }
+      return res.json({ success: true, message: `Student ${student.name || studentId} deleted successfully` });
+    }
+
+    // Check User collection directly
+    const user = await User.findOne({ $or: [{ _id: studentId }, { email: studentId }] });
+    if (user) {
+      await User.deleteOne({ _id: user._id });
+      await Student.deleteOne({ email: user.email });
+      return res.json({ success: true, message: `Student ${user.name || studentId} deleted successfully` });
+    }
+
+    return res.status(404).json({ success: false, message: 'Student record not found' });
+  } catch (error) {
+    console.error('Error deleting student:', error);
+    return res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+// @desc    Bulk delete students
+// @route   POST /api/admin/students/bulk-delete
+// @access  Protected (Admin)
+const bulkDeleteStudents = async (req, res) => {
+  try {
+    const { ids } = req.body || {};
+    if (!Array.isArray(ids) || ids.length === 0) {
+      return res.status(400).json({ success: false, message: 'Array of student IDs or emails is required' });
+    }
+
+    const students = await Student.find({
+      $or: [
+        { _id: { $in: ids.filter(id => mongoose.Types?.ObjectId?.isValid(id)) } },
+        { email: { $in: ids } }
+      ]
+    });
+
+    const emails = students.map(s => s.email).filter(Boolean);
+    const validStudentIds = students.map(s => s._id);
+
+    await Student.deleteMany({ _id: { $in: validStudentIds } });
+    if (emails.length > 0) {
+      await User.deleteMany({ email: { $in: emails } });
+    }
+
+    return res.json({
+      success: true,
+      deletedCount: students.length,
+      message: `Successfully deleted ${students.length} students`
+    });
+  } catch (error) {
+    console.error('Error in bulkDeleteStudents:', error);
+    return res.status(500).json({ success: false, message: error.message });
+  }
+};
+
 module.exports = {
   uploadContent,
   createAssignment,
   getStudents,
   evaluateSubmission,
   getAcademicYearOverview,
+  deleteStudent,
+  bulkDeleteStudents,
 };

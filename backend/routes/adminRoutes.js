@@ -7,6 +7,8 @@ const {
   getStudents,
   evaluateSubmission,
   getAcademicYearOverview,
+  deleteStudent,
+  bulkDeleteStudents,
 } = require('../controllers/adminController');
 
 // Academic Year Overview (Public/Admin accessible for dashboard viewing)
@@ -19,6 +21,8 @@ router.use(authorize('admin'));
 router.post('/content', uploadContent);
 router.post('/assignments', createAssignment);
 router.get('/students/:stream/:semester', getStudents);
+router.delete('/students/:id', deleteStudent);
+router.post('/students/bulk-delete', bulkDeleteStudents);
 router.put('/submissions/:id', evaluateSubmission);
 
 module.exports = router;
