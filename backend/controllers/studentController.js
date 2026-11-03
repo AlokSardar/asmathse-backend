@@ -553,52 +553,73 @@ const getStudentAssignments = async (req, res) => {
   }
 };
 
-// @desc    Submit an assignment
+// @desc    Submit an assignment (persists directly to MongoDB Atlas)
 // @route   POST /api/student/submissions
-// @access  Private/Student
+// @access  Public / Student
 const submitAssignment = async (req, res) => {
-  let { assignmentId, answerFileUrl } = req.body;
   try {
-    // Check if already submitted
-    const existingSubmission = await Submission.findOne({
-      assignment: assignmentId,
-      student: req.user.id
-    });
-    
-    if (existingSubmission) {
-      return res.status(400).json({ message: 'Assignment already submitted' });
-    }
+    const data = req.body || {};
+    const studentId = req.user ? String(req.user.id || req.user._id) : String(data.studentId || data.studentEmail || 'student_std');
+    const assignmentId = String(data.assignmentId || data.assignment || '1');
+    const id = data.id || `assign_sub_${Date.now()}_${Math.random().toString(36).substr(2, 6)}`;
 
+    let answerFileUrl = data.answerFileUrl || data.fileUrl || '';
     if (answerFileUrl && answerFileUrl.startsWith('data:')) {
       try {
         const cloudRes = await uploadBase64ToCloudinary(answerFileUrl, {
-          fileName: `submission_${assignmentId}_${req.user.id}.pdf`,
+          fileName: `submission_${assignmentId}_${studentId}.pdf`,
           folder: 'as_maths/submissions',
         });
-        answerFileUrl = cloudRes.secure_url;
+        if (cloudRes?.secure_url) {
+          answerFileUrl = cloudRes.secure_url;
+        }
       } catch (upErr) {
-        console.warn('Cloudinary assignment submission upload error:', upErr.message);
+        console.warn('Cloudinary assignment submission upload fallback:', upErr.message);
       }
     }
 
-    const submission = await Submission.create({
+    const payload = {
+      ...data,
+      id,
       assignment: assignmentId,
-      student: req.user.id,
-      answerFileUrl
-    });
-    res.status(201).json(submission);
+      assignmentId,
+      assignmentTitle: data.assignmentTitle || data.title || 'Mathematics Assignment',
+      student: studentId,
+      studentId,
+      studentName: data.studentName || req.user?.name || 'Student',
+      studentEmail: data.studentEmail || req.user?.email || 'student@asmaths.com',
+      studentRoll: data.studentRoll || data.rollNo || req.user?.rollNumber || 'CSE001',
+      answerFileUrl,
+      fileName: data.fileName || 'Assignment_Submission.pdf',
+      fileSize: data.fileSize || '2.4 MB',
+      notes: data.notes || '',
+      course: data.course || req.user?.course || 'engineering',
+      semester: data.semester || data.sem || req.user?.semester || 1,
+      status: data.status || 'submitted',
+      submittedAt: data.submittedAt || new Date()
+    };
+
+    const submission = await Submission.findOneAndUpdate(
+      { $or: [{ id }, { assignment: assignmentId, student: studentId }] },
+      { $set: payload },
+      { new: true, upsert: true, runValidators: false }
+    );
+
+    res.status(201).json({ success: true, submission });
   } catch (error) {
-    res.status(500).json({ message: error.message });
+    console.error('Error submitting assignment:', error);
+    res.status(500).json({ success: false, message: error.message });
   }
 };
 
-// @desc    Get my submissions and performance
+// @desc    Get submissions and performance
 // @route   GET /api/student/submissions
-// @access  Private/Student
+// @access  Public / Student
 const getMySubmissions = async (req, res) => {
   try {
-    const submissions = await Submission.find({ student: req.user.id })
-                                        .populate('assignment', 'title deadline');
+    const studentId = req.user ? String(req.user.id || req.user._id) : (req.query.studentId || req.query.studentEmail);
+    const filter = studentId ? { $or: [{ student: studentId }, { studentId }, { studentEmail: studentId }] } : {};
+    const submissions = await Submission.find(filter).sort({ createdAt: -1 });
     res.json(submissions);
   } catch (error) {
     res.status(500).json({ message: error.message });

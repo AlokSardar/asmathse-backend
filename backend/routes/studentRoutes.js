@@ -13,13 +13,15 @@ const {
 router.post('/solve-doubt', solveStudentDoubt);
 router.post('/doubt', solveStudentDoubt);
 
+// Public / Flexible Student Submission Endpoints (persists to MongoDB Atlas)
+router.post('/submissions', submitAssignment);
+router.get('/submissions', getMySubmissions);
+
 // All routes below are protected and require student role
 router.use(protect);
 router.use(authorize('student'));
 
 router.get('/content', getStudentContent);
 router.get('/assignments', getStudentAssignments);
-router.post('/submissions', submitAssignment);
-router.get('/submissions', getMySubmissions);
 
 module.exports = router;
