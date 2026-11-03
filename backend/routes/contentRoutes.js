@@ -1,6 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const {
+  getAcademicStructure,
   getAllContent,
   getContentById,
   saveContent,
@@ -17,6 +18,7 @@ const {
 
 const { upload } = require('../middleware/uploadMiddleware');
 
+router.get('/academic-structure', getAcademicStructure);
 router.get('/', getAllContent);
 router.post('/', upload.single('file'), saveContent);
 router.post('/batch', batchSyncContent);

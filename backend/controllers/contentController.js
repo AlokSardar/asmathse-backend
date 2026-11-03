@@ -1708,7 +1708,143 @@ const bulkDeleteContent = async (req, res) => {
   }
 };
 
+// @desc    Get dynamic academic structure & curriculum from database
+// @route   GET /api/content/academic-structure
+// @access  Public
+const getAcademicStructure = async (req, res) => {
+  try {
+    const [distinctSubjects, distinctCourses, distinctBranches, distinctSemesters] = await Promise.all([
+      Content.distinct('subject').catch(() => []),
+      Content.distinct('course').catch(() => []),
+      Content.distinct('branch').catch(() => []),
+      Content.distinct('semester').catch(() => [])
+    ]);
+
+    const baseCourses = [
+      {
+        key: 'engineering',
+        label: 'Engineering (B.Tech)',
+        degree: 'B.Tech / B.E.',
+        icon: '⚙️',
+        branches: [
+          { code: 'CSE', label: 'Computer Science & Engineering', icon: '💻' },
+          { code: 'ECE', label: 'Electronics & Communication', icon: '📡' },
+          { code: 'CE',  label: 'Civil Engineering', icon: '🏗️' },
+          { code: 'EE',  label: 'Electrical Engineering', icon: '⚡' },
+          { code: 'IT',  label: 'Information Technology', icon: '🌐' },
+        ],
+        semesters: [1, 2, 3, 4, 5, 6, 7, 8],
+        semesterLabels: ['Semester 1', 'Semester 2', 'Semester 3', 'Semester 4', 'Semester 5', 'Semester 6', 'Semester 7', 'Semester 8'],
+        semesterShortLabels: ['Sem 1', 'Sem 2', 'Sem 3', 'Sem 4', 'Sem 5', 'Sem 6', 'Sem 7', 'Sem 8'],
+        subjects: ['Mathematics', 'Engineering Mathematics I', 'Engineering Mathematics II', 'Discrete Mathematics', 'Numerical Methods']
+      },
+      {
+        key: 'bsc',
+        label: 'B.Sc (Mathematics)',
+        degree: 'Bachelor of Science in Mathematics',
+        icon: '🔬',
+        branches: [
+          { code: 'General', label: 'B.Sc (General)', icon: '📘' },
+          { code: 'Pass',    label: 'B.Sc (Pass)',    icon: '📗' },
+          { code: 'Honours', label: 'B.Sc (Honours / Major)', icon: '🌟' },
+        ],
+        semesters: [1, 2, 3, 4, 5, 6],
+        semesterLabels: ['Semester 1', 'Semester 2', 'Semester 3', 'Semester 4', 'Semester 5', 'Semester 6'],
+        semesterShortLabels: ['Sem 1', 'Sem 2', 'Sem 3', 'Sem 4', 'Sem 5', 'Sem 6'],
+        subjects: ['Mathematics', 'Classical Algebra', 'Real Analysis', 'Differential Equations', 'Linear Algebra', 'Complex Analysis']
+      },
+      {
+        key: 'cbse',
+        label: 'CBSE',
+        degree: 'Central Board of Secondary Education',
+        icon: '📗',
+        branches: [
+          { code: 'Class 9',  label: 'Class 9',  icon: '🎒' },
+          { code: 'Class 10', label: 'Class 10', icon: '📖' },
+          { code: 'Class 11', label: 'Class 11', icon: '📐' },
+          { code: 'Class 12', label: 'Class 12', icon: '🎓' },
+        ],
+        semesters: [9, 10, 11, 12],
+        semesterLabels: ['Class 9', 'Class 10', 'Class 11', 'Class 12'],
+        semesterShortLabels: ['Class 9', 'Class 10', 'Class 11', 'Class 12'],
+        subjects: ['Mathematics']
+      },
+      {
+        key: 'icse',
+        label: 'ICSE / ISC',
+        degree: 'Council for the Indian School Certificate Examinations',
+        icon: '📘',
+        branches: [
+          { code: 'Class 9',  label: 'Class 9 (ICSE)',  icon: '🎒' },
+          { code: 'Class 10', label: 'Class 10 (ICSE)', icon: '📖' },
+          { code: 'Class 11', label: 'Class 11 (ISC)',  icon: '📐' },
+          { code: 'Class 12', label: 'Class 12 (ISC)',  icon: '🎓' },
+        ],
+        semesters: [9, 10, 11, 12],
+        semesterLabels: ['Class 9', 'Class 10', 'Class 11', 'Class 12'],
+        semesterShortLabels: ['Class 9', 'Class 10', 'Class 11', 'Class 12'],
+        subjects: ['Mathematics']
+      },
+      {
+        key: 'wbjee',
+        label: 'WBJEE',
+        degree: 'West Bengal Joint Entrance Examination',
+        icon: '🎯',
+        branches: [
+          { code: 'Class 11', label: 'WBJEE (Class 11)', icon: '📐' },
+          { code: 'Class 12', label: 'WBJEE (Class 12)', icon: '🎓' },
+          { code: 'Repeater', label: 'WBJEE (Target Batch)', icon: '🏆' }
+        ],
+        semesters: [11, 12],
+        semesterLabels: ['Class 11', 'Class 12'],
+        semesterShortLabels: ['Class 11', 'Class 12'],
+        subjects: ['Mathematics', 'Physics', 'Chemistry']
+      },
+      {
+        key: 'jee',
+        label: 'JEE Advanced & Mains',
+        degree: 'Joint Entrance Examination',
+        icon: '🏆',
+        branches: [
+          { code: 'Class 11', label: 'JEE (Class 11)', icon: '📐' },
+          { code: 'Class 12', label: 'JEE (Class 12)', icon: '🎓' },
+          { code: 'Advanced Target', label: 'JEE Advanced Rankers', icon: '⭐' }
+        ],
+        semesters: [11, 12],
+        semesterLabels: ['Class 11', 'Class 12'],
+        semesterShortLabels: ['Class 11', 'Class 12'],
+        subjects: ['Mathematics', 'Physics', 'Chemistry']
+      }
+    ];
+
+    const validDbSubjects = (distinctSubjects || []).filter(s => typeof s === 'string' && s.trim());
+    if (validDbSubjects.length > 0) {
+      baseCourses.forEach(c => {
+        const subSet = new Set(c.subjects.map(s => s.toLowerCase().trim()));
+        validDbSubjects.forEach(s => {
+          if (!subSet.has(s.toLowerCase().trim())) {
+            c.subjects.push(s);
+          }
+        });
+      });
+    }
+
+    return res.status(200).json({
+      success: true,
+      courses: baseCourses,
+      distinctSubjects: validDbSubjects,
+      distinctCourses: (distinctCourses || []).filter(Boolean),
+      distinctBranches: (distinctBranches || []).filter(Boolean),
+      distinctSemesters: (distinctSemesters || []).filter(Boolean)
+    });
+  } catch (error) {
+    console.error('Error in getAcademicStructure:', error);
+    return res.status(500).json({ success: false, message: error.message });
+  }
+};
+
 module.exports = {
+  getAcademicStructure,
   getAllContent,
   getContentById,
   saveContent,
