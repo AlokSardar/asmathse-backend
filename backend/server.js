@@ -86,8 +86,8 @@ app.use('/api/notices', notificationRoutes);
 app.use('/api/admin', adminRoutes);
 
 // Rate-limit doubt submission endpoints against automated spam/abuse
-app.use(['/api/student/solve-doubt', '/api/student/doubt'], doubtLimiter);
-app.use('/api/student', studentRoutes);
+app.use(['/api/student/solve-doubt', '/api/student/doubt', '/student/solve-doubt', '/student/doubt'], doubtLimiter);
+app.use(['/api/student', '/student'], studentRoutes);
 app.use('/api/tests', testRoutes);
 app.use('/api/fees', feeRoutes);
 

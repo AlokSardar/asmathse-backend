@@ -28,21 +28,83 @@ const isAuthorizedAdmin = (req) => {
 
 exports.createTest = async (req, res) => {
   try {
-    const { title, course, semester, classLevel } = req.body;
+    const ALL_ENGINEERING_STREAMS = ['CSE', 'ECE', 'ME', 'EE', 'CE', 'IT'];
+    const body = { ...req.body };
+    const { title, course, branch, semester, classLevel } = body;
+
+    const rawCourse = String(course || body.board || 'Engineering').trim();
+    if (/cbse/i.test(rawCourse)) {
+      const rawCl = String(classLevel || body.class || semester || 'Class 9').trim();
+      const m = rawCl.match(/(9|10|11|12)/);
+      const normCl = m ? `Class ${m[1]}` : rawCl;
+      body.course = 'CBSE';
+      body.board = 'CBSE';
+      body.branch = branch || 'CBSE Standard';
+      body.semester = normCl;
+      body.classLevel = normCl;
+      body.class = normCl;
+    } else if (/icse|isc/i.test(rawCourse)) {
+      const rawCl = String(classLevel || body.class || semester || 'Class 9').trim();
+      const m = rawCl.match(/(9|10|11|12)/);
+      const normCl = m ? `Class ${m[1]}` : rawCl;
+      body.course = 'ICSE';
+      body.board = 'ICSE';
+      body.branch = branch || 'ICSE / ISC';
+      body.semester = normCl;
+      body.classLevel = normCl;
+      body.class = normCl;
+    } else if (/engineering|b\.?tech/i.test(rawCourse)) {
+      body.course = 'Engineering';
+      const semMatch = String(semester || '1').match(/([1-8])/);
+      body.semester = semMatch ? `Semester ${semMatch[1]}` : 'Semester 1';
+      const isAllBranches =
+        /all\s*branches|common|^all$/i.test(String(branch || body.stream || '').trim()) ||
+        body.isCommon === true ||
+        body.isCommonFirstYear === true;
+      if (isAllBranches) {
+        body.branch = 'All Branches';
+        body.stream = 'All Branches';
+        body.isCommon = true;
+        body.isCommonFirstYear = body.semester === 'Semester 1';
+        body.targetBranches = [];
+        body.streamMappings = [];
+        for (const streamCode of ALL_ENGINEERING_STREAMS) {
+          body.targetBranches.push(streamCode);
+          body.streamMappings.push({
+            course: 'Engineering',
+            branch: streamCode,
+            stream: streamCode,
+            semester: body.semester,
+          });
+        }
+      } else {
+        body.branch = branch || body.stream || 'CSE';
+        body.stream = body.branch;
+        body.targetBranches = [body.branch];
+      }
+    }
+
     if (title) {
       const candidateTitle = String(title).trim();
       const existing = await ClassTest.findOne({
         title: new RegExp(`^${candidateTitle.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i'),
-        ...(course ? { course: new RegExp(`^${String(course).trim()}$`, 'i') } : {})
+        ...(body.course ? { course: new RegExp(`^${String(body.course).trim()}$`, 'i') } : {})
       });
       if (existing) {
+        const isSameId =
+          (body.id && String(existing.id) === String(body.id)) ||
+          (body.testId && String(existing.testId) === String(body.testId));
+        if (isSameId) {
+          const updated = await ClassTest.findByIdAndUpdate(existing._id, { $set: body }, { new: true });
+          return res.status(200).json({ success: true, data: updated });
+        }
         return res.status(409).json({
           success: false,
           message: 'A test with this name already exists. Please use a unique title.'
         });
       }
     }
-    const test = new ClassTest(req.body);
+    const test = new ClassTest(body);
     await test.save();
     res.status(201).json({ success: true, data: test });
   } catch (err) {
@@ -65,7 +127,12 @@ exports.getTests = async (req, res) => {
     let query = {};
 
     if (isSchool) {
-      const activeClass = classLevel || req.query.class || class_name || className;
+      const activeClass =
+        classLevel ||
+        req.query.class ||
+        class_name ||
+        className ||
+        (semester && /class|9|10|11|12/i.test(String(semester)) ? semester : null);
       const numLevel = activeClass ? String(activeClass).replace(/[^0-9]/g, '') : '';
       const numVal = numLevel ? Number(numLevel) : null;
       const targetBoard = isIcse ? 'icse' : 'cbse';
@@ -84,8 +151,10 @@ exports.getTests = async (req, res) => {
           { class: new RegExp(`^${activeClass}$`, 'i') },
           { class_name: new RegExp(`^${activeClass}$`, 'i') },
           { className: new RegExp(`^${activeClass}$`, 'i') },
+          { semester: new RegExp(`^${activeClass}$`, 'i') },
           { classLevel: /all/i },
-          { class: /all/i }
+          { class: /all/i },
+          { semester: /all/i }
         );
         if (numVal !== null) {
           classConditions.push(
@@ -93,15 +162,18 @@ exports.getTests = async (req, res) => {
             { class: numVal },
             { class_name: numVal },
             { className: numVal },
+            { semester: numVal },
             { classNumber: numVal },
             { classLevel: numLevel },
             { class: numLevel },
             { class_name: numLevel },
             { className: numLevel },
+            { semester: numLevel },
             { classLevel: new RegExp(`(^|\\b|class\\s*)${numLevel}(th)?($|\\b)`, 'i') },
             { class: new RegExp(`(^|\\b|class\\s*)${numLevel}(th)?($|\\b)`, 'i') },
             { class_name: new RegExp(`(^|\\b|class\\s*)${numLevel}(th)?($|\\b)`, 'i') },
-            { className: new RegExp(`(^|\\b|class\\s*)${numLevel}(th)?($|\\b)`, 'i') }
+            { className: new RegExp(`(^|\\b|class\\s*)${numLevel}(th)?($|\\b)`, 'i') },
+            { semester: new RegExp(`(^|\\b|class\\s*)${numLevel}(th)?($|\\b)`, 'i') }
           );
         }
       }
@@ -188,6 +260,7 @@ exports.getTests = async (req, res) => {
             $or: [
               ...branchConditions.map(r => ({ branch: r })),
               ...branchConditions.map(r => ({ stream: r })),
+              ...branchConditions.map(r => ({ targetBranches: r })),
               { isCommonFirstYear: true },
               { isCommon: true },
               { targetScope: 'engineering_first_year_common' }
@@ -209,6 +282,8 @@ exports.getTests = async (req, res) => {
         ];
         if (!isNaN(semNum) && semNum > 0) {
           semConditions.push({ semester: semNum });
+          semConditions.push({ semester: `Semester ${semNum}` });
+          semConditions.push({ semester: new RegExp(`semester\\s*0*${semNum}(\\b|$)`, 'i') });
         }
         if (semNum === 1 || semNum === 2) {
           semConditions.push({ branch: /common/i });

@@ -108,8 +108,13 @@ const getAllContent = async (req, res) => {
         ]
       };
 
-      // 2. Class Level matching (exact normalized array + numeric pattern)
-      const targetClass = classLevel || queryClass || req.query.class_name || req.query.className;
+      // 2. Class Level matching (exact normalized array + numeric pattern + semester field)
+      const targetClass =
+        classLevel ||
+        queryClass ||
+        req.query.class_name ||
+        req.query.className ||
+        (semester && /class|9|10|11|12/i.test(String(semester)) ? semester : null);
       let classClause = null;
       if (targetClass) {
         const numLevel = parseInt(String(targetClass).replace(/[^0-9]/g, ''), 10);
@@ -144,15 +149,17 @@ const getAllContent = async (req, res) => {
           { classLevel: { $in: classValues } },
           { class_name: { $in: classValues } },
           { className: { $in: classValues } },
-          { class: null },
-          { classLevel: null },
-          { class: { $exists: false } },
-          { classLevel: { $exists: false } }
+          { semester: { $in: classValues } },
+          { class: null, semester: null },
+          { classLevel: null, semester: null },
+          { class: { $exists: false }, semester: { $exists: false } },
+          { classLevel: { $exists: false }, semester: { $exists: false } }
         ];
         if (!isNaN(numLevel) && numLevel > 0) {
           classOrConditions.push({ classNumber: numLevel });
           classOrConditions.push({ class: new RegExp(`(^|\\b)0*${numLevel}(\\b|th)`, 'i') });
           classOrConditions.push({ classLevel: new RegExp(`(^|\\b)0*${numLevel}(\\b|th)`, 'i') });
+          classOrConditions.push({ semester: new RegExp(`(^|\\b)0*${numLevel}(\\b|th)`, 'i') });
         }
         classClause = { $or: classOrConditions };
       }
@@ -287,6 +294,7 @@ const getAllContent = async (req, res) => {
               $or: [
                 ...branchConditions.map(r => ({ branch: r })),
                 ...branchConditions.map(r => ({ stream: r })),
+                ...branchConditions.map(r => ({ targetBranches: r })),
                 { branch: null },
                 { branch: { $exists: false } },
                 { branch: '' },
@@ -301,8 +309,10 @@ const getAllContent = async (req, res) => {
               $or: [
                 { semester: cleanSem },
                 { semester: semNum },
+                { semester: `Semester ${semNum}` },
                 { semester: String(semester) },
                 { semester: new RegExp(`^0*${cleanSem}$`, 'i') },
+                { semester: new RegExp(`semester\\s*0*${cleanSem}(\\b|$)`, 'i') },
                 { semester: /all/i },
                 { semester: null },
                 { semester: { $exists: false } }
@@ -344,6 +354,7 @@ const getAllContent = async (req, res) => {
           const branchClauses = [
             ...branchConditions.map(r => ({ branch: r })),
             ...branchConditions.map(r => ({ stream: r })),
+            ...branchConditions.map(r => ({ targetBranches: r })),
             { branch: null },
             { branch: { $exists: false } },
             { branch: '' },
@@ -368,7 +379,9 @@ const getAllContent = async (req, res) => {
           ];
           if (!isNaN(semNum) && semNum > 0) {
             semConditions.push({ semester: semNum });
+            semConditions.push({ semester: `Semester ${semNum}` });
             semConditions.push({ semester: new RegExp(`^0*${semNum}$`, 'i') });
+            semConditions.push({ semester: new RegExp(`semester\\s*0*${semNum}(\\b|$)`, 'i') });
           }
           if (semNum === 1 || semNum === 2) {
             semConditions.push({ branch: /common/i });
@@ -552,7 +565,10 @@ const saveContent = async (req, res) => {
       return res.status(400).json({ message: 'Title is required' });
     }
 
-    const isClassTest = itemData.type === 'classtest' || itemData.type === 'classtests';
+    const isClassTest =
+      itemData.type === 'classtest' ||
+      itemData.type === 'classtests' ||
+      itemData.type === 'test';
     const isAssignment = itemData.type === 'assignment' || itemData.type === 'assignments';
     const isTestItem = isClassTest || isAssignment;
 
@@ -707,73 +723,106 @@ const saveContent = async (req, res) => {
     const targetAcademicYear = itemData.academicYear || itemData.academic_year || itemData.examYear || '2026-2027';
 
     // 1. Precise Course / Board Determination
+    const ALL_ENGINEERING_STREAMS = ['CSE', 'ECE', 'ME', 'EE', 'CE', 'IT'];
     const rawCourse = String(itemData.course || itemData.board || itemData.targetCourse || '').trim().toLowerCase();
     const rawStream = String(itemData.stream || '').trim().toLowerCase();
-    const rawClass = itemData.classLevel || itemData.class || itemData.class_name || itemData.className;
+    const rawClass =
+      itemData.classLevel ||
+      itemData.class ||
+      itemData.class_name ||
+      itemData.className ||
+      (itemData.semester && /class/i.test(String(itemData.semester)) ? itemData.semester : null);
 
-    let course = 'engineering';
+    let course = 'Engineering';
     let board = itemData.board || null;
     let isIcse = rawCourse.includes('icse') || rawCourse.includes('isc') || rawStream.includes('icse') || (itemData.board && /icse/i.test(itemData.board));
-    let isCbse = !isIcse && (rawCourse.includes('cbse') || rawCourse.includes('school') || rawStream.includes('cbse') || (itemData.board && /cbse/i.test(itemData.board)) || (rawClass && /class/i.test(rawClass)));
-    let isSchool = isIcse || isCbse || (rawClass && /class/i.test(rawClass));
-    let isJee = !isSchool && (rawCourse.includes('jee') || rawCourse.includes('iit') || rawStream.includes('jee'));
-    let isBsc = !isSchool && !isJee && (rawCourse.includes('bsc') || rawCourse.includes('science') || rawStream.includes('bsc'));
-    let isEng = !isSchool && !isJee && !isBsc;
+    let isCbse = !isIcse && (rawCourse.includes('cbse') || rawCourse.includes('school') || rawStream.includes('cbse') || (itemData.board && /cbse/i.test(itemData.board)) || (rawClass && /class/i.test(rawClass) && !rawCourse.includes('jee')));
+    let isSchool = isIcse || isCbse;
+    let isWbjee = !isSchool && rawCourse.includes('wbjee');
+    let isJee = !isSchool && !isWbjee && (rawCourse.includes('jee') || rawCourse.includes('iit') || rawStream.includes('jee'));
+    let isBsc = !isSchool && !isWbjee && !isJee && (rawCourse.includes('bsc') || rawCourse.includes('b.sc') || rawCourse.includes('science') || rawStream.includes('bsc'));
+    let isEng = !isSchool && !isWbjee && !isJee && !isBsc;
 
     if (isIcse) {
-      course = 'icse';
+      course = 'ICSE';
       board = itemData.board || 'ICSE';
     } else if (isCbse || isSchool) {
-      course = 'cbse';
+      course = 'CBSE';
       board = itemData.board || 'CBSE';
       isCbse = true;
+    } else if (isWbjee) {
+      course = 'WBJEE';
     } else if (isJee) {
-      course = 'jee';
+      course = 'JEE Advanced';
     } else if (isBsc) {
-      course = 'bsc';
+      course = 'B.Sc';
     } else {
-      course = 'engineering';
+      course = 'Engineering';
     }
 
-    // 2. Exact Hierarchical Path Metadata Binding (Strict Isolation to Prevent Cross-Contamination)
+    // 2. Exact Hierarchical Path Metadata Binding & Multi-Stream Mapping
     let branch = null;
     let stream = null;
     let semester = null;
     let classLevel = null;
     let targetClass = null;
-    let subject = itemData.subject || (isSchool ? 'Mathematics' : (isJee ? 'JEE Mathematics' : 'Engineering Mathematics'));
+    let targetBranches = [];
+    let streamMappings = [];
+    let subject = itemData.subject || (isSchool ? 'Mathematics' : (isJee || isWbjee ? 'JEE Mathematics' : 'Engineering Mathematics'));
     let isCommon1stYr = false;
 
     if (isSchool) {
-      branch = null; // Explicitly null to prevent cross-contamination as CSE
+      const candidateClass = String(
+        rawClass || itemData.semester || 'Class 9'
+      ).trim();
+      const classNumMatch = candidateClass.match(/(9|10|11|12)/);
+      const resolvedClassLabel = classNumMatch ? `Class ${classNumMatch[1]}` : candidateClass;
+
+      branch = itemData.branch || (isIcse ? 'ICSE / ISC' : 'CBSE Standard');
       stream = board;
-      semester = null; // Explicitly null to prevent cross-contamination as Sem 1
-      classLevel = itemData.classLevel || itemData.class || itemData.class_name || itemData.className || 'Class 9';
-      targetClass = classLevel;
-      subject = itemData.subject || 'Mathematics';
+      semester = resolvedClassLabel;
+      classLevel = resolvedClassLabel;
+      targetClass = resolvedClassLabel;
+      targetBranches = [branch];
+      streamMappings = [
+        {
+          course,
+          board,
+          branch,
+          semester: resolvedClassLabel,
+          classLevel: resolvedClassLabel,
+        },
+      ];
+      subject = itemData.subject || `${course} ${resolvedClassLabel} Mathematics`;
       isCommon1stYr = false;
-    } else if (isJee) {
+    } else if (isJee || isWbjee) {
       board = null;
-      branch = itemData.branch || 'JEE';
-      stream = 'JEE';
-      semester = null;
-      classLevel = itemData.classLevel || itemData.class || itemData.class_name || 'JEE Mains & Advanced';
-      targetClass = classLevel;
-      subject = itemData.subject || 'JEE Mathematics';
+      branch = itemData.branch || (isWbjee ? 'WBJEE Track' : 'JEE Advanced Track');
+      stream = branch;
+      const resolvedBatch = itemData.semester || itemData.classLevel || 'Class 12';
+      semester = resolvedBatch;
+      classLevel = resolvedBatch;
+      targetClass = resolvedBatch;
+      targetBranches = [branch];
+      subject = itemData.subject || `${course} Mathematics`;
       isCommon1stYr = false;
     } else if (isBsc) {
       board = null;
-      branch = itemData.branch || itemData.stream || 'BSc (Honours) (Major)';
+      branch = itemData.branch || itemData.stream || 'B.Sc (Honours) (Major)';
       stream = branch;
-      semester = itemData.semester !== undefined && itemData.semester !== null && itemData.semester !== '' ? itemData.semester : 1;
+      const semNumMatch = String(itemData.semester || '1').match(/([1-6])/);
+      semester = semNumMatch ? `Semester ${semNumMatch[1]}` : 'Semester 1';
       classLevel = null;
       targetClass = null;
-      subject = itemData.subject || 'Mathematics';
+      targetBranches = [branch];
+      subject = itemData.subject || 'B.Sc Mathematics';
       isCommon1stYr = false;
     } else {
       branch = itemData.branch || itemData.stream || 'CSE';
       stream = itemData.stream || itemData.branch || 'CSE';
-      semester = itemData.semester !== undefined && itemData.semester !== null && itemData.semester !== '' ? itemData.semester : 1;
+      const semNumMatch = String(itemData.semester || '1').match(/([1-8])/);
+      const semNum = semNumMatch ? Number(semNumMatch[1]) : 1;
+      semester = `Semester ${semNum}`;
       classLevel = null;
       targetClass = null;
       subject = itemData.subject || 'Engineering Mathematics';
@@ -782,22 +831,38 @@ const saveContent = async (req, res) => {
         itemData.isCommon === true ||
         itemData.targetScope === 'engineering_first_year_common' ||
         itemData.isCommonFirstYear === true ||
-        itemData.branch === 'Common 1st Year' ||
-        itemData.stream === 'Common 1st Year' ||
-        itemData.targetAudience === 'common_1st_year' ||
-        itemData.branch === 'All Branches' ||
-        (Number(semester) <= 2 && (itemData.type === 'pyq' || itemData.type === 'questionbank' || /common/i.test(branch || '') || /common/i.test(stream || '')))
+        /all\s*branches|common|^all$/i.test(String(branch).trim()) ||
+        /all\s*branches|common|^all$/i.test(String(stream).trim()) ||
+        itemData.targetAudience === 'common_1st_year'
       );
 
       if (isCommonExplicit) {
         board = 'Engineering';
-        semester = itemData.semester !== undefined && itemData.semester !== null && itemData.semester !== '' ? itemData.semester : 1;
-        branch = itemData.branch || 'Common 1st Year';
-        stream = itemData.stream || itemData.branch || 'Common 1st Year';
+        branch = 'All Branches';
+        stream = 'All Branches';
         isCommon1stYr = true;
+        // Loop through all Engineering streams so every stream (CSE, ECE, ME, EE, CE, IT) receives the payload
+        for (const engStream of ALL_ENGINEERING_STREAMS) {
+          targetBranches.push(engStream);
+          streamMappings.push({
+            course: 'Engineering',
+            branch: engStream,
+            stream: engStream,
+            semester,
+          });
+        }
       } else {
         board = null;
         isCommon1stYr = false;
+        targetBranches = [branch];
+        streamMappings = [
+          {
+            course: 'Engineering',
+            branch,
+            stream,
+            semester,
+          },
+        ];
       }
     }
 
@@ -805,7 +870,7 @@ const saveContent = async (req, res) => {
       itemData.isCommon === true ||
       itemData.targetScope === 'engineering_first_year_common' ||
       isCommon1stYr
-    ) && !isSchool && !isJee && !isBsc;
+    ) && !isSchool && !isJee && !isWbjee && !isBsc;
 
     const payload = {
       ...itemData,
@@ -830,7 +895,9 @@ const saveContent = async (req, res) => {
       targetScope: isEngCommon ? 'engineering_first_year_common' : (itemData.targetScope || null),
       branch,
       stream,
-      semester: isEngCommon ? 1 : semester,
+      targetBranches,
+      streamMappings,
+      semester,
       classLevel,
       class: targetClass,
       class_name: targetClass,
@@ -1060,13 +1127,22 @@ const batchSyncContent = async (req, res) => {
       delete normalized._id; // Guarantee no CastError or immutable _id error
 
       if (isCbse) {
-        normalized.course = 'cbse';
+        const rawSemOrClass = String(item.classLevel || item.class || item.semester || 'Class 9').trim();
+        const matchNum = rawSemOrClass.match(/(9|10|11|12)/);
+        const resolvedCl = matchNum ? `Class ${matchNum[1]}` : rawSemOrClass;
+        normalized.course = 'CBSE';
         normalized.board = 'CBSE';
         normalized.stream = 'CBSE';
-        normalized.branch = null;
-        normalized.semester = null;
-        normalized.classLevel = item.classLevel || item.class || 'Class 9';
-        normalized.class = normalized.classLevel;
+        normalized.branch = item.branch || 'CBSE Standard';
+        normalized.semester = resolvedCl;
+        normalized.classLevel = resolvedCl;
+        normalized.class = resolvedCl;
+      } else if (/engineering/i.test(rawC) && /all\s*branches|common|^all$/i.test(String(item.branch || ''))) {
+        normalized.course = 'Engineering';
+        normalized.branch = 'All Branches';
+        normalized.targetBranches = ['CSE', 'ECE', 'ME', 'EE', 'CE', 'IT'];
+        normalized.isCommon = true;
+        normalized.isCommonFirstYear = true;
       }
 
       const orConditions = [
