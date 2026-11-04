@@ -4,6 +4,9 @@ const aiController = require('../controllers/aiController');
 const aiImportController = require('../controllers/aiImportController');
 
 // ── Production-Grade Multi-Page AI Import Workspace Endpoints ────────────────
+// 0. AI Health status endpoint (zero-cost, no paid calls)
+router.get('/health', aiImportController.getAiHealth);
+
 // 1. Initialize session & slice pages
 router.post('/import-session/init', aiImportController.initImportSession);
 

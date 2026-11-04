@@ -5,281 +5,6 @@ const Content = require('../models/Content');
 const ALL_ENGINEERING_STREAMS = ['CSE', 'ECE', 'ME', 'EE', 'CE', 'IT'];
 
 /**
- * Intelligent fallback generator for when Gemini API key is missing or quota is exhausted.
- * Generates mathematically rigorous, syllabus-aligned questions with pure LaTeX,
- * auto-detected marks, and step-by-step solutions.
- */
-function getIntelligentFallbackQuestions(course, branch, semester, pageCount = 1, fileName = '') {
-  const normCourse = (course || 'Engineering').toLowerCase();
-  const normFile = (fileName || '').toLowerCase();
-
-  if (
-    normCourse.includes('cbse') ||
-    normCourse.includes('12') ||
-    normCourse.includes('10') ||
-    normFile.includes('cbse') ||
-    normFile.includes('class')
-  ) {
-    return [
-      {
-        id: `AI-EXT-${Date.now()}-1`,
-        pageNumber: 1,
-        questionNumber: '1',
-        text: 'Find the general solution of the differential equation $\\frac{dy}{dx} + y \\cot x = 2x + x^2 \\cot x$, given that $y = 0$ when $x = \\frac{\\pi}{2}$.',
-        type: 'Subjective',
-        marks: 5,
-        marksRawLabel: '[5 Marks]',
-        difficulty: 'Medium',
-        topic: 'Differential Equations',
-        options: [],
-        correctOption: null,
-        answer: '$y = x^2 - \\frac{\\pi^2}{4 \\sin x}$',
-        solution:
-          'Integrating Factor $\\text{I.F.} = e^{\\int \\cot x \\, dx} = \\sin x$. Multiplying through: $\\frac{d}{dx}(y \\sin x) = 2x \\sin x + x^2 \\cos x = \\frac{d}{dx}(x^2 \\sin x)$. Integrating both sides gives $y \\sin x = x^2 \\sin x + C$. Using $y(\\pi/2)=0 \\implies C = -\\frac{\\pi^2}{4}$. Thus $y = x^2 - \\frac{\\pi^2}{4 \\sin x}$.',
-        includeSolution: true,
-        included: true,
-        confidence: 0.98,
-        status: 'verified',
-      },
-      {
-        id: `AI-EXT-${Date.now()}-2`,
-        pageNumber: 1,
-        questionNumber: '2',
-        text: 'The value of $\\int_0^{\\pi/2} \\frac{\\sqrt{\\sin x}}{\\sqrt{\\sin x} + \\sqrt{\\cos x}} \\, dx$ is equal to:',
-        type: 'MCQ',
-        marks: 2,
-        marksRawLabel: '[2 Marks]',
-        difficulty: 'Easy',
-        topic: 'Definite Integrals',
-        options: ['$\\frac{\\pi}{4}$', '$\\frac{\\pi}{2}$', '$\\pi$', '$0$'],
-        correctOption: 0,
-        answer: '$\\frac{\\pi}{4}$',
-        solution:
-          'Let $I = \\int_0^{\\pi/2} \\frac{\\sqrt{\\sin x}}{\\sqrt{\\sin x} + \\sqrt{\\cos x}} \\, dx$. Using $\\int_0^a f(x)dx = \\int_0^a f(a-x)dx$, we get $I = \\int_0^{\\pi/2} \\frac{\\sqrt{\\cos x}}{\\sqrt{\\cos x} + \\sqrt{\\sin x}} \\, dx$. Adding both equations yields $2I = \\int_0^{\\pi/2} 1 \\, dx = \\frac{\\pi}{2} \\implies I = \\frac{\\pi}{4}$.',
-        includeSolution: true,
-        included: true,
-        confidence: 0.99,
-        status: 'verified',
-      },
-      {
-        id: `AI-EXT-${Date.now()}-3`,
-        pageNumber: Math.min(2, pageCount),
-        questionNumber: '3',
-        text: 'If $A = \\begin{pmatrix} 2 & -3 \\\\ 3 & 4 \\end{pmatrix}$, verify that $A^2 - 6A + 17I = 0$ and hence calculate $A^{-1}$.',
-        type: 'Subjective',
-        marks: 4,
-        marksRawLabel: '[4 Marks]',
-        difficulty: 'Medium',
-        topic: 'Matrices & Determinants',
-        options: [],
-        correctOption: null,
-        answer: '$A^{-1} = \\frac{1}{17} \\begin{pmatrix} 4 & 3 \\\\ -3 & 2 \\end{pmatrix}$',
-        solution:
-          '$A^2 = \\begin{pmatrix} -5 & -18 \\\\ 18 & 7 \\end{pmatrix}$, $6A = \\begin{pmatrix} 12 & -18 \\\\ 18 & 24 \\end{pmatrix}$, and $17I = \\begin{pmatrix} 17 & 0 \\\\ 0 & 17 \\end{pmatrix}$. Clearly $A^2 - 6A + 17I = O$. Pre-multiplying by $A^{-1}$ gives $17A^{-1} = 6I - A = \\begin{pmatrix} 4 & 3 \\\\ -3 & 2 \\end{pmatrix}$.',
-        includeSolution: true,
-        included: true,
-        confidence: 0.97,
-        status: 'verified',
-      },
-      {
-        id: `AI-EXT-${Date.now()}-4`,
-        pageNumber: Math.min(2, pageCount),
-        questionNumber: '4',
-        text: 'Find the shortest distance between the parallel lines $\\vec{r} = (\\hat{i} + 2\\hat{j} - 4\\hat{k}) + \\lambda(2\\hat{i} + 3\\hat{j} + 6\\hat{k})$ and $\\vec{r} = (3\\hat{i} + 3\\hat{j} - 5\\hat{k}) + \\mu(2\\hat{i} + 3\\hat{j} + 6\\hat{k})$.',
-        type: 'Subjective',
-        marks: 5,
-        marksRawLabel: '[5 Marks]',
-        difficulty: 'Hard',
-        topic: 'Three Dimensional Geometry',
-        options: [],
-        correctOption: null,
-        answer: '$\\frac{\\sqrt{293}}{7}$ units',
-        solution:
-          'For parallel lines $\\vec{r} = \\vec{a}_1 + \\lambda\\vec{b}$ and $\\vec{r} = \\vec{a}_2 + \\mu\\vec{b}$, shortest distance $d = \\frac{|\\vec{b} \\times (\\vec{a}_2 - \\vec{a}_1)|}{|\\vec{b}|}$. Here $\\vec{a}_2 - \\vec{a}_1 = 2\\hat{i} + \\hat{j} - \\hat{k}$ and $|\\vec{b}| = \\sqrt{4+9+36} = 7$. Computing the cross product gives $|\\vec{b} \\times (\\vec{a}_2 - \\vec{a}_1)| = |-9\\hat{i} + 14\\hat{j} - 4\\hat{k}| = \\sqrt{293}$, so $d = \\frac{\\sqrt{293}}{7}$.',
-        includeSolution: true,
-        included: true,
-        confidence: 0.96,
-        status: 'verified',
-      },
-    ];
-  }
-
-  if (normCourse.includes('bsc') || normCourse.includes('b.sc') || normFile.includes('bsc')) {
-    return [
-      {
-        id: `AI-EXT-${Date.now()}-1`,
-        pageNumber: 1,
-        questionNumber: '1',
-        text: "State and prove Green's theorem in a plane. Evaluate $\\oint_C [(x - 2y)dx + (y - 3x)dy]$ where $C$ is the circle $x^2 + y^2 = 4$.",
-        type: 'Subjective',
-        marks: 10,
-        marksRawLabel: '[10 Marks]',
-        difficulty: 'Hard',
-        topic: 'Vector Calculus',
-        options: [],
-        correctOption: null,
-        answer: '$-4\\pi$',
-        solution:
-          "By Green's Theorem, $\\oint_C (P\\,dx + Q\\,dy) = \\iint_D \\left(\\frac{\\partial Q}{\\partial x} - \\frac{\\partial P}{\\partial y}\\right) dA$. Here $P = x - 2y, Q = y - 3x$, so $\\frac{\\partial Q}{\\partial x} - \\frac{\\partial P}{\\partial y} = -3 - (-2) = -1$. Thus the integral equals $-1 \\times \\text{Area}(D) = -\\pi (2)^2 = -4\\pi$.",
-        includeSolution: true,
-        included: true,
-        confidence: 0.98,
-        status: 'verified',
-      },
-      {
-        id: `AI-EXT-${Date.now()}-2`,
-        pageNumber: 1,
-        questionNumber: '2',
-        text: 'Examine the uniform convergence of the sequence of functions $f_n(x) = \\frac{nx}{1 + n^2 x^2}$ on the interval $[0, 1]$.',
-        type: 'Subjective',
-        marks: 8,
-        marksRawLabel: '[8 Marks]',
-        difficulty: 'Hard',
-        topic: 'Real Analysis',
-        options: [],
-        correctOption: null,
-        answer: 'Not uniformly convergent on $[0, 1]$',
-        solution:
-          'Pointwise limit is $f(x) = 0$ for all $x \\in [0, 1]$. However, $M_n = \\sup_{x \\in [0,1]} |f_n(x) - 0|$ occurs at $x = \\frac{1}{n}$, where $f_n(1/n) = \\frac{1}{2}$. Since $M_n = \\frac{1}{2} \\not\\to 0$ as $n \\to \\infty$, the convergence is not uniform by the $M_n$-test.',
-        includeSolution: true,
-        included: true,
-        confidence: 0.97,
-        status: 'verified',
-      },
-      {
-        id: `AI-EXT-${Date.now()}-3`,
-        pageNumber: Math.min(2, pageCount),
-        questionNumber: '3',
-        text: 'Which of the following series is conditionally convergent?',
-        type: 'MCQ',
-        marks: 2,
-        marksRawLabel: '[2 Marks]',
-        difficulty: 'Medium',
-        topic: 'Infinite Series',
-        options: [
-          '$\\sum_{n=1}^\\infty \\frac{(-1)^{n-1}}{n}$',
-          '$\\sum_{n=1}^\\infty \\frac{1}{n^2}$',
-          '$\\sum_{n=1}^\\infty \\frac{(-1)^{n-1}}{n^3}$',
-          '$\\sum_{n=1}^\\infty \\left(\\frac{1}{2}\\right)^n$',
-        ],
-        correctOption: 0,
-        answer: '$\\sum_{n=1}^\\infty \\frac{(-1)^{n-1}}{n}$',
-        solution:
-          'By Leibniz Alternating Series Test, $\\sum \\frac{(-1)^{n-1}}{n}$ converges, whereas $\\sum \\left|\\frac{(-1)^{n-1}}{n}\\right| = \\sum \\frac{1}{n}$ diverges (harmonic series). Hence it is conditionally convergent.',
-        includeSolution: true,
-        included: true,
-        confidence: 0.99,
-        status: 'verified',
-      },
-    ];
-  }
-
-  // Default: Engineering Mathematics (MAKAUT / B.Tech)
-  return [
-    {
-      id: `AI-EXT-${Date.now()}-1`,
-      pageNumber: 1,
-      questionNumber: '1',
-      text: 'State Cayley-Hamilton theorem. Verify it for the matrix $A = \\begin{pmatrix} 1 & 2 \\\\ 3 & 4 \\end{pmatrix}$ and hence determine $A^{-1}$ and $A^4$.',
-      type: 'Subjective',
-      marks: 8,
-      marksRawLabel: '[8 Marks]',
-      difficulty: 'Medium',
-      topic: 'Matrices & Linear Algebra',
-      options: [],
-      correctOption: null,
-      answer: '$A^{-1} = \\frac{1}{2}\\begin{pmatrix} -4 & 2 \\\\ 3 & -1 \\end{pmatrix}, \\quad A^4 = \\begin{pmatrix} 199 & 290 \\\\ 435 & 634 \\end{pmatrix}$',
-      solution:
-        'Characteristic equation: $|A - \\lambda I| = \\lambda^2 - 5\\lambda - 2 = 0$. By Cayley-Hamilton Theorem, $A^2 - 5A - 2I = O$. Multiplying by $A^{-1}$ gives $A^{-1} = \\frac{1}{2}(A - 5I) = \\frac{1}{2}\\begin{pmatrix} -4 & 2 \\\\ 3 & -1 \\end{pmatrix}$. Also $A^2 = 5A + 2I \\implies A^4 = (5A+2I)^2 = 135A + 54I = \\begin{pmatrix} 199 & 290 \\\\ 435 & 634 \\end{pmatrix}$.',
-      includeSolution: true,
-      included: true,
-      confidence: 0.98,
-      status: 'verified',
-    },
-    {
-      id: `AI-EXT-${Date.now()}-2`,
-      pageNumber: 1,
-      questionNumber: '2',
-      text: 'The eigenvalues of the symmetric matrix $M = \\begin{pmatrix} 2 & 1 \\\\ 1 & 2 \\end{pmatrix}$ are:',
-      type: 'MCQ',
-      marks: 2,
-      marksRawLabel: '[2 Marks]',
-      difficulty: 'Easy',
-      topic: 'Eigenvalues & Diagonalization',
-      options: ['$1$ and $3$', '$2$ and $2$', '$0$ and $4$', '$-1$ and $3$'],
-      correctOption: 0,
-      answer: '$1$ and $3$',
-      solution:
-        'The characteristic polynomial is $|M - \\lambda I| = (2-\\lambda)^2 - 1 = \\lambda^2 - 4\\lambda + 3 = (\\lambda - 1)(\\lambda - 3) = 0$. Therefore, the eigenvalues are $\\lambda_1 = 1$ and $\\lambda_2 = 3$.',
-      includeSolution: true,
-      included: true,
-      confidence: 0.99,
-      status: 'verified',
-    },
-    {
-      id: `AI-EXT-${Date.now()}-3`,
-      pageNumber: Math.min(2, pageCount),
-      questionNumber: '3',
-      text: "If $u = \\sin^{-1}\\left(\\frac{x^2 + y^2}{x + y}\\right)$, prove using Euler's Theorem that $x\\frac{\\partial u}{\\partial x} + y\\frac{\\partial u}{\\partial y} = \\tan u$.",
-      type: 'Subjective',
-      marks: 8,
-      marksRawLabel: '[8 Marks]',
-      difficulty: 'Hard',
-      topic: 'Partial Differentiation',
-      options: [],
-      correctOption: null,
-      answer: '$x\\frac{\\partial u}{\\partial x} + y\\frac{\\partial u}{\\partial y} = \\tan u$',
-      solution:
-        "Let $z = \\sin u = \\frac{x^2 + y^2}{x + y}$. Clearly $z(tx, ty) = t^1 z(x, y)$, so $z$ is a homogeneous function of degree $n = 1$. By Euler's Theorem, $x\\frac{\\partial z}{\\partial x} + y\\frac{\\partial z}{\\partial y} = 1 \\cdot z$. Substituting $z = \\sin u$ gives $\\cos u \\left(x\\frac{\\partial u}{\\partial x} + y\\frac{\\partial u}{\\partial y}\\right) = \\sin u \\implies x\\frac{\\partial u}{\\partial x} + y\\frac{\\partial u}{\\partial y} = \\tan u$.",
-      includeSolution: true,
-      included: true,
-      confidence: 0.97,
-      status: 'verified',
-    },
-    {
-      id: `AI-EXT-${Date.now()}-4`,
-      pageNumber: Math.min(2, pageCount),
-      questionNumber: '4',
-      text: 'Evaluate the improper integral $I = \\int_0^\\infty e^{-x^2} x^3 \\, dx$ by converting it into the standard Gamma function $\\Gamma(n)$.',
-      type: 'Short Answer',
-      marks: 5,
-      marksRawLabel: '[5 Marks]',
-      difficulty: 'Medium',
-      topic: 'Improper Integrals & Gamma Function',
-      options: [],
-      correctOption: null,
-      answer: '$\\frac{1}{2}$',
-      solution:
-        'Substitute $t = x^2 \\implies dt = 2x\\,dx$, or $x\\,dx = \\frac{1}{2}dt$. Then $I = \\int_0^\\infty e^{-t} \\cdot t \\cdot \\frac{1}{2}dt = \\frac{1}{2}\\int_0^\\infty e^{-t} t^{2-1} dt = \\frac{1}{2}\\Gamma(2) = \\frac{1}{2}(1!) = \\frac{1}{2}$.',
-      includeSolution: true,
-      included: true,
-      confidence: 0.96,
-      status: 'verified',
-    },
-    {
-      id: `AI-EXT-${Date.now()}-5`,
-      pageNumber: Math.min(3, pageCount),
-      questionNumber: '5',
-      text: "Solve the initial value problem: $\\frac{d^2y}{dx^2} - 4\\frac{dy}{dx} + 4y = 0$, given $y(0) = 1$ and $y'(0) = 0$.",
-      type: 'Subjective',
-      marks: 5,
-      marksRawLabel: '[5 Marks]',
-      difficulty: 'Medium',
-      topic: 'Ordinary Differential Equations',
-      options: [],
-      correctOption: null,
-      answer: '$y(x) = (1 - 2x)e^{2x}$',
-      solution:
-        "Auxiliary equation: $m^2 - 4m + 4 = (m-2)^2 = 0 \\implies m = 2, 2$. General solution is $y = (C_1 + C_2 x)e^{2x}$. Applying $y(0) = 1 \\implies C_1 = 1$. Differentiating: $y'(x) = C_2 e^{2x} + 2(1 + C_2 x)e^{2x}$. Using $y'(0) = 0 \\implies C_2 + 2 = 0 \\implies C_2 = -2$. Hence $y(x) = (1 - 2x)e^{2x}$.",
-      includeSolution: true,
-      included: true,
-      confidence: 0.98,
-      status: 'verified',
-    },
-  ];
-}
-
-/**
  * Helper: Build a list of page units ({ pageNumber, base64Data, mimeType, mediaType, fileName })
  * from either `files` (real uploaded PDFs/images) or `pages` (legacy/preset page array).
  */
@@ -395,23 +120,11 @@ exports.extractQuestionsFromDocument = async (req, res) => {
     const totalPageCount = pageUnits.length || 1;
     const primaryFileName = files?.[0]?.name || pageUnits?.[0]?.fileName || '';
 
-    // If no API key is available, use our high-fidelity mathematical heuristic model
+    // If no API key is available, return clear explicit error
     if (!apiKey) {
-      const fallbackQuestions = getIntelligentFallbackQuestions(
-        course,
-        branch,
-        semester,
-        totalPageCount,
-        primaryFileName
-      );
-      return res.status(200).json({
-        success: true,
-        source: 'Heuristic LaTeX OCR Engine (Set GEMINI_API_KEY for live Gemini Vision OCR)',
-        model: 'gemini-3.8-flash (Fallback Mode)',
-        totalExtracted: fallbackQuestions.length,
-        questions: fallbackQuestions,
-        pagesProcessed: totalPageCount,
-        fileName: primaryFileName,
+      return res.status(400).json({
+        success: false,
+        message: 'Google Gemini API Key is missing. Configure GEMINI_API_KEY in the server environment.',
       });
     }
 
@@ -473,18 +186,31 @@ Return ONLY a valid JSON array of question objects. Do not wrap in markdown expl
                 mime_type: unit.mimeType || 'image/png',
               };
 
-        const response = await ai.interactions.create({
-          model: 'gemini-3.8-flash',
-          input: [
+        const response = await ai.models.generateContent({
+          model: 'gemini-3.5-flash',
+          contents: [
             {
-              type: 'text',
-              text: promptText,
+              role: 'user',
+              parts: [
+                {
+                  inlineData: {
+                    data: unit.base64Data,
+                    mimeType: unit.mediaType === 'document' ? 'application/pdf' : unit.mimeType || 'image/png',
+                  },
+                },
+                {
+                  text: promptText,
+                },
+              ],
             },
-            mediaInputPart,
           ],
+          config: {
+            temperature: 0,
+            responseMimeType: 'application/json',
+          },
         });
 
-        const outputText = response.output_text || '';
+        const outputText = response.text || '';
         const jsonMatch = outputText.match(/\[[\s\S]*\]/);
         if (jsonMatch) {
           const parsed = JSON.parse(jsonMatch[0]);
@@ -518,30 +244,24 @@ Return ONLY a valid JSON array of question objects. Do not wrap in markdown expl
       }
     }
 
-    // If Gemini extraction yielded zero items, provide structured fallback
+    // Never return synthetic fallback questions
     if (allExtractedQuestions.length === 0) {
-      const fallbackQuestions = getIntelligentFallbackQuestions(
-        course,
-        branch,
-        semester,
-        totalPageCount,
-        primaryFileName
-      );
       return res.status(200).json({
         success: true,
-        source: 'Heuristic LaTeX OCR Engine (Vision Fallback)',
-        model: 'gemini-3.8-flash',
-        totalExtracted: fallbackQuestions.length,
-        questions: fallbackQuestions,
+        source: 'Google Gemini 3.5 Flash Multimodal OCR',
+        model: 'gemini-3.5-flash',
+        totalExtracted: 0,
+        questions: [],
         pagesProcessed: totalPageCount,
         fileName: primaryFileName,
+        message: 'No questions detected on uploaded document.',
       });
     }
 
     return res.status(200).json({
       success: true,
-      source: 'Google Gemini 3.8 Flash Multimodal OCR',
-      model: 'gemini-3.8-flash',
+      source: 'Google Gemini 3.5 Flash Multimodal OCR',
+      model: 'gemini-3.5-flash',
       totalExtracted: allExtractedQuestions.length,
       questions: allExtractedQuestions,
       pagesProcessed: totalPageCount,
@@ -549,20 +269,9 @@ Return ONLY a valid JSON array of question objects. Do not wrap in markdown expl
     });
   } catch (error) {
     console.error('AI Document Extraction error:', error);
-    const fallbackQuestions = getIntelligentFallbackQuestions(
-      req.body.course,
-      req.body.branch,
-      req.body.semester,
-      1,
-      req.body.files?.[0]?.name || ''
-    );
-    return res.status(200).json({
-      success: true,
-      source: 'Heuristic Fallback Engine',
-      totalExtracted: fallbackQuestions.length,
-      questions: fallbackQuestions,
-      pagesProcessed: 1,
-      errorNote: error.message,
+    return res.status(500).json({
+      success: false,
+      message: error.message || 'AI Document Extraction failed',
     });
   }
 };

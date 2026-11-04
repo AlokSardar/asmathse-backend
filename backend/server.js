@@ -170,13 +170,29 @@ const PORT = process.env.PORT || 5000;
 
 // Force Admin Upsert on Startup
 const { forceAdminUpsert } = require('./controllers/authController');
+const ExtractionCache = require('./models/ExtractionCache');
 
 mongoose.connection.on('connected', () => {
   forceAdminUpsert();
+  // Clear legacy extraction cache once
+  ExtractionCache.deleteMany({ promptVersion: { $ne: 'v2-ocr-pure-transcription' } })
+    .then((res) => {
+      if (res && res.deletedCount > 0) {
+        console.log(`🧹 [CACHE MIGRATION]: Cleared ${res.deletedCount} legacy extraction cache records.`);
+      }
+    })
+    .catch(() => {});
 });
 mongoose.connection.once('open', () => {
   forceAdminUpsert();
 });
+
+// Startup verification for Gemini API Key
+if (process.env.GEMINI_API_KEY && process.env.GEMINI_API_KEY.trim()) {
+  console.log('✅ [GEMINI AI]: Google Gemini API Key configured and active.');
+} else {
+  console.warn('⚠️ [WARNING]: GEMINI_API_KEY is not configured in server environment. AI Question Import will be disabled until configured.');
+}
 
 if (require.main === module) {
   app.listen(PORT, () => {

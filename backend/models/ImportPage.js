@@ -15,6 +15,9 @@ const importPageSchema = new mongoose.Schema(
     extractedCount: { type: Number, default: 0 },
     errorMessage: { type: String, default: '' },
     retries: { type: Number, default: 0 },
+    pageHash: { type: String, default: '' },
+    sourceTelemetry: { type: String, default: '' },
+    cacheStatus: { type: String, default: 'fresh' },
     processedAt: { type: Date },
   },
   {

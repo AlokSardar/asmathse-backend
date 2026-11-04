@@ -1,11 +1,16 @@
+const crypto = require('crypto');
 const { GoogleGenAI } = require('@google/genai');
 const { PDFDocument } = require('pdf-lib');
+const { PDFParse } = require('pdf-parse');
 const ImportSession = require('../models/ImportSession');
 const ImportPage = require('../models/ImportPage');
 const ImportItem = require('../models/ImportItem');
+const ExtractionCache = require('../models/ExtractionCache');
 const Content = require('../models/Content');
 
 const ALL_ENGINEERING_STREAMS = ['CSE', 'ECE', 'ME', 'EE', 'CE', 'IT'];
+const PROMPT_VERSION = 'v2-ocr-pure-transcription';
+const MODEL_CANDIDATE_CHAIN = ['gemini-3.5-flash', 'gemini-flash-latest', 'gemini-3.8-flash'];
 
 /**
  * Text normalization for similarity & duplicate detection
@@ -42,121 +47,121 @@ function calculateTextSimilarity(textA = '', textB = '') {
 }
 
 /**
- * High-fidelity fallback question generator when API key is missing or quota exhausted.
+ * Extract embedded text from a PDF single-page buffer for anti-hallucination verification
  */
-function getSyllabusFallbackQuestions(course, branch, semester, pageNum = 1, fileName = '') {
-  const normCourse = (course || 'Engineering').toLowerCase();
-  const normFile = (fileName || '').toLowerCase();
+async function extractEmbeddedPageText(pdfBuffer) {
+  try {
+    const parser = new PDFParse({ data: pdfBuffer });
+    const result = await parser.getText();
+    const text = (result && result.text) || '';
+    await parser.destroy();
+    return text.trim();
+  } catch (err) {
+    console.warn('[Anti-Hallucination] Could not extract embedded text from page buffer:', err.message);
+    return '';
+  }
+}
 
-  if (normCourse.includes('cbse') || normFile.includes('cbse') || normFile.includes('12')) {
-    return [
-      {
-        itemNumber: '1',
-        type: 'Subjective',
-        marks: 5,
-        marksRawLabel: '[5 Marks]',
-        question_latex:
-          'Find the general solution of the differential equation $\\frac{dy}{dx} + y \\cot x = 2x + x^2 \\cot x$, given that $y = 0$ when $x = \\frac{\\pi}{2}$.',
-        options: [],
-        correctOption: null,
-        answer_latex: '$y = x^2 - \\frac{\\pi^2}{4 \\sin x}$',
-        solution_latex:
-          'Integrating Factor $\\text{I.F.} = e^{\\int \\cot x \\, dx} = \\sin x$. Multiplying both sides: $\\frac{d}{dx}(y \\sin x) = 2x \\sin x + x^2 \\cos x = \\frac{d}{dx}(x^2 \\sin x)$. Integrating gives $y \\sin x = x^2 \\sin x + C$. Since $y(\\pi/2) = 0 \\implies 0 = \\frac{\\pi^2}{4} + C \\implies C = -\\frac{\\pi^2}{4}$. Hence $y = x^2 - \\frac{\\pi^2}{4 \\sin x}$.',
-        has_figure: false,
-        topic_guess: 'Differential Equations',
-        chapter_guess: 'Calculus',
-        difficulty_guess: 'Medium',
-        confidence: 0.98,
-        warnings: [],
-      },
-      {
-        itemNumber: '2',
-        type: 'MCQ',
-        marks: 2,
-        marksRawLabel: '[2 Marks]',
-        question_latex:
-          'The value of $\\int_0^{\\pi/2} \\frac{\\sqrt{\\sin x}}{\\sqrt{\\sin x} + \\sqrt{\\cos x}} \\, dx$ is equal to:',
-        options: ['$\\frac{\\pi}{4}$', '$\\frac{\\pi}{2}$', '$\\pi$', '$0$'],
-        correctOption: 0,
-        answer_latex: '$\\frac{\\pi}{4}$',
-        solution_latex:
-          'Let $I = \\int_0^{\\pi/2} \\frac{\\sqrt{\\sin x}}{\\sqrt{\\sin x} + \\sqrt{\\cos x}} \\, dx$. Using property $\\int_0^a f(x)dx = \\int_0^a f(a-x)dx$, we get $I = \\int_0^{\\pi/2} \\frac{\\sqrt{\\cos x}}{\\sqrt{\\cos x} + \\sqrt{\\sin x}} \\, dx$. Adding both gives $2I = \\int_0^{\\pi/2} 1 \\, dx = \\frac{\\pi}{2} \\implies I = \\frac{\\pi}{4}$.',
-        has_figure: false,
-        topic_guess: 'Definite Integrals',
-        chapter_guess: 'Integral Calculus',
-        difficulty_guess: 'Easy',
-        confidence: 0.99,
-        warnings: [],
-      },
-    ];
+const STOP_WORDS = new Set([
+  'the', 'and', 'for', 'with', 'that', 'from', 'this', 'are', 'was', 'were',
+  'which', 'what', 'how', 'each', 'all', 'any', 'not', 'can', 'may', 'will'
+]);
+
+/**
+ * Anti-Hallucination verification: Checks if extracted question tokens appear on the actual page
+ */
+function verifyAntiHallucination(questionText = '', pageEmbeddedText = '') {
+  if (!pageEmbeddedText || pageEmbeddedText.length < 30) {
+    // Scanned/raster-only page without text layer: skip embedded text check
+    return { verified: true, overlap: 1.0, warning: null };
   }
 
-  // Default Engineering / B.Tech / Higher Math
-  return [
-    {
-      itemNumber: '1',
-      type: 'Subjective',
-      marks: 8,
-      marksRawLabel: '[8 Marks]',
-      question_latex:
-        'State Cayley-Hamilton theorem. Verify it for the matrix $A = \\begin{pmatrix} 1 & 2 \\\\ 3 & 4 \\end{pmatrix}$ and hence determine $A^{-1}$ and $A^4$.',
-      options: [],
-      correctOption: null,
-      answer_latex:
-        '$A^{-1} = \\frac{1}{2}\\begin{pmatrix} -4 & 2 \\\\ 3 & -1 \\end{pmatrix}, \\quad A^4 = \\begin{pmatrix} 199 & 290 \\\\ 435 & 634 \\end{pmatrix}$',
-      solution_latex:
-        'Characteristic equation: $|A - \\lambda I| = \\lambda^2 - 5\\lambda - 2 = 0$. By Cayley-Hamilton theorem, $A^2 - 5A - 2I = O$. Pre-multiplying by $A^{-1}$ yields $A^{-1} = \\frac{1}{2}(A - 5I) = \\frac{1}{2}\\begin{pmatrix} -4 & 2 \\\\ 3 & -1 \\end{pmatrix}$. Furthermore, $A^2 = 5A + 2I \\implies A^4 = 135A + 54I = \\begin{pmatrix} 199 & 290 \\\\ 435 & 634 \\end{pmatrix}$.',
-      has_figure: false,
-      topic_guess: 'Matrices & Linear Algebra',
-      chapter_guess: 'Linear Algebra',
-      difficulty_guess: 'Medium',
-      confidence: 0.98,
-      warnings: [],
-    },
-    {
-      itemNumber: '2',
-      type: 'MCQ',
-      marks: 2,
-      marksRawLabel: '[2 Marks]',
-      question_latex:
-        'The eigenvalues of the symmetric matrix $M = \\begin{pmatrix} 2 & 1 \\\\ 1 & 2 \\end{pmatrix}$ are:',
-      options: ['$1$ and $3$', '$2$ and $2$', '$0$ and $4$', '$-1$ and $3$'],
-      correctOption: 0,
-      answer_latex: '$1$ and $3$',
-      solution_latex:
-        'Characteristic equation $|M - \\lambda I| = (2-\\lambda)^2 - 1 = \\lambda^2 - 4\\lambda + 3 = 0$. Factoring: $(\\lambda - 1)(\\lambda - 3) = 0 \\implies \\lambda_1 = 1, \\lambda_2 = 3$.',
-      has_figure: false,
-      topic_guess: 'Eigenvalues & Diagonalization',
-      chapter_guess: 'Linear Algebra',
-      difficulty_guess: 'Easy',
-      confidence: 0.99,
-      warnings: [],
-    },
-    {
-      itemNumber: '3',
-      type: 'Subjective',
-      marks: 8,
-      marksRawLabel: '[8 Marks]',
-      question_latex:
-        "If $u = \\sin^{-1}\\left(\\frac{x^2 + y^2}{x + y}\\right)$, prove using Euler's theorem for homogeneous functions that $x\\frac{\\partial u}{\\partial x} + y\\frac{\\partial u}{\\partial y} = \\tan u$.",
-      options: [],
-      correctOption: null,
-      answer_latex: '$x\\frac{\\partial u}{\\partial x} + y\\frac{\\partial u}{\\partial y} = \\tan u$',
-      solution_latex:
-        "Let $z = \\sin u = \\frac{x^2 + y^2}{x + y}$. Since $z(tx, ty) = t^1 z(x,y)$, $z$ is homogeneous of degree $n = 1$. By Euler's theorem, $x\\frac{\\partial z}{\\partial x} + y\\frac{\\partial z}{\\partial y} = 1 \\cdot z$. Substituting $z = \\sin u$: $\\cos u \\left(x\\frac{\\partial u}{\\partial x} + y\\frac{\\partial u}{\\partial y}\\right) = \\sin u \\implies x\\frac{\\partial u}{\\partial x} + y\\frac{\\partial u}{\\partial y} = \\tan u$.",
-      has_figure: false,
-      topic_guess: 'Partial Differentiation',
-      chapter_guess: 'Multivariable Calculus',
-      difficulty_guess: 'Hard',
-      confidence: 0.97,
-      warnings: [],
-    },
-  ];
+  const pageWords = new Set(normalizeMathText(pageEmbeddedText).split(' '));
+  const qWords = normalizeMathText(questionText)
+    .split(' ')
+    .filter((w) => w.length > 2 && !STOP_WORDS.has(w)); // Filter out stop-words
+
+  if (qWords.length === 0) {
+    return { verified: true, overlap: 1.0, warning: null };
+  }
+
+  let matched = 0;
+  for (const w of qWords) {
+    if (pageWords.has(w)) matched++;
+  }
+
+  const overlap = matched / qWords.length;
+  // If fewer than 35% of the distinctive question words appear on this page, it's a hallucination
+  if (overlap < 0.35) {
+    return {
+      verified: false,
+      overlap,
+      warning: 'Not found on page - possible AI error',
+    };
+  }
+
+  return { verified: true, overlap, warning: null };
 }
 
 /**
+ * Resilient Gemini Multimodal Caller with exponential backoff & model fallbacks
+ */
+async function callGeminiWithRetry(ai, contents, config, models = MODEL_CANDIDATE_CHAIN) {
+  let lastError = null;
+
+  for (const model of models) {
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      try {
+        const response = await ai.models.generateContent({
+          model,
+          contents,
+          config,
+        });
+        return { response, model };
+      } catch (err) {
+        lastError = err;
+        const errMsg = (err.message || '').toLowerCase();
+        const isQuotaOrDemand =
+          errMsg.includes('429') ||
+          errMsg.includes('resource_exhausted') ||
+          errMsg.includes('quota') ||
+          errMsg.includes('503') ||
+          errMsg.includes('unavailable') ||
+          errMsg.includes('high demand') ||
+          errMsg.includes('timeout');
+
+        console.warn(`[Gemini API] Model ${model} attempt ${attempt} failed: ${err.message}`);
+
+        if (!isQuotaOrDemand || attempt === 3) {
+          // If non-retryable error or exhausted 3 attempts on this model, try next model in candidate chain
+          break;
+        }
+
+        const delayMs = Math.pow(2, attempt - 1) * 1000; // 1000ms, 2000ms
+        await new Promise((resolve) => setTimeout(resolve, delayMs));
+      }
+    }
+  }
+
+  throw lastError || new Error('All Gemini model candidates exhausted.');
+}
+
+/**
+ * 0. AI Health Status (Zero-cost, makes no paid API calls)
+ */
+exports.getAiHealth = (req, res) => {
+  const hasKey = Boolean(process.env.GEMINI_API_KEY && process.env.GEMINI_API_KEY.trim());
+  return res.status(200).json({
+    success: true,
+    connected: hasKey,
+    model: MODEL_CANDIDATE_CHAIN[0],
+    preferredChain: MODEL_CANDIDATE_CHAIN,
+  });
+};
+
+/**
  * 1. Initialize an Import Session
- * Receives uploaded PDF/scan, splits into individual page records, and establishes session.
+ * Receives uploaded PDF/scan, slices into individual page records, and establishes session.
  */
 exports.initImportSession = async (req, res) => {
   try {
@@ -198,27 +203,35 @@ exports.initImportSession = async (req, res) => {
           singleDoc.addPage(copiedPage);
           const singleBytes = await singleDoc.save();
           const singleBase64 = Buffer.from(singleBytes).toString('base64');
+          const pageHash = crypto.createHash('sha256').update(singleBytes).digest('hex');
 
           pageUnits.push({
             pageNumber: i + 1,
             pageDataUrl: `data:application/pdf;base64,${singleBase64}`,
+            pageHash,
             status: 'pending',
           });
         }
       } catch (pdfErr) {
         console.warn('PDF splitting fallback to whole document:', pdfErr.message);
         totalPages = 1;
+        const cleanBase64 = fileDataUrl.replace(/^data:[^;]+;base64,/, '');
+        const pageHash = crypto.createHash('sha256').update(Buffer.from(cleanBase64, 'base64')).digest('hex');
         pageUnits.push({
           pageNumber: 1,
           pageDataUrl: fileDataUrl,
+          pageHash,
           status: 'pending',
         });
       }
     } else {
       // Single image scan
+      const cleanBase64 = fileDataUrl.replace(/^data:[^;]+;base64,/, '');
+      const pageHash = crypto.createHash('sha256').update(Buffer.from(cleanBase64, 'base64')).digest('hex');
       pageUnits.push({
         pageNumber: 1,
         pageDataUrl: fileDataUrl,
+        pageHash,
         status: 'pending',
       });
     }
@@ -251,10 +264,13 @@ exports.initImportSession = async (req, res) => {
         pageNumber: pu.pageNumber,
         status: 'pending',
         pageDataUrl: pu.pageDataUrl,
+        pageHash: pu.pageHash || '',
       });
     }
 
-    const pages = await ImportPage.find({ sessionId }).select('pageNumber status extractedCount errorMessage retries').sort({ pageNumber: 1 });
+    const pages = await ImportPage.find({ sessionId })
+      .select('pageNumber status extractedCount errorMessage retries pageHash sourceTelemetry cacheStatus')
+      .sort({ pageNumber: 1 });
 
     return res.status(201).json({
       success: true,
@@ -299,11 +315,12 @@ exports.getSessionState = async (req, res) => {
 
 /**
  * 3. Extract a single page via Gemini Multimodal Vision API
+ * Strict Anti-Hallucination, Temperature 0, Deterministic Transcriptions Only.
  */
 exports.extractPage = async (req, res) => {
   try {
     const { sessionId } = req.params;
-    const { pageNumber = 1, apiKey: customApiKey } = req.body;
+    const { pageNumber = 1, forceReExtract = false, apiKey: customApiKey } = req.body;
 
     const session = await ImportSession.findOne({ sessionId });
     if (!session) {
@@ -315,126 +332,207 @@ exports.extractPage = async (req, res) => {
       return res.status(404).json({ success: false, message: `Page ${pageNumber} not found` });
     }
 
+    // Resolve API Key: Strictly require server process.env.GEMINI_API_KEY (or admin custom key)
+    let apiKey = process.env.GEMINI_API_KEY;
+    if (!apiKey && customApiKey && req.user && req.user.role === 'admin') {
+      apiKey = customApiKey;
+    }
+
+    if (!apiKey || !apiKey.trim()) {
+      pageDoc.status = 'error';
+      pageDoc.errorMessage = 'Google Gemini API Key is missing. Configure GEMINI_API_KEY in the server environment.';
+      await pageDoc.save();
+      return res.status(400).json({
+        success: false,
+        message: 'Google Gemini API Key is missing. Configure GEMINI_API_KEY in the server environment.',
+      });
+    }
+
     pageDoc.status = 'extracting';
+    pageDoc.errorMessage = '';
     await pageDoc.save();
 
     session.status = 'processing';
     session.activePage = Number(pageNumber);
     await session.save();
 
-    const apiKey = customApiKey || req.headers['x-gemini-api-key'] || process.env.GEMINI_API_KEY;
-    let extractedRawItems = [];
+    const pageDataUrl = pageDoc.pageDataUrl || session.fileDataUrl;
+    const cleanBase64 = pageDataUrl.replace(/^data:[^;]+;base64,/, '');
+    const pageBuffer = Buffer.from(cleanBase64, 'base64');
+    const isPdf =
+      pageDataUrl.includes('application/pdf') ||
+      session.fileName.toLowerCase().endsWith('.pdf');
+    const mimeType = isPdf ? 'application/pdf' : 'image/png';
 
-    if (!apiKey) {
-      // Heuristic fallback when no key is set
-      extractedRawItems = getSyllabusFallbackQuestions(
-        session.course,
-        session.branch,
-        session.semester,
-        pageNumber,
-        session.fileName
+    // Compute SHA-256 of exact page bytes
+    const pageHash = crypto.createHash('sha256').update(pageBuffer).digest('hex');
+    pageDoc.pageHash = pageHash;
+
+    // Cache Key computation
+    const primaryModel = MODEL_CANDIDATE_CHAIN[0];
+    const cacheKey = crypto
+      .createHash('sha256')
+      .update(pageHash + '::' + PROMPT_VERSION + '::' + primaryModel)
+      .digest('hex');
+
+    // Server-side dev mode telemetry
+    if (process.env.NODE_ENV !== 'production') {
+      console.log(
+        `[GEMINI_EXTRACT_PAGE] sessionId=${sessionId}, pageNumber=${pageNumber}, byteLength=${pageBuffer.length}, sha256=${pageHash}, mimeType=${mimeType}`
       );
-    } else {
-      // Official Google Gemini 3.8 Flash Multimodal OCR
-      const ai = new GoogleGenAI({ apiKey });
-      const pageDataUrl = pageDoc.pageDataUrl || session.fileDataUrl;
-      const cleanBase64 = pageDataUrl.replace(/^data:[^;]+;base64,/, '');
-      const isPdf =
-        pageDataUrl.includes('application/pdf') ||
-        session.fileName.toLowerCase().endsWith('.pdf');
+    }
 
+    let extractedRawItems = [];
+    let isCached = false;
+    let usedModel = primaryModel;
+
+    // ── Check Cache (Unless forceReExtract is set) ──────────────────────────
+    if (!forceReExtract) {
+      const cached = await ExtractionCache.findOne({ cacheKey });
+      if (cached && Array.isArray(cached.items)) {
+        isCached = true;
+        usedModel = cached.modelName || primaryModel;
+        extractedRawItems = cached.items;
+        console.log(`⚡ [EXTRACTION CACHE HIT]: Page ${pageNumber} loaded from cache (hash: ${pageHash.slice(0, 8)})`);
+      }
+    }
+
+    // ── Execute Live Gemini OCR If Not Cached ──────────────────────────────
+    if (!isCached) {
       const promptText = `
-You are a World-Class LaTeX OCR & Mathematical Question Extraction Engine for University & High School Mathematics.
-Analyze Page ${pageNumber} of this examination question paper (Course: ${session.course}, Subject: ${session.subject}).
-
-TASK:
-Extract EVERY distinct question appearing on this page with 100% mathematical accuracy.
-
-FORMATTING & MATH RULES:
-1. All mathematical formulas, symbols, fractions, matrices, integrals, limits, roots, and Greek letters MUST be written in standard, clean LaTeX enclosed in $...$ (for inline math) or $$...$$ (for display math).
-2. DO NOT simplify, solve away, or alter the question prompt. Transcribe with pure mathematical fidelity.
-3. Automatically scan margins, headers, or question ends for mark allocations (e.g. "[2 Marks]", "[5]", "(8M)", "(b) [4]"). Extract "marks" as a number and "marksRawLabel" as the exact label.
-4. If the question has a diagram or figure, set "has_figure": true.
-5. Provide a concise final answer in LaTeX in "answer_latex" and a rigorous step-by-step mathematical derivation in "solution_latex".
+You are an OCR and transcription engine.
+Transcribe ONLY the questions visibly printed on the attached examination page.
+Never invent, complete, solve, extrapolate, or paraphrase.
+If the page has no questions (e.g. title page, instructions only, or blank), return an empty JSON array: [].
+Do NOT calculate or generate solutions. Transcribe "answer_latex" and "solution_latex" ONLY if they are explicitly printed on the page; otherwise set them to empty strings "".
+Scan margins or question ends for mark allocations (e.g. "[2 Marks]", "(5M)").
 
 OUTPUT JSON SCHEMA:
-Return ONLY a valid JSON array of objects with the exact keys:
+Return ONLY a valid JSON array of question objects adhering to this schema:
 [
   {
-    "number": "1",
-    "type": "MCQ" | "Short" | "Long" | "True-False" | "Fill-blank" | "Subjective" | "Descriptive",
-    "marks": 5,
-    "marksRawLabel": "[5 Marks]",
-    "question_latex": "Full question statement with $...$ math",
-    "options": ["$A$", "$B$", "$C$", "$D$"],
-    "correctOption": 0,
-    "answer_latex": "Final answer in LaTeX",
-    "solution_latex": "Step-by-step mathematical derivation in LaTeX",
-    "has_figure": false,
-    "topic_guess": "Calculus",
-    "chapter_guess": "Differential Equations",
-    "difficulty_guess": "Medium",
-    "confidence": 0.98,
+    "number": "<string: question number as printed, e.g. '1', '2(a)'>",
+    "type": "MCQ" | "Short" | "Long" | "Subjective",
+    "marks": <number or 0>,
+    "marksRawLabel": "<string label as printed, e.g. '[1 Mark]' or ''>",
+    "question_latex": "<full text of the question with mathematical formulas in $...$ or $$...$>",
+    "options": ["<option 1>", "<option 2>"],
+    "correctOption": <number index or null>,
+    "answer_latex": "<only if printed on page, else ''>",
+    "solution_latex": "<only if printed on page, else ''>",
+    "has_figure": <boolean>,
+    "difficulty_guess": "Easy" | "Medium" | "Hard",
+    "confidence": <number between 0.0 and 1.0>,
     "warnings": []
   }
 ]
 Do not wrap in markdown or prose. Return ONLY the JSON array.
-`;
+`.trim();
+
+      const ai = new GoogleGenAI({ apiKey });
+      const contents = [
+        {
+          role: 'user',
+          parts: [
+            {
+              inlineData: {
+                data: cleanBase64,
+                mimeType,
+              },
+            },
+            {
+              text: promptText,
+            },
+          ],
+        },
+      ];
+
+      const config = {
+        temperature: 0,
+        responseMimeType: 'application/json',
+      };
 
       try {
-        const mediaPart = isPdf
-          ? {
-              type: 'document',
-              data: cleanBase64,
-              mime_type: 'application/pdf',
-            }
-          : {
-              type: 'image',
-              data: cleanBase64,
-              mime_type: 'image/png',
-            };
+        const { response, model } = await callGeminiWithRetry(ai, contents, config);
+        usedModel = model;
+        const responseText = response.text || '';
 
-        const response = await ai.interactions.create({
-          model: 'gemini-3.8-flash',
-          input: [{ type: 'text', text: promptText }, mediaPart],
-        });
-
-        const outputText = response.output_text || '';
-        const jsonMatch = outputText.match(/\[[\s\S]*\]/);
+        const jsonMatch = responseText.match(/\[[\s\S]*\]/);
         if (jsonMatch) {
-          const parsed = JSON.parse(jsonMatch[0]);
-          if (Array.isArray(parsed) && parsed.length > 0) {
-            extractedRawItems = parsed;
+          try {
+            const parsed = JSON.parse(jsonMatch[0]);
+            if (Array.isArray(parsed)) {
+              extractedRawItems = parsed;
+            }
+          } catch (jsonErr) {
+            console.warn('JSON parsing error from Gemini output:', jsonErr.message);
           }
         }
+
+        // Cache successful response
+        await ExtractionCache.findOneAndUpdate(
+          { cacheKey },
+          {
+            cacheKey,
+            sha256: pageHash,
+            pageNumber: Number(pageNumber),
+            modelName: usedModel,
+            promptVersion: PROMPT_VERSION,
+            items: extractedRawItems,
+            rawResponse: responseText,
+          },
+          { upsert: true, new: true }
+        );
       } catch (geminiErr) {
         console.error(`Gemini extraction failed for page ${pageNumber}:`, geminiErr.message);
-        // Fallback gracefully so workflow continues
-        extractedRawItems = getSyllabusFallbackQuestions(
-          session.course,
-          session.branch,
-          session.semester,
-          pageNumber,
-          session.fileName
-        );
+        pageDoc.status = 'error';
+        pageDoc.errorMessage = geminiErr.message;
+        await pageDoc.save();
+
+        return res.status(502).json({
+          success: false,
+          pageNumber: Number(pageNumber),
+          status: 'error',
+          error: geminiErr.message,
+          message: `Gemini OCR failed for page ${pageNumber}: ${geminiErr.message}`,
+        });
       }
     }
 
-    // Fetch existing Question Bank items to perform real-time normalized duplicate detection
+    // ── Anti-Hallucination Verification Layer ──────────────────────────────
+    let pageEmbeddedText = '';
+    if (isPdf) {
+      pageEmbeddedText = await extractEmbeddedPageText(pageBuffer);
+    }
+
+    // Fetch existing Question Bank items for real-time duplicate detection
     const existingBankItems = await Content.find({
       type: 'question',
       course: session.course,
-    }).select('id title questionText marks topic').limit(200);
+    })
+      .select('id title questionText marks topic')
+      .limit(200);
 
     // Save extracted items to ImportItem collection
     const createdItems = [];
-    // Clear previously extracted items for this page if re-running
     await ImportItem.deleteMany({ sessionId, pageNumber: Number(pageNumber) });
 
     for (let idx = 0; idx < extractedRawItems.length; idx++) {
       const raw = extractedRawItems[idx];
       const qText = raw.question_latex || raw.text || '';
       const customItemId = `ITEM-${sessionId}-P${pageNumber}-${idx + 1}`;
+
+      // Run anti-hallucination check
+      const antiH = verifyAntiHallucination(qText, pageEmbeddedText);
+      const warnings = Array.isArray(raw.warnings) ? [...raw.warnings] : [];
+      let itemConfidence = Number(raw.confidence) || 0.95;
+      let shouldInclude = true;
+
+      if (!antiH.verified && antiH.warning) {
+        warnings.push(antiH.warning);
+        itemConfidence = Math.min(itemConfidence, 0.3);
+        shouldInclude = false; // Do not auto-select suspected hallucinations
+      }
 
       // Duplicate check against existing Question Bank
       let isDuplicate = false;
@@ -459,8 +557,8 @@ Do not wrap in markdown or prose. Return ONLY the JSON array.
         pageNumber: Number(pageNumber),
         itemNumber: String(raw.number || raw.questionNumber || `${idx + 1}`),
         type: raw.type || 'Subjective',
-        marks: Number(raw.marks) || 4,
-        marksRawLabel: raw.marksRawLabel || `[${Number(raw.marks) || 4} Marks]`,
+        marks: Number(raw.marks) || 0,
+        marksRawLabel: raw.marksRawLabel || (raw.marks ? `[${raw.marks} Marks]` : ''),
         question_latex: qText,
         options: Array.isArray(raw.options) ? raw.options : [],
         correctOption: raw.correctOption ?? (raw.type === 'MCQ' ? 0 : null),
@@ -468,15 +566,15 @@ Do not wrap in markdown or prose. Return ONLY the JSON array.
         solution_latex: raw.solution_latex || raw.solution || '',
         has_figure: Boolean(raw.has_figure),
         figure_bbox: raw.figure_bbox || null,
-        topic_guess: raw.topic_guess || raw.topic || 'Engineering Mathematics',
+        topic_guess: raw.topic_guess || raw.topic || session.subject || 'General',
         chapter_guess: raw.chapter_guess || raw.chapter || '',
         difficulty_guess: raw.difficulty_guess || raw.difficulty || 'Medium',
-        confidence: Number(raw.confidence) || 0.95,
-        warnings: Array.isArray(raw.warnings) ? raw.warnings : [],
-        included: true,
-        includeAnswer: true,
+        confidence: itemConfidence,
+        warnings,
+        included: shouldInclude,
+        includeAnswer: Boolean(raw.answer_latex || raw.answer),
         includeSolution: Boolean(raw.solution_latex || raw.solution),
-        includeMarks: true,
+        includeMarks: Boolean(raw.marks),
         includeDiagram: Boolean(raw.has_figure),
         isDuplicate,
         duplicateMatchId,
@@ -489,10 +587,13 @@ Do not wrap in markdown or prose. Return ONLY the JSON array.
       createdItems.push(savedItem);
     }
 
-    // Update page state
+    // Update page state with telemetry
+    const telemetryStr = `Source: Gemini (${usedModel}) · page hash ${pageHash.slice(0, 8)} · ${isCached ? 'cached' : 'fresh'}`;
     pageDoc.status = 'done';
     pageDoc.extractedCount = createdItems.length;
     pageDoc.errorMessage = '';
+    pageDoc.sourceTelemetry = telemetryStr;
+    pageDoc.cacheStatus = isCached ? 'cached' : 'fresh';
     pageDoc.processedAt = new Date();
     await pageDoc.save();
 
@@ -509,6 +610,10 @@ Do not wrap in markdown or prose. Return ONLY the JSON array.
     return res.status(200).json({
       success: true,
       pageNumber: Number(pageNumber),
+      pageHash,
+      sourceTelemetry: telemetryStr,
+      cacheStatus: isCached ? 'cached' : 'fresh',
+      modelUsed: usedModel,
       items: createdItems,
       totalExtracted: createdItems.length,
       sessionMetrics: {
@@ -565,9 +670,12 @@ exports.fixItemWithAi = async (req, res) => {
       return res.status(404).json({ success: false, message: 'Item not found' });
     }
 
-    const apiKey = customApiKey || req.headers['x-gemini-api-key'] || process.env.GEMINI_API_KEY;
+    let apiKey = process.env.GEMINI_API_KEY;
+    if (!apiKey && customApiKey && req.user && req.user.role === 'admin') {
+      apiKey = customApiKey;
+    }
+
     if (!apiKey) {
-      // Heuristic syntax cleanup
       const cleaned = (question_latex || item.question_latex || '')
         .replace(/\\\[/g, '$$')
         .replace(/\\\]/g, '$$')
@@ -591,21 +699,24 @@ ${question_latex || item.question_latex}
 ${errorNote ? `Reported Error: ${errorNote}` : ''}
 
 Respond ONLY with the repaired text. Do not include markdown code block formatting or conversational text.
-`;
+`.trim();
 
-    const response = await ai.interactions.create({
-      model: 'gemini-3.8-flash',
-      input: [{ type: 'text', text: promptText }],
+    const response = await ai.models.generateContent({
+      model: 'gemini-3.5-flash',
+      contents: promptText,
+      config: {
+        temperature: 0,
+      },
     });
 
-    const repairedText = (response.output_text || '').trim();
+    const repairedText = (response.text || '').trim();
     if (repairedText) {
       item.question_latex = repairedText;
       item.warnings = [];
       await item.save();
     }
 
-    return res.status(200).json({ success: true, item, repairedVia: 'Gemini 3.8 Flash' });
+    return res.status(200).json({ success: true, item, repairedVia: 'Gemini 3.5 Flash' });
   } catch (error) {
     console.error('fixItemWithAi error:', error);
     return res.status(500).json({ success: false, message: error.message });
@@ -623,7 +734,6 @@ exports.commitSessionToBank = async (req, res) => {
       return res.status(404).json({ success: false, message: 'Session not found' });
     }
 
-    // Retrieve all items for this session marked for import
     const candidateItems = await ImportItem.find({ sessionId, included: true });
     if (candidateItems.length === 0) {
       return res.status(400).json({ success: false, message: 'No questions selected for import.' });
@@ -639,14 +749,12 @@ exports.commitSessionToBank = async (req, res) => {
     const targetBranches = isEngAll ? ALL_ENGINEERING_STREAMS : [session.branch];
 
     for (const item of candidateItems) {
-      // Duplicate handling
       if (item.isDuplicate && item.duplicateAction === 'skip') {
         skippedCount++;
         continue;
       }
 
       if (item.isDuplicate && item.duplicateAction === 'replace' && item.duplicateMatchId) {
-        // Replace existing Question Bank item
         await Content.findOneAndUpdate(
           { id: item.duplicateMatchId },
           {
@@ -667,7 +775,6 @@ exports.commitSessionToBank = async (req, res) => {
         continue;
       }
 
-      // Create new Content items in Question Bank
       for (const tBranch of targetBranches) {
         const customId = `QB-AI-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`;
         const contentDoc = new Content({
@@ -681,7 +788,7 @@ exports.commitSessionToBank = async (req, res) => {
           branch: tBranch,
           stream: tBranch,
           semester: session.semester,
-          topic: item.topic_guess || 'Engineering Mathematics',
+          topic: item.topic_guess || 'Mathematics',
           difficulty: item.difficulty_guess || 'Medium',
           marks: item.includeMarks ? item.marks : 4,
           questionText: item.question_latex,
