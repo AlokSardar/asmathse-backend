@@ -553,6 +553,66 @@ exports.updateItem = async (req, res) => {
 };
 
 /**
+ * 4b. AI-Assisted Repair of a Question Card ("Fix with AI")
+ */
+exports.fixItemWithAi = async (req, res) => {
+  try {
+    const { sessionId, itemId } = req.params;
+    const { question_latex, errorNote, apiKey: customApiKey } = req.body;
+
+    const item = await ImportItem.findOne({ sessionId, itemId });
+    if (!item) {
+      return res.status(404).json({ success: false, message: 'Item not found' });
+    }
+
+    const apiKey = customApiKey || req.headers['x-gemini-api-key'] || process.env.GEMINI_API_KEY;
+    if (!apiKey) {
+      // Heuristic syntax cleanup
+      const cleaned = (question_latex || item.question_latex || '')
+        .replace(/\\\[/g, '$$')
+        .replace(/\\\]/g, '$$')
+        .replace(/\\\(/g, '$')
+        .replace(/\\\)/g, '$');
+      item.question_latex = cleaned;
+      item.warnings = [];
+      await item.save();
+      return res.status(200).json({ success: true, item, repairedVia: 'Heuristic Syntax Engine' });
+    }
+
+    const ai = new GoogleGenAI({ apiKey });
+    const promptText = `
+You are a LaTeX and Mathematics OCR Repair Specialist.
+Fix the following mathematical question text so that all mathematical formulas, matrices, integrals, fractions, limits, and symbols are in 100% syntactically correct standard KaTeX LaTeX enclosed in $...$ (inline) or $$...$$ (display).
+Do not change the mathematical meaning of the question.
+
+Original Question:
+${question_latex || item.question_latex}
+
+${errorNote ? `Reported Error: ${errorNote}` : ''}
+
+Respond ONLY with the repaired text. Do not include markdown code block formatting or conversational text.
+`;
+
+    const response = await ai.interactions.create({
+      model: 'gemini-3.8-flash',
+      input: [{ type: 'text', text: promptText }],
+    });
+
+    const repairedText = (response.output_text || '').trim();
+    if (repairedText) {
+      item.question_latex = repairedText;
+      item.warnings = [];
+      await item.save();
+    }
+
+    return res.status(200).json({ success: true, item, repairedVia: 'Gemini 3.8 Flash' });
+  } catch (error) {
+    console.error('fixItemWithAi error:', error);
+    return res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+/**
  * 5. Commit & Synchronize Selected Items into the Question Bank
  */
 exports.commitSessionToBank = async (req, res) => {

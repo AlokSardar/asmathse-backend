@@ -16,6 +16,9 @@ router.post('/import-session/:sessionId/extract-page', aiImportController.extrac
 // 4. Update individual question item (LaTeX, toggles, marks, duplicate resolution)
 router.patch('/import-session/:sessionId/items/:itemId', aiImportController.updateItem);
 
+// 4b. AI-Assisted Question Card Repair ("Fix with AI")
+router.post('/import-session/:sessionId/items/:itemId/fix-ai', aiImportController.fixItemWithAi);
+
 // 5. Commit selected items to Central Question Bank with ACID/batch persistence
 router.post('/import-session/:sessionId/commit', aiImportController.commitSessionToBank);
 
