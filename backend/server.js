@@ -73,9 +73,11 @@ const testRoutes = require('./routes/testRoutes');
 const feeRoutes = require('./routes/feeRoutes');
 const approvalRoutes = require('./routes/approvalRoutes');
 const uploadRoutes = require('./routes/uploadRoutes');
+const aiRoutes = require('./routes/aiRoutes');
 
 // Mount routers with sensitive route protection
 app.use('/api/upload', uploadRoutes);
+app.use('/api/ai', aiRoutes);
 app.use('/api/auth', authLimiter, authRoutes);
 app.use('/api/approvals', approvalRoutes);
 app.use('/api/content', contentRoutes);
