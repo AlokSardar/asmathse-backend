@@ -2,6 +2,7 @@ const Content = require('../models/Content');
 const ClassTest = require('../models/ClassTest');
 const Assignment = require('../models/Assignment');
 const Submission = require('../models/Submission');
+const Evaluation = require('../models/Evaluation');
 const { uploadBase64ToCloudinary } = require('../services/cloudinaryService');
 
 const escapeRegex = (str) => {
@@ -597,19 +598,22 @@ const getStudentAssignments = async (req, res) => {
 
 // @desc    Submit an assignment (persists directly to MongoDB Atlas)
 // @route   POST /api/student/submissions
+// @desc    Submit student assignment or handwritten exam answer script
+// @route   POST /api/student/submissions or POST /api/student/submit-exam
 // @access  Public / Student
 const submitAssignment = async (req, res) => {
   try {
     const data = req.body || {};
     const studentId = req.user ? String(req.user.id || req.user._id) : String(data.studentId || data.studentEmail || 'student_std');
-    const assignmentId = String(data.assignmentId || data.assignment || '1');
-    const id = data.id || `assign_sub_${Date.now()}_${Math.random().toString(36).substr(2, 6)}`;
+    const examOrAssignmentId = String(data.examId || data.assignmentId || data.assignment || data.testId || '1');
+    const examOrAssignmentTitle = data.examTitle || data.assignmentTitle || data.title || 'Mathematics Examination';
+    const id = data.id || `sub_${Date.now()}_${Math.random().toString(36).substr(2, 6)}`;
 
-    let answerFileUrl = data.answerFileUrl || data.fileUrl || '';
+    let answerFileUrl = data.answerFileUrl || data.answerSheetUrl || data.fileUrl || '';
     if (answerFileUrl && answerFileUrl.startsWith('data:')) {
       try {
         const cloudRes = await uploadBase64ToCloudinary(answerFileUrl, {
-          fileName: `submission_${assignmentId}_${studentId}.pdf`,
+          fileName: `submission_${examOrAssignmentId}_${studentId}.pdf`,
           folder: 'as_maths/submissions',
         });
         if (cloudRes?.secure_url) {
@@ -620,36 +624,101 @@ const submitAssignment = async (req, res) => {
       }
     }
 
-    const payload = {
+    const rawAnswerPages = Array.isArray(data.answerPages) ? data.answerPages : [];
+    const totalPages = rawAnswerPages.length > 0 ? rawAnswerPages.length : (Number(data.totalPages) || 1);
+    const studentRoll = data.studentRoll || data.rollNumber || data.rollNo || req.user?.rollNumber || 'CSE001';
+    const studentName = data.studentName || req.user?.name || 'Student';
+    const studentEmail = data.studentEmail || req.user?.email || 'student@asmaths.com';
+    const course = data.course || req.user?.course || 'engineering';
+    const branch = data.branch || data.stream || req.user?.branch || req.user?.stream || 'CSE';
+    const semester = data.semester || data.sem || req.user?.semester || 1;
+    const totalMarks = Number(data.totalMarks || data.maxMarks || 50);
+
+    const submissionPayload = {
       ...data,
       id,
-      assignment: assignmentId,
-      assignmentId,
-      assignmentTitle: data.assignmentTitle || data.title || 'Mathematics Assignment',
+      assignment: examOrAssignmentId,
+      assignmentId: examOrAssignmentId,
+      assignmentTitle: examOrAssignmentTitle,
+      examId: examOrAssignmentId,
+      examTitle: examOrAssignmentTitle,
       student: studentId,
       studentId,
-      studentName: data.studentName || req.user?.name || 'Student',
-      studentEmail: data.studentEmail || req.user?.email || 'student@asmaths.com',
-      studentRoll: data.studentRoll || data.rollNo || req.user?.rollNumber || 'CSE001',
+      studentName,
+      studentEmail,
+      studentRoll,
+      rollNumber: studentRoll,
       answerFileUrl,
-      fileName: data.fileName || 'Assignment_Submission.pdf',
+      answerSheetUrl: answerFileUrl,
+      answerPages: rawAnswerPages,
+      totalPages,
+      fileName: data.fileName || (rawAnswerPages[0]?.name) || 'AnswerScript_Submission.pdf',
       fileSize: data.fileSize || '2.4 MB',
       notes: data.notes || '',
-      course: data.course || req.user?.course || 'engineering',
-      semester: data.semester || data.sem || req.user?.semester || 1,
-      status: data.status || 'submitted',
+      course,
+      branch,
+      stream: branch,
+      semester,
+      status: data.status || 'Pending Evaluation',
       submittedAt: data.submittedAt || new Date()
     };
 
+    // 1. Write to Submission collection
     const submission = await Submission.findOneAndUpdate(
-      { $or: [{ id }, { assignment: assignmentId, student: studentId }] },
-      { $set: payload },
+      { $or: [{ id }, { assignment: examOrAssignmentId, student: studentId }, { examId: examOrAssignmentId, studentId }] },
+      { $set: submissionPayload },
       { new: true, upsert: true, runValidators: false }
     );
 
-    res.status(201).json({ success: true, submission });
+    // 2. Also write/upsert into Evaluation collection for seamless Faculty Studio grading
+    let evaluation = null;
+    try {
+      const evalDoc = {
+        id,
+        studentId,
+        studentName,
+        studentEmail,
+        studentRoll,
+        rollNumber: studentRoll,
+        testId: examOrAssignmentId,
+        testTitle: examOrAssignmentTitle,
+        examId: examOrAssignmentId,
+        examTitle: examOrAssignmentTitle,
+        examType: data.examType || 'Written / Upload',
+        course,
+        branch,
+        sem: semester,
+        semester,
+        score: null,
+        marks: null,
+        marksObtained: null,
+        totalMarks,
+        maxMarks: totalMarks,
+        percentage: null,
+        grade: 'Pending',
+        status: 'Pending Evaluation',
+        answerSheetUrl: answerFileUrl,
+        answerPages: rawAnswerPages,
+        totalPages,
+        fileName: submissionPayload.fileName,
+        fileType: data.fileType || 'application/pdf',
+        feedback: '',
+        published: false,
+        submittedAt: submissionPayload.submittedAt,
+      };
+
+      evaluation = await Evaluation.findOneAndUpdate(
+        { $or: [{ id }, { testId: examOrAssignmentId, studentId }, { testId: examOrAssignmentId, studentEmail }] },
+        { $set: evalDoc },
+        { new: true, upsert: true, runValidators: false }
+      );
+    } catch (evalErr) {
+      console.warn('[Sync to Evaluation] Notice:', evalErr.message);
+    }
+
+    res.status(201).json({ success: true, submission, evaluation });
   } catch (error) {
-    console.error('Error submitting assignment:', error);
+    console.error('Error submitting assignment/exam:', error);
     res.status(500).json({ success: false, message: error.message });
   }
 };

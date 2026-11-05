@@ -51,6 +51,7 @@ router.post('/solve-doubt', attachStudentContext, solveStudentDoubt);
 router.post('/doubt', attachStudentContext, solveStudentDoubt);
 
 // Public / Flexible Student Submission Endpoints (persists to MongoDB Atlas)
+router.post('/submit-exam', attachStudentContext, submitAssignment);
 router.post('/submissions', attachStudentContext, submitAssignment);
 router.get('/submissions', attachStudentContext, getMySubmissions);
 

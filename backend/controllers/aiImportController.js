@@ -10,7 +10,14 @@ const Content = require('../models/Content');
 
 const ALL_ENGINEERING_STREAMS = ['CSE', 'ECE', 'ME', 'EE', 'CE', 'IT'];
 const PROMPT_VERSION = 'v2-ocr-pure-transcription';
-const MODEL_CANDIDATE_CHAIN = ['gemini-3.5-flash', 'gemini-flash-latest', 'gemini-3.8-flash'];
+const MODEL_CANDIDATE_CHAIN = [
+  'gemini-3.5-flash-lite',
+  'gemini-3.1-flash-lite',
+  'gemini-flash-lite-latest',
+  'gemini-3.5-flash',
+  'gemini-flash-latest',
+  'gemini-3.8-flash'
+];
 
 /**
  * Text normalization for similarity & duplicate detection
@@ -71,12 +78,23 @@ const STOP_WORDS = new Set([
  * Anti-Hallucination verification: Checks if extracted question tokens appear on the actual page
  */
 function verifyAntiHallucination(questionText = '', pageEmbeddedText = '') {
-  if (!pageEmbeddedText || pageEmbeddedText.length < 30) {
-    // Scanned/raster-only page without text layer: skip embedded text check
+  const cleanEmbedded = (pageEmbeddedText || '')
+    .replace(/scanned\s+by\s+camscanner/gi, '')
+    .replace(/camscanner/gi, '')
+    .replace(/adobe\s+scan/gi, '')
+    .trim();
+
+  // If text layer is missing or contains fewer than 25 non-stopword tokens,
+  // it is a scanned or raster image without reliable text layer - skip check!
+  const embeddedTokens = normalizeMathText(cleanEmbedded)
+    .split(' ')
+    .filter((w) => w.length > 2 && !STOP_WORDS.has(w));
+
+  if (embeddedTokens.length < 25) {
     return { verified: true, overlap: 1.0, warning: null };
   }
 
-  const pageWords = new Set(normalizeMathText(pageEmbeddedText).split(' '));
+  const pageWords = new Set(embeddedTokens);
   const qWords = normalizeMathText(questionText)
     .split(' ')
     .filter((w) => w.length > 2 && !STOP_WORDS.has(w)); // Filter out stop-words
@@ -405,7 +423,8 @@ Transcribe ONLY the questions visibly printed on the attached examination page.
 Never invent, complete, solve, extrapolate, or paraphrase.
 If the page has no questions (e.g. title page, instructions only, or blank), return an empty JSON array: [].
 Do NOT calculate or generate solutions. Transcribe "answer_latex" and "solution_latex" ONLY if they are explicitly printed on the page; otherwise set them to empty strings "".
-Scan margins or question ends for mark allocations (e.g. "[2 Marks]", "(5M)").
+Scan margins or question ends for individual mark allocations (e.g. "[2 Marks]", "(5M)").
+CRITICAL SECTION RULE: Section instructions like "(10 x 1 = 10 Marks)" or "(5 x 2 = 10)" mean that each individual sub-question is worth 1 mark or 2 marks. Do NOT assign the section total (10) as the marks of an individual sub-question. Set "marks": 1 and "marksRawLabel": "[1 Mark]".
 
 OUTPUT JSON SCHEMA:
 Return ONLY a valid JSON array of question objects adhering to this schema:
@@ -551,14 +570,26 @@ Do not wrap in markdown or prose. Return ONLY the JSON array.
         }
       }
 
+      // Normalize section header formulas in marks (e.g., '10*1=10' or '10 x 1 = 10' -> 1 mark)
+      let parsedMarks = Number(raw.marks) || 0;
+      let rawLabel = raw.marksRawLabel || (raw.marks ? `[${raw.marks} Marks]` : '');
+      const groupFormulaMatch = String(rawLabel).match(/(\d+)\s*[*x×]\s*(\d+)\s*=\s*(\d+)/i);
+      if (groupFormulaMatch) {
+        const perQ = Number(groupFormulaMatch[2]);
+        if (perQ > 0) {
+          parsedMarks = perQ;
+          rawLabel = `[${perQ} Mark${perQ > 1 ? 's' : ''}]`;
+        }
+      }
+
       const itemDoc = new ImportItem({
         sessionId,
         itemId: customItemId,
         pageNumber: Number(pageNumber),
         itemNumber: String(raw.number || raw.questionNumber || `${idx + 1}`),
         type: raw.type || 'Subjective',
-        marks: Number(raw.marks) || 0,
-        marksRawLabel: raw.marksRawLabel || (raw.marks ? `[${raw.marks} Marks]` : ''),
+        marks: parsedMarks,
+        marksRawLabel: rawLabel,
         question_latex: qText,
         options: Array.isArray(raw.options) ? raw.options : [],
         correctOption: raw.correctOption ?? (raw.type === 'MCQ' ? 0 : null),
