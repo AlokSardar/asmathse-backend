@@ -12,6 +12,7 @@ const {
   updateTestAnswerKey
 } = require('../controllers/testController');
 
+router.post('/', createTest); // Support standard REST POST /api/tests
 router.post('/create', createTest); // Should ideally be protected for admin
 router.get('/', getTests); // Fetch tests by stream/sem
 router.delete('/', clearAllTests); // Permanently clear all tests

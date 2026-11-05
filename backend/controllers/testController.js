@@ -106,6 +106,28 @@ exports.createTest = async (req, res) => {
     }
     const test = new ClassTest(body);
     await test.save();
+
+    // Automatic Real-Time Targeted Notification for Students
+    try {
+      const notifId = `notif_${Date.now()}_${Math.random().toString(36).substr(2, 5)}`;
+      await Notification.create({
+        id: notifId,
+        title: 'New Class Test Published',
+        message: `"${test.title}" is now live for ${test.branch || 'All Batches'} (${test.semester || 'All Semesters'}).`,
+        type: 'classtest',
+        course: test.course,
+        branch: test.branch,
+        targetBranches: test.targetBranches,
+        semester: test.semester,
+        classLevel: test.classLevel,
+        subject: test.subject,
+        contentId: test.id || test.testId || String(test._id),
+      });
+      console.log(`📢 [REAL-TIME NOTIFICATION DISPATCHED]: New Class Test Published: "${test.title}"`);
+    } catch (notifErr) {
+      console.warn('Auto notification generation notice in createTest:', notifErr.message);
+    }
+
     res.status(201).json({ success: true, data: test });
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
