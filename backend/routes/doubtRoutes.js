@@ -129,8 +129,9 @@ router.post('/:id/escalate', requireStudent, escalateDoubt);
 // 16. Mark doubt as resolved (student owner or faculty)
 router.post('/:id/resolve', protect, resolveDoubt);
 
-// 17. Reopen a resolved doubt (up to 1 time)
+// 17. Reopen a resolved doubt (up to 1 time) - supports POST and PATCH
 router.post('/:id/reopen', requireStudent, reopenDoubt);
+router.patch('/:id/reopen', requireStudent, reopenDoubt);
 
 // 18. Faculty claims an escalated doubt ticket (atomic race guard)
 router.post('/:id/claim', requireAdmin, claimDoubt);

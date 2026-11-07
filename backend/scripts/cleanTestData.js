@@ -66,12 +66,9 @@ async function run() {
     }
   }
 
-  // 2. Identify Test Doubts
+  // 2. Identify Test Doubts (Strictly isolated to known test accounts; never matches real users)
   const testDoubts = await Doubt.find({
-    $or: [
-      { student: { $in: testUserIds } },
-      { doubtCode: { $regex: /^(DBT-26-00|DBT-TEST-)/ } },
-    ],
+    student: { $in: testUserIds },
   });
   const testDoubtIds = testDoubts.map((d) => d._id);
 
