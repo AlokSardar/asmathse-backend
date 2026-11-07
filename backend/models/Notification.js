@@ -2,7 +2,7 @@ const mongoose = require('mongoose');
 
 const notificationSchema = new mongoose.Schema(
   {
-    id: { type: String, index: true },
+    id: { type: String },
     userId: { type: mongoose.Schema.Types.Mixed, index: true }, // Target user ID (student or teacher)
     title: { type: String, required: true },
     message: { type: String, required: true },
@@ -30,6 +30,15 @@ const notificationSchema = new mongoose.Schema(
   }
 );
 
+// Partial unique index on id: strictly enforces uniqueness for string ids, ignores null/undefined
+notificationSchema.index(
+  { id: 1 },
+  {
+    unique: true,
+    partialFilterExpression: { id: { $type: 'string' } },
+    name: 'id_1',
+  }
+);
 notificationSchema.index({ userId: 1, isRead: 1, createdAt: -1 });
 notificationSchema.index({ doubtId: 1, createdAt: -1 });
 

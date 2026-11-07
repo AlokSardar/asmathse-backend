@@ -155,6 +155,9 @@ app.get('/api/health', async (req, res) => {
   const hasSeparateDoubtsKey = Boolean(process.env.GEMINI_DOUBTS_API_KEY && process.env.GEMINI_DOUBTS_API_KEY.trim());
   const isAiKillSwitchActive = process.env.DOUBTS_AI_ENABLED === 'false';
 
+  const showProxyDiagnostic = process.env.ENABLE_HEALTH_PROXY_DIAGNOSTICS !== 'false';
+  const rawForwarded = req.headers['x-forwarded-for'] || null;
+
   res.json({
     status: 'ok',
     database: 'MongoDB Atlas',
@@ -162,7 +165,9 @@ app.get('/api/health', async (req, res) => {
     connected: state === 1,
     host: mongoose.connection.host || null,
     dbName: mongoose.connection.name || 'asmaths_lms',
-    clientIp: req.ip,
+    clientIp: showProxyDiagnostic ? req.ip : '[PROTECTED]',
+    xForwardedFor: showProxyDiagnostic ? rawForwarded : '[PROTECTED]',
+    proxyDiagnosticEnabled: showProxyDiagnostic,
     aiConfigured: isAiConfigured,
     hasSeparateDoubtsKey,
     aiKillSwitchActive: isAiKillSwitchActive,

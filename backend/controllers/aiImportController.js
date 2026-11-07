@@ -352,7 +352,7 @@ exports.extractPage = async (req, res) => {
 
     // Resolve API Key: Strictly require server process.env.GEMINI_API_KEY (or admin custom key)
     let apiKey = process.env.GEMINI_API_KEY;
-    if (!apiKey && customApiKey && req.user && req.user.role === 'admin') {
+    if (!apiKey && customApiKey && req.user && String(req.user.role || '').toLowerCase() === 'admin') {
       apiKey = customApiKey;
     }
 
@@ -702,7 +702,7 @@ exports.fixItemWithAi = async (req, res) => {
     }
 
     let apiKey = process.env.GEMINI_API_KEY;
-    if (!apiKey && customApiKey && req.user && req.user.role === 'admin') {
+    if (!apiKey && customApiKey && req.user && String(req.user.role || '').toLowerCase() === 'admin') {
       apiKey = customApiKey;
     }
 
