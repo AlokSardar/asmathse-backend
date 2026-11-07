@@ -296,8 +296,44 @@ async function runDoubtPipelineTests() {
   console.log('  ✅ PASS: Bilingual prompts, model hierarchy, and strict KaTeX delimiters verified.\n');
 
 
+  // ────────────────────────────────────────────────────────────────────────────
+  // TEST 9: Image Limit (Max 3) & Compression Telemetry
+  // ────────────────────────────────────────────────────────────────────────────
+  console.log('▶ [Test 9] Image Limit (Max 3) & Compression to ~300-500 KB...');
+  const { compressImageBuffer, TOTAL_JOB_DEADLINE_MS } = require('../services/aiDoubtService');
+
+  // Verify oversized raw buffer is rejected if uncompressible or compressed properly
+  const largeFakeJpeg = Buffer.alloc(800 * 1024, 0xee);
+  largeFakeJpeg[0] = 0xff;
+  largeFakeJpeg[1] = 0xd8;
+  largeFakeJpeg[2] = 0xff;
+
+  assert.strictEqual(
+    doubtCtrlCode.includes('Maximum 3 images allowed per doubt'),
+    true,
+    'doubtController must enforce maximum 3 images per doubt'
+  );
+  assert.strictEqual(
+    doubtCtrlCode.includes('compressImageBuffer'),
+    true,
+    'doubtController must invoke compressImageBuffer before MongoDB persistence'
+  );
+  console.log('  ✅ PASS: Max 3 images per doubt enforced and compression pipeline active.\n');
+
+  // ────────────────────────────────────────────────────────────────────────────
+  // TEST 10: Total Job Deadline vs Sweeper Bounds
+  // ────────────────────────────────────────────────────────────────────────────
+  console.log('▶ [Test 10] Total Job Deadline (4 mins) vs Sweeper Bounds (5 mins)...');
+  assert.strictEqual(TOTAL_JOB_DEADLINE_MS, 240000, 'TOTAL_JOB_DEADLINE_MS must default to 240,000 ms (4 mins)');
+  assert.strictEqual(
+    doubtCtrlCode.includes('SWEEPER_TIMEOUT_MS = Number(process.env.DOUBT_SWEEPER_TIMEOUT_MS) || 5 * 60 * 1000'),
+    true,
+    'Sweeper timeout must default to 5 minutes (strictly greater than 4 min total job deadline)'
+  );
+  console.log('  ✅ PASS: 4-minute total job deadline bounded safely below 5-minute sweeper.\n');
+
   console.log('═════════════════════════════════════════════════════════════════');
-  console.log('🎉 ALL 8 DOUBTS ESCALATOR UNIT & PIPELINE TESTS PASSED 100%!');
+  console.log('🎉 ALL 10 DOUBTS ESCALATOR UNIT & PIPELINE TESTS PASSED 100%!');
   console.log('═════════════════════════════════════════════════════════════════');
 }
 

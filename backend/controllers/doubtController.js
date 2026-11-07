@@ -8,6 +8,7 @@ const Notification = require('../models/Notification');
 const {
   validateImageMagicBytes,
   stripExifMetadata,
+  compressImageBuffer,
   transcribeProblem,
   explainProblem,
   PRIMARY_EXPLAIN_MODEL,
@@ -273,7 +274,16 @@ exports.askDoubt = async (req, res) => {
       }
     }
 
-    // Process all files with magic bytes security check and EXIF stripping
+    // Enforce maximum 3 images per doubt
+    if (filesToProcess.length > 3) {
+      await DoubtQuota.rollbackStudentQuota(studentId);
+      return res.status(400).json({
+        success: false,
+        message: 'Maximum 3 images allowed per doubt. Please select at most 3 images.',
+      });
+    }
+
+    // Process all files with magic bytes security check, EXIF stripping, and compression (~300-500 KB)
     for (let i = 0; i < filesToProcess.length; i++) {
       const item = filesToProcess[i];
       const magic = validateImageMagicBytes(item.buffer);
@@ -289,13 +299,33 @@ exports.askDoubt = async (req, res) => {
       // Strip EXIF metadata
       const sanitizedBuffer = stripExifMetadata(item.buffer);
 
+      // Compress to ~300-500 KB before storing in MongoDB
+      let compressedResult;
+      try {
+        compressedResult = await compressImageBuffer(sanitizedBuffer, magic.mimeType);
+      } catch (compErr) {
+        await DoubtQuota.rollbackStudentQuota(studentId);
+        return res.status(400).json({
+          success: false,
+          message: `Attachment error for "${item.fileName}": ${compErr.message}`,
+        });
+      }
+
+      if (compressedResult.buffer.length > 512 * 1024) {
+        await DoubtQuota.rollbackStudentQuota(studentId);
+        return res.status(400).json({
+          success: false,
+          message: `Attachment "${item.fileName}" exceeds maximum allowed size of 500 KB after compression. Please upload a smaller or clearer photo.`,
+        });
+      }
+
       // Store private attachment data
       processedAttachments.push({
         url: '', // will be set after doubt creation to /api/doubts/:id/attachments/:index
-        base64Data: `data:${magic.mimeType};base64,${sanitizedBuffer.toString('base64')}`,
+        base64Data: `data:${compressedResult.mimeType};base64,${compressedResult.buffer.toString('base64')}`,
         fileName: item.fileName || `Problem_Snapshot_${i + 1}.jpg`,
-        mimeType: magic.mimeType,
-        size: sanitizedBuffer.length,
+        mimeType: compressedResult.mimeType,
+        size: compressedResult.buffer.length,
         storageType: 'private_stream',
       });
     }

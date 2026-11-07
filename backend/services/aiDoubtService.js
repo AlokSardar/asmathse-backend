@@ -1,4 +1,5 @@
 const crypto = require('crypto');
+const sharp = require('sharp');
 const { GoogleGenAI } = require('@google/genai');
 const ExtractionCache = require('../models/ExtractionCache');
 const DoubtQuota = require('../models/DoubtQuota');
@@ -26,6 +27,52 @@ const TRANSCRIPTION_MODEL_CHAIN = [
 
 // Configurable model timeout (default 75s, within 60-90s mandate)
 const DEFAULT_MODEL_TIMEOUT_MS = Number(process.env.GEMINI_MODEL_TIMEOUT_MS) || 75000;
+
+// Configurable total job deadline across all fallback model attempts (default 4 minutes)
+const TOTAL_JOB_DEADLINE_MS = Number(process.env.GEMINI_TOTAL_JOB_DEADLINE_MS) || 240000;
+
+/**
+ * Compresses an image buffer to ~300-500 KB before storing in MongoDB.
+ * Auto-orients from EXIF, resizes to high-resolution math bounds (max 1600px),
+ * and balances clarity against document storage limits.
+ */
+async function compressImageBuffer(buffer, mimeType = 'image/jpeg') {
+  if (!buffer || buffer.length === 0) return { buffer, mimeType };
+
+  // PDFs are preserved without image recompression (validated up to 500 KB limit)
+  if (mimeType === 'application/pdf') {
+    if (buffer.length > 512 * 1024) {
+      throw new Error('PDF file exceeds maximum allowed size of 500 KB.');
+    }
+    return { buffer, mimeType: 'application/pdf' };
+  }
+
+  try {
+    let pipeline = sharp(buffer)
+      .rotate()
+      .resize(1600, 1600, { fit: 'inside', withoutEnlargement: true });
+
+    let compressed = await pipeline
+      .jpeg({ quality: 80, mozjpeg: true })
+      .toBuffer();
+
+    // If still slightly over 500 KB, adjust quality down to 65
+    if (compressed.length > 500 * 1024) {
+      compressed = await sharp(buffer)
+        .rotate()
+        .resize(1280, 1280, { fit: 'inside', withoutEnlargement: true })
+        .jpeg({ quality: 65, mozjpeg: true })
+        .toBuffer();
+    }
+
+    return { buffer: compressed, mimeType: 'image/jpeg' };
+  } catch (err) {
+    if (buffer.length > 500 * 1024) {
+      throw new Error('Image exceeds 500 KB and could not be compressed.');
+    }
+    return { buffer, mimeType };
+  }
+}
 
 /**
  * Validates file buffer magic bytes for security against spoofed file extensions.
@@ -267,11 +314,21 @@ RULES (CRITICAL):
   "clarifyingQuestion": "" (string, formulate only if question cannot be transcribed with certainty)
 }`;
 
+  const jobStartTime = Date.now();
   const attempts = [];
   let usedModel = null;
   let lastError = null;
 
   for (const model of TRANSCRIPTION_MODEL_CHAIN) {
+    const elapsedSoFar = Date.now() - jobStartTime;
+    const remainingTime = TOTAL_JOB_DEADLINE_MS - elapsedSoFar;
+
+    if (remainingTime <= 3000) {
+      console.warn(`[Transcription] Total job deadline (${TOTAL_JOB_DEADLINE_MS / 1000}s) reached before trying ${model}.`);
+      throw new Error(`Total AI processing deadline of ${Math.round(TOTAL_JOB_DEADLINE_MS / 60000)} minutes exceeded across model attempts. Please escalate directly to your faculty.`);
+    }
+
+    const currentTimeoutMs = Math.min(DEFAULT_MODEL_TIMEOUT_MS, remainingTime);
     const startTime = Date.now();
     try {
       usedModel = model;
@@ -290,7 +347,7 @@ RULES (CRITICAL):
         responseMimeType: 'application/json',
       };
 
-      const result = await callGeminiModel(ai, model, contents, config);
+      const result = await callGeminiModel(ai, model, contents, config, currentTimeoutMs);
       const text = result.text || '';
       const parsed = parseMathJson(text);
       const durationMs = Date.now() - startTime;
@@ -462,11 +519,21 @@ Academic Context: Course ${course}
 ${threadHistoryText}
 Please solve this pedagogical doubt adhering to the JSON schema.`;
 
+  const jobStartTime = Date.now();
   const attempts = [];
   let usedModel = null;
   let lastError = null;
 
   for (const model of EXPLAIN_MODEL_CHAIN) {
+    const elapsedSoFar = Date.now() - jobStartTime;
+    const remainingTime = TOTAL_JOB_DEADLINE_MS - elapsedSoFar;
+
+    if (remainingTime <= 3000) {
+      console.warn(`[Explanation] Total job deadline (${TOTAL_JOB_DEADLINE_MS / 1000}s) reached before trying ${model}.`);
+      throw new Error(`Total AI processing deadline of ${Math.round(TOTAL_JOB_DEADLINE_MS / 60000)} minutes exceeded across model attempts. Please escalate directly to your faculty.`);
+    }
+
+    const currentTimeoutMs = Math.min(DEFAULT_MODEL_TIMEOUT_MS, remainingTime);
     const startTime = Date.now();
     try {
       usedModel = model;
@@ -482,7 +549,7 @@ Please solve this pedagogical doubt adhering to the JSON schema.`;
         responseMimeType: 'application/json',
       };
 
-      const result = await callGeminiModel(ai, model, contents, config);
+      const result = await callGeminiModel(ai, model, contents, config, currentTimeoutMs);
       const text = result.text || '';
       const parsed = parseMathJson(text);
       const durationMs = Date.now() - startTime;
@@ -562,6 +629,7 @@ Please solve this pedagogical doubt adhering to the JSON schema.`;
 module.exports = {
   validateImageMagicBytes,
   stripExifMetadata,
+  compressImageBuffer,
   normalizeQuery,
   computeDoubtCacheKey,
   parseMathJson,
@@ -570,4 +638,6 @@ module.exports = {
   PRIMARY_EXPLAIN_MODEL,
   EXPLAIN_MODEL_CHAIN,
   TRANSCRIPTION_MODEL_CHAIN,
+  TOTAL_JOB_DEADLINE_MS,
+  DEFAULT_MODEL_TIMEOUT_MS,
 };
