@@ -6,6 +6,7 @@ const DoubtMessage = require('../models/DoubtMessage');
 const DoubtQuota = require('../models/DoubtQuota');
 const Notification = require('../models/Notification');
 const DoubtTemplate = require('../models/DoubtTemplate');
+const DoubtFaq = require('../models/DoubtFaq');
 const User = require('../models/User');
 const {
   validateImageMagicBytes,
@@ -45,6 +46,17 @@ async function sweepStuckDoubtJobs() {
       // Refund quota to student
       await DoubtQuota.rollbackStudentQuota(doubt.student);
     }
+
+    // Clean abandoned drafts older than 7 days; strictly never touch answered or resolved doubts
+    const draftThreshold = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
+    const deletedDrafts = await Doubt.deleteMany({
+      status: 'draft',
+      createdAt: { $lt: draftThreshold },
+    });
+    if (deletedDrafts && deletedDrafts.deletedCount > 0) {
+      console.log(`🧹 [DOUBT CLEANUP]: Deleted ${deletedDrafts.deletedCount} abandoned drafts older than 7 days.`);
+    }
+
     return stuckDoubts.length;
   } catch (err) {
     console.error('Error running sweepStuckDoubtJobs:', err.message);
@@ -112,6 +124,8 @@ async function processDoubtJob(doubtId, jobType = 'initial') {
         });
       } catch (transcribeErr) {
         console.error(`Transcription job failed for doubt ${doubtId}:`, transcribeErr.message);
+        const failType = String(transcribeErr.message).includes('429') ? '429' : (String(transcribeErr.message).includes('timed out') ? 'timeout' : '5xx');
+        await DoubtQuota.recordFailure(failType).catch(() => {});
         doubt.status = 'error';
         doubt.lastErrorMessage = transcribeErr.message;
         doubt.auditTrail.push({
@@ -178,9 +192,11 @@ async function processDoubtJob(doubtId, jobType = 'initial') {
         });
 
         // Record successful query in telemetry
-        await DoubtQuota.recordSuccessfulQuery(explanationRes.modelUsed);
+        await DoubtQuota.recordSuccessfulQuery(explanationRes.modelUsed, explanationRes.isFallbackModel);
       } catch (explainErr) {
         console.error(`Explanation job failed for doubt ${doubtId}:`, explainErr.message);
+        const failType = String(explainErr.message).includes('429') ? '429' : (String(explainErr.message).includes('timed out') ? 'timeout' : '5xx');
+        await DoubtQuota.recordFailure(failType).catch(() => {});
         doubt.status = 'error';
         doubt.lastErrorMessage = explainErr.message;
         doubt.auditTrail.push({
@@ -1786,6 +1802,594 @@ exports.getQuotaStatus = async (req, res) => {
       },
     });
   } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+/**
+ * @desc    Get comprehensive Doubt Escalator analytics (metrics, topics, SLA)
+ * @route   GET /api/doubts/analytics/overview
+ * @access  Protected (Teacher - Course/Branch Scoped, Admin - Global)
+ */
+exports.getAnalyticsOverview = async (req, res) => {
+  try {
+    const user = req.user;
+    const userRole = String(user.role || '').toLowerCase();
+    const isAdmin = userRole === 'admin' || user.id === 'master_admin_id';
+    const isTeacher = !isAdmin;
+
+    const filter = {};
+    if (isTeacher) {
+      const tCourse = user.targetCourse || user.course;
+      const tBranch = user.branch;
+      if (tCourse) filter.course = new RegExp(`^${tCourse}$`, 'i');
+      if (tBranch) filter.branch = new RegExp(`^${tBranch}$`, 'i');
+    } else {
+      if (req.query.course) filter.course = new RegExp(`^${req.query.course}$`, 'i');
+      if (req.query.branch) filter.branch = new RegExp(`^${req.query.branch}$`, 'i');
+    }
+
+    if (req.query.subject) filter.subject = new RegExp(`^${req.query.subject}$`, 'i');
+    if (req.query.semester) filter.semester = req.query.semester;
+
+    if (req.query.startDate || req.query.endDate) {
+      filter.createdAt = {};
+      if (req.query.startDate) filter.createdAt.$gte = new Date(req.query.startDate);
+      if (req.query.endDate) {
+        const endD = new Date(req.query.endDate);
+        endD.setHours(23, 59, 59, 999);
+        filter.createdAt.$lte = endD;
+      }
+    }
+
+    const doubts = await Doubt.find(filter).lean();
+    const totalDoubts = doubts.length;
+
+    if (totalDoubts === 0) {
+      return res.json({
+        success: true,
+        metrics: {
+          totalDoubts: 0,
+          aiResolvedCount: 0,
+          aiResolvedRate: 0,
+          escalatedCount: 0,
+          escalatedRate: 0,
+          avgTimeToAiAnswerMs: 0,
+          medianTimeToAiAnswerMs: 0,
+          avgTeacherResponseTimeMs: 0,
+          slaBreachCount: 0,
+          slaBreachRate: 0,
+          reopenCount: 0,
+          reopenRate: 0,
+          studentSatisfactionRate: 100,
+          totalRatings: 0,
+          averageRating: 0,
+        },
+        mostConfusingTopics: [],
+        statusDistribution: {},
+        scope: {
+          role: userRole,
+          course: isTeacher ? (user.targetCourse || user.course || 'All') : (req.query.course || 'All'),
+          branch: isTeacher ? (user.branch || 'All') : (req.query.branch || 'All'),
+        },
+      });
+    }
+
+    // 1. Resolution & Escalation Rates
+    const aiResolvedDoubts = doubts.filter(
+      (d) => (d.status === 'resolved' || d.status === 'ai_answered') && !d.escalatedAt && !d.assignedTeacher?.id
+    );
+    const escalatedDoubts = doubts.filter(
+      (d) => d.escalatedAt || ['escalated', 'teacher_assigned', 'teacher_answered', 'clarification_requested'].includes(d.status)
+    );
+
+    const aiResolvedCount = aiResolvedDoubts.length;
+    const escalatedCount = escalatedDoubts.length;
+    const aiResolvedRate = Number(((aiResolvedCount / totalDoubts) * 100).toFixed(1));
+    const escalatedRate = Number(((escalatedCount / totalDoubts) * 100).toFixed(1));
+
+    // 2. Time to First AI Answer
+    const aiTimes = doubts
+      .filter((d) => d.aiExplanation?.generatedAt && d.createdAt)
+      .map((d) => new Date(d.aiExplanation.generatedAt).getTime() - new Date(d.createdAt).getTime())
+      .filter((t) => t > 0);
+
+    let avgTimeToAiAnswerMs = 0;
+    let medianTimeToAiAnswerMs = 0;
+    if (aiTimes.length > 0) {
+      avgTimeToAiAnswerMs = Math.round(aiTimes.reduce((a, b) => a + b, 0) / aiTimes.length);
+      aiTimes.sort((a, b) => a - b);
+      const mid = Math.floor(aiTimes.length / 2);
+      medianTimeToAiAnswerMs =
+        aiTimes.length % 2 === 0
+          ? Math.round((aiTimes[mid - 1] + aiTimes[mid]) / 2)
+          : aiTimes[mid];
+    }
+
+    // 3. Teacher Response Time
+    const teacherTimes = [];
+    for (const d of escalatedDoubts) {
+      const escEntry = (d.auditTrail || []).find((a) => a.status === 'escalated');
+      const ansEntry = (d.auditTrail || []).find((a) => a.status === 'teacher_answered');
+      if (escEntry && ansEntry) {
+        const diff = new Date(ansEntry.timestamp).getTime() - new Date(escEntry.timestamp).getTime();
+        if (diff > 0) teacherTimes.push(diff);
+      }
+    }
+    const avgTeacherResponseTimeMs =
+      teacherTimes.length > 0
+        ? Math.round(teacherTimes.reduce((a, b) => a + b, 0) / teacherTimes.length)
+        : 0;
+
+    // 4. SLA Breach Count and Rate
+    const now = new Date();
+    const breachedDoubts = escalatedDoubts.filter((d) => {
+      if (!d.slaDeadline) return false;
+      const ansEntry = (d.auditTrail || []).find((a) => a.status === 'teacher_answered');
+      const resEntry = (d.auditTrail || []).find((a) => a.status === 'resolved');
+      const compareTime = ansEntry ? new Date(ansEntry.timestamp) : (resEntry ? new Date(resEntry.timestamp) : now);
+      return compareTime > new Date(d.slaDeadline);
+    });
+    const slaBreachCount = breachedDoubts.length;
+    const slaBreachRate = escalatedCount > 0 ? Number(((slaBreachCount / escalatedCount) * 100).toFixed(1)) : 0;
+
+    // 5. Reopen Rate
+    const reopenedDoubts = doubts.filter(
+      (d) => (d.reopenCount && d.reopenCount > 0) || (d.auditTrail || []).some((a) => a.status === 'reopened')
+    );
+    const reopenCount = reopenedDoubts.length;
+    const resolvedDoubts = doubts.filter(
+      (d) => d.status === 'resolved' || (d.auditTrail || []).some((a) => a.status === 'resolved')
+    );
+    const reopenRate = resolvedDoubts.length > 0 ? Number(((reopenCount / resolvedDoubts.length) * 100).toFixed(1)) : 0;
+
+    // 6. Student Satisfaction ("Solved" vs "Still Confused" & Ratings)
+    const ratedDoubts = doubts.filter((d) => d.studentRating && (d.studentRating.score || d.studentRating.feedback));
+    const totalRatings = ratedDoubts.length;
+    let averageRating = 0;
+    if (totalRatings > 0) {
+      const scoreSum = ratedDoubts.reduce((acc, d) => acc + (d.studentRating.score || 0), 0);
+      averageRating = Number((scoreSum / totalRatings).toFixed(1));
+    }
+
+    const satisfiedCount = doubts.filter((d) => {
+      if (d.studentRating?.score && d.studentRating.score >= 4) return true;
+      if (d.studentRating?.feedback && ['helpful', 'solved', 'great'].includes(d.studentRating.feedback.toLowerCase())) return true;
+      if (d.status === 'resolved' && !d.escalatedAt && (d.reopenCount || 0) === 0) return true;
+      return false;
+    }).length;
+
+    const dissatisfiedCount = doubts.filter((d) => {
+      if (d.studentRating?.score && d.studentRating.score <= 2) return true;
+      if (d.studentRating?.feedback && ['still_confused', 'unclear', 'not_helpful'].includes(d.studentRating.feedback.toLowerCase())) return true;
+      if (d.escalationReason && d.escalationReason.toLowerCase().includes('confused')) return true;
+      return false;
+    }).length;
+
+    const totalSentiment = satisfiedCount + dissatisfiedCount;
+    const studentSatisfactionRate = totalSentiment > 0 ? Number(((satisfiedCount / totalSentiment) * 100).toFixed(1)) : 100;
+
+    // 7. Most Confusing Topics
+    const topicMap = {};
+    for (const d of doubts) {
+      const topicKey = d.topic || d.chapter || 'General Mathematics';
+      if (!topicMap[topicKey]) {
+        topicMap[topicKey] = {
+          topic: topicKey,
+          chapter: d.chapter || '',
+          subject: d.subject || 'Mathematics',
+          totalDoubts: 0,
+          escalatedCount: 0,
+          stillConfusedCount: 0,
+        };
+      }
+      topicMap[topicKey].totalDoubts += 1;
+      if (d.escalatedAt || ['escalated', 'teacher_assigned', 'teacher_answered'].includes(d.status)) {
+        topicMap[topicKey].escalatedCount += 1;
+      }
+      if (
+        (d.studentRating?.score && d.studentRating.score <= 2) ||
+        d.studentRating?.feedback === 'still_confused' ||
+        (d.escalationReason && d.escalationReason.toLowerCase().includes('confused'))
+      ) {
+        topicMap[topicKey].stillConfusedCount += 1;
+      }
+    }
+
+    const mostConfusingTopics = Object.values(topicMap)
+      .sort((a, b) => b.escalatedCount + b.stillConfusedCount - (a.escalatedCount + a.stillConfusedCount))
+      .slice(0, 10);
+
+    // 8. Status Distribution
+    const statusDistribution = doubts.reduce((acc, d) => {
+      acc[d.status] = (acc[d.status] || 0) + 1;
+      return acc;
+    }, {});
+
+    return res.json({
+      success: true,
+      metrics: {
+        totalDoubts,
+        aiResolvedCount,
+        aiResolvedRate,
+        escalatedCount,
+        escalatedRate,
+        avgTimeToAiAnswerMs,
+        medianTimeToAiAnswerMs,
+        avgTeacherResponseTimeMs,
+        slaBreachCount,
+        slaBreachRate,
+        reopenCount,
+        reopenRate,
+        studentSatisfactionRate,
+        totalRatings,
+        averageRating,
+      },
+      mostConfusingTopics,
+      statusDistribution,
+      scope: {
+        role: userRole,
+        course: isTeacher ? (user.targetCourse || user.course || 'All') : (req.query.course || 'All'),
+        branch: isTeacher ? (user.branch || 'All') : (req.query.branch || 'All'),
+      },
+    });
+  } catch (error) {
+    console.error('Error in getAnalyticsOverview:', error.message);
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+/**
+ * @desc    Get admin-only AI capacity & quota usage telemetry
+ * @route   GET /api/doubts/analytics/capacity
+ * @access  Protected (Admin Only)
+ */
+exports.getAdminCapacity = async (req, res) => {
+  try {
+    const user = req.user;
+    const isAdmin = String(user.role || '').toLowerCase() === 'admin' || user.id === 'master_admin_id';
+    if (!isAdmin) {
+      return res.status(403).json({ success: false, message: 'Access denied: Admin only telemetry.' });
+    }
+
+    const todayStr = new Date().toISOString().slice(0, 10);
+    const todayRecord = (await DoubtQuota.findOne({ date: todayStr }).lean()) || {
+      totalQueries: 0,
+      modelCounts: {},
+      failuresByType: {},
+      fallbackQueries: 0,
+    };
+
+    const studentUsages = await DoubtQuota.getStudentUsageForDate(todayStr);
+
+    const modelCounts =
+      todayRecord.modelCounts instanceof Map
+        ? Object.fromEntries(todayRecord.modelCounts)
+        : todayRecord.modelCounts || {};
+
+    const failuresByType =
+      todayRecord.failuresByType instanceof Map
+        ? Object.fromEntries(todayRecord.failuresByType)
+        : todayRecord.failuresByType || {};
+
+    const totalQueries = todayRecord.totalQueries || 0;
+    const fallbackQueries = todayRecord.fallbackQueries || 0;
+    const fallbackRate = totalQueries > 0 ? Number(((fallbackQueries / totalQueries) * 100).toFixed(1)) : 0;
+
+    return res.json({
+      success: true,
+      telemetry: {
+        date: todayStr,
+        dailyGlobalLimit: 1000,
+        totalQueriesToday: totalQueries,
+        modelUsage: modelCounts,
+        fallbackQueries,
+        fallbackRate,
+        failuresByType,
+        perStudentLimit: DAILY_STUDENT_DOUBT_LIMIT,
+        activeStudentsToday: studentUsages.length,
+        topStudents: studentUsages.map((s) => ({
+          studentId: s.studentId,
+          count: s.count,
+          remaining: Math.max(0, DAILY_STUDENT_DOUBT_LIMIT - s.count),
+        })),
+      },
+    });
+  } catch (error) {
+    console.error('Error in getAdminCapacity:', error.message);
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+/**
+ * @desc    Export sanitized CSV of doubts (scoped by teacher course/branch, no student PII)
+ * @route   GET /api/doubts/analytics/export
+ * @access  Protected (Teacher/Admin)
+ */
+exports.exportDoubtsCsv = async (req, res) => {
+  try {
+    const user = req.user;
+    const userRole = String(user.role || '').toLowerCase();
+    const isAdmin = userRole === 'admin' || user.id === 'master_admin_id';
+    const isTeacher = !isAdmin;
+
+    const filter = {};
+    if (isTeacher) {
+      const tCourse = user.targetCourse || user.course;
+      const tBranch = user.branch;
+      if (tCourse) filter.course = new RegExp(`^${tCourse}$`, 'i');
+      if (tBranch) filter.branch = new RegExp(`^${tBranch}$`, 'i');
+    } else {
+      if (req.query.course) filter.course = new RegExp(`^${req.query.course}$`, 'i');
+      if (req.query.branch) filter.branch = new RegExp(`^${req.query.branch}$`, 'i');
+    }
+
+    if (req.query.subject) filter.subject = new RegExp(`^${req.query.subject}$`, 'i');
+    if (req.query.semester) filter.semester = req.query.semester;
+
+    const doubts = await Doubt.find(filter).sort({ createdAt: -1 }).lean();
+
+    const headers = [
+      'Doubt Code',
+      'Created At',
+      'Subject',
+      'Topic',
+      'Chapter',
+      'Course',
+      'Branch',
+      'Semester',
+      'Status',
+      'Priority',
+      'SLA Deadline',
+      'Was Escalated',
+      'Assigned Teacher',
+      'AI Model Used',
+      'Is Fallback Model',
+      'Student Rating Score',
+      'Student Rating Feedback',
+    ];
+
+    const escapeCsv = (val) => {
+      if (val === null || val === undefined) return '""';
+      const str = String(val).replace(/"/g, '""');
+      return `"${str}"`;
+    };
+
+    const rows = [headers.join(',')];
+    for (const d of doubts) {
+      const row = [
+        escapeCsv(d.doubtCode || ''),
+        escapeCsv(d.createdAt ? new Date(d.createdAt).toISOString() : ''),
+        escapeCsv(d.subject || 'Mathematics'),
+        escapeCsv(d.topic || ''),
+        escapeCsv(d.chapter || ''),
+        escapeCsv(d.course || ''),
+        escapeCsv(d.branch || ''),
+        escapeCsv(d.semester || ''),
+        escapeCsv(d.status || ''),
+        escapeCsv(d.priority || 'standard'),
+        escapeCsv(d.slaDeadline ? new Date(d.slaDeadline).toISOString() : ''),
+        escapeCsv(Boolean(d.escalatedAt || ['escalated', 'teacher_assigned', 'teacher_answered'].includes(d.status))),
+        escapeCsv(d.assignedTeacher?.name || 'Unassigned'),
+        escapeCsv(d.aiExplanation?.modelUsed || d.aiTranscription?.modelUsed || 'N/A'),
+        escapeCsv(Boolean(d.aiExplanation?.isFallbackModel)),
+        escapeCsv(d.studentRating?.score || ''),
+        escapeCsv(d.studentRating?.feedback || ''),
+      ];
+      rows.push(row.join(','));
+    }
+
+    const csvData = rows.join('\r\n');
+    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+    res.setHeader('Content-Disposition', `attachment; filename="doubts_export_${new Date().toISOString().slice(0, 10)}.csv"`);
+    return res.status(200).send(csvData);
+  } catch (error) {
+    console.error('Error in exportDoubtsCsv:', error.message);
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+/**
+ * @desc    Publish solved doubt as an anonymized FAQ
+ * @route   POST /api/doubts/:id/publish-faq
+ * @access  Protected (Teacher/Admin)
+ */
+exports.publishFaqEntry = async (req, res) => {
+  try {
+    const user = req.user;
+    const { id } = req.params;
+
+    const doubt = await Doubt.findById(id);
+    if (!doubt) {
+      return res.status(404).json({ success: false, message: 'Doubt not found.' });
+    }
+
+    // Verify teacher has access to doubt
+    const userRole = String(user.role || '').toLowerCase();
+    const isAdmin = userRole === 'admin' || user.id === 'master_admin_id';
+    if (!isAdmin) {
+      const tCourse = user.targetCourse || user.course;
+      const tBranch = user.branch;
+      if (tCourse && doubt.course && doubt.course.toLowerCase() !== tCourse.toLowerCase()) {
+        return res.status(403).json({ success: false, message: 'Forbidden: You cannot publish FAQs for another course.' });
+      }
+    }
+
+    // Locate verified solution message or explanation
+    const teacherMsg = await DoubtMessage.findOne({
+      doubt: doubt._id,
+      authorRole: 'teacher',
+      messageType: 'solution',
+    }).sort({ createdAt: -1 });
+
+    const solutionPlain = teacherMsg?.contentPlain || doubt.aiExplanation?.summary || 'Verified pedagogical solution.';
+    const solutionLatex = teacherMsg?.contentLatex || doubt.aiExplanation?.finalAnswer || '';
+
+    // Anonymized problem title
+    const title = doubt.aiTranscription?.problemText || doubt.title || 'Mathematical Problem';
+
+    const faq = await DoubtFaq.create({
+      title: title.trim(),
+      topic: doubt.topic || 'General Mathematics',
+      chapter: doubt.chapter || '',
+      subject: doubt.subject || 'Mathematics',
+      course: doubt.course || 'Engineering',
+      branch: doubt.branch || 'Common',
+      semester: doubt.semester || 1,
+      solutionPlain,
+      solutionLatex,
+      verifiedByTeacherName: user.name || 'Faculty',
+      verifiedByTeacherId: user._id || user.id,
+      originalDoubtId: doubt._id,
+      tags: [doubt.topic, doubt.chapter].filter(Boolean),
+    });
+
+    doubt.isFaq = true;
+    doubt.faqId = faq._id;
+    doubt.auditTrail.push({
+      status: doubt.status,
+      changedBy: user.name || 'Faculty',
+      role: 'teacher',
+      note: `Published as anonymized FAQ entry (FAQ ID: ${faq._id})`,
+      timestamp: new Date(),
+    });
+    await doubt.save();
+
+    return res.json({
+      success: true,
+      message: 'Doubt successfully published as an anonymized FAQ entry.',
+      faq,
+    });
+  } catch (error) {
+    console.error('Error in publishFaqEntry:', error.message);
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+/**
+ * @desc    Search anonymized FAQs and student's own solved doubts
+ * @route   GET /api/doubts/search-faqs
+ * @access  Protected (All authenticated users)
+ */
+exports.searchFaqsAndSimilar = async (req, res) => {
+  try {
+    const { q, course, branch, subject, topic } = req.query;
+    const faqQuery = {};
+
+    if (course) faqQuery.course = new RegExp(`^${course}$`, 'i');
+    if (branch) faqQuery.branch = new RegExp(`^${branch}$`, 'i');
+    if (subject) faqQuery.subject = new RegExp(`^${subject}$`, 'i');
+    if (topic) faqQuery.topic = new RegExp(topic, 'i');
+
+    if (q && q.trim()) {
+      const qTrim = q.trim();
+      faqQuery.$or = [
+        { title: new RegExp(qTrim, 'i') },
+        { topic: new RegExp(qTrim, 'i') },
+        { solutionPlain: new RegExp(qTrim, 'i') },
+      ];
+    }
+
+    const faqs = await DoubtFaq.find(faqQuery)
+      .sort({ helpfulCount: -1, viewCount: -1 })
+      .limit(10)
+      .lean();
+
+    // If student is logged in, also find their own solved doubts
+    let mySimilarDoubts = [];
+    if (req.user && String(req.user.role || '').toLowerCase() === 'student') {
+      const studentId = req.user._id || req.user.id;
+      const myQuery = {
+        student: studentId,
+        status: 'resolved',
+      };
+      if (q && q.trim()) {
+        const qTrim = q.trim();
+        myQuery.$or = [
+          { title: new RegExp(qTrim, 'i') },
+          { topic: new RegExp(qTrim, 'i') },
+          { 'aiTranscription.problemText': new RegExp(qTrim, 'i') },
+        ];
+      }
+      mySimilarDoubts = await Doubt.find(myQuery)
+        .sort({ resolvedAt: -1 })
+        .limit(5)
+        .select('doubtCode title topic chapter resolvedAt aiExplanation')
+        .lean();
+    }
+
+    return res.json({
+      success: true,
+      faqs,
+      mySimilarDoubts,
+    });
+  } catch (error) {
+    console.error('Error in searchFaqsAndSimilar:', error.message);
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+/**
+ * @desc    Student rates a doubt solution (helpful / not helpful, 1-5 stars)
+ * @route   POST /api/doubts/:id/rate
+ * @access  Protected (Student Owner Only)
+ */
+exports.rateDoubtSolution = async (req, res) => {
+  try {
+    const studentId = req.user._id || req.user.id;
+    const { id } = req.params;
+    const { score, feedback } = req.body || {};
+
+    const doubt = await Doubt.findById(id);
+    if (!doubt) {
+      return res.status(404).json({ success: false, message: 'Doubt not found.' });
+    }
+
+    const isOwner = String(doubt.student) === String(studentId);
+    const isAdmin = String(req.user.role || '').toLowerCase() === 'admin';
+    if (!isOwner && !isAdmin) {
+      return res.status(403).json({
+        success: false,
+        message: 'Forbidden: Only the student who submitted this doubt can rate the solution.',
+      });
+    }
+
+    const numScore = Number(score);
+    if (isNaN(numScore) || numScore < 1 || numScore > 5) {
+      return res.status(400).json({
+        success: false,
+        message: 'Rating score must be an integer between 1 and 5.',
+      });
+    }
+
+    doubt.studentRating = {
+      score: numScore,
+      feedback: (feedback || '').trim(),
+      ratedAt: new Date(),
+    };
+
+    doubt.auditTrail.push({
+      status: doubt.status,
+      changedBy: req.user.name || 'Student',
+      role: 'student',
+      note: `Student rated solution ${numScore}/5${feedback ? ` ("${feedback.slice(0, 50)}")` : ''}`,
+      timestamp: new Date(),
+    });
+
+    await doubt.save();
+
+    // If linked to an FAQ, update helpfulCount if score >= 4
+    if (doubt.faqId && numScore >= 4) {
+      await DoubtFaq.findByIdAndUpdate(doubt.faqId, { $inc: { helpfulCount: 1 } }).catch(() => {});
+    }
+
+    return res.json({
+      success: true,
+      message: 'Thank you for your rating!',
+      rating: doubt.studentRating,
+    });
+  } catch (error) {
+    console.error('Error in rateDoubtSolution:', error.message);
     res.status(500).json({ success: false, message: error.message });
   }
 };

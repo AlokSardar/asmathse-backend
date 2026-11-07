@@ -5,7 +5,11 @@ const {
   requireAdmin,
   authorize,
 } = require('../middleware/authMiddleware');
-const { doubtLimiter } = require('../middleware/securityMiddleware');
+const {
+  doubtLimiter,
+  doubtGeneralLimiter,
+  analyticsLimiter,
+} = require('../middleware/securityMiddleware');
 const { upload } = require('../middleware/uploadMiddleware');
 const {
   askDoubt,
@@ -31,6 +35,12 @@ const {
   getDoubtNotifications,
   markDoubtNotificationRead,
   markAllDoubtNotificationsRead,
+  getAnalyticsOverview,
+  getAdminCapacity,
+  exportDoubtsCsv,
+  publishFaqEntry,
+  searchFaqsAndSimilar,
+  rateDoubtSolution,
 } = require('../controllers/doubtController');
 
 /**
@@ -75,23 +85,31 @@ router.post('/ask', doubtLimiter, requireStudent, optionalFileUpload, askDoubt);
 // ── Shared Collections & Preferences (Before /:id) ───────────────────────────
 
 // 7. Get student's doubts list (with filters)
-router.get('/my', requireStudent, getMyDoubts);
+router.get('/my', doubtGeneralLimiter, requireStudent, getMyDoubts);
 
 // 8. Check student's daily quota status and remaining limits
-router.get('/quota', protect, getQuotaStatus);
+router.get('/quota', doubtGeneralLimiter, protect, getQuotaStatus);
+
+// 8b. Anonymized FAQs & Similar Doubts Search
+router.get('/search-faqs', doubtGeneralLimiter, protect, searchFaqsAndSimilar);
+
+// 8c. Analytics, Capacity & Reporting Endpoints (Teacher / Admin)
+router.get('/analytics/overview', doubtGeneralLimiter, requireAdmin, getAnalyticsOverview);
+router.get('/analytics/capacity', doubtGeneralLimiter, requireAdmin, getAdminCapacity);
+router.get('/analytics/export', analyticsLimiter, requireAdmin, exportDoubtsCsv);
 
 // 9. Faculty Saved Templates CRUD
-router.get('/templates', requireAdmin, getTemplates);
-router.post('/templates', requireAdmin, createTemplate);
-router.delete('/templates/:id', requireAdmin, deleteTemplate);
+router.get('/templates', doubtGeneralLimiter, requireAdmin, getTemplates);
+router.post('/templates', doubtLimiter, requireAdmin, createTemplate);
+router.delete('/templates/:id', doubtLimiter, requireAdmin, deleteTemplate);
 
 // 10. Doubts Notification Stream & Acknowledgment
-router.get('/notifications', protect, getDoubtNotifications);
+router.get('/notifications', doubtGeneralLimiter, protect, getDoubtNotifications);
 router.put('/notifications/read-all', protect, markAllDoubtNotificationsRead);
 router.put('/notifications/:id/read', protect, markDoubtNotificationRead);
 
 // 11. Fetch teacher review queue (filtered by teacher's assigned course/branch; admin sees all)
-router.get('/teacher/queue', requireAdmin, getTeacherQueue);
+router.get('/teacher/queue', doubtGeneralLimiter, requireAdmin, getTeacherQueue);
 
 
 // ── Specific Ticket Operations (Parameterized by :id) ──────────────────────────
@@ -129,10 +147,16 @@ router.post('/:id/request-clarification', requireAdmin, requestClarification);
 // 22. Faculty submits verified LaTeX solution
 router.post('/:id/teacher-reply', requireAdmin, optionalFileUpload, submitTeacherReply);
 
+// 22b. Faculty/Admin publishes resolved doubt as anonymized FAQ entry
+router.post('/:id/publish-faq', doubtLimiter, requireAdmin, publishFaqEntry);
+
+// 22c. Student rates the pedagogical solution (1-5 stars with feedback)
+router.post('/:id/rate', doubtLimiter, requireStudent, rateDoubtSolution);
+
 // 23. Fetch full doubt thread with messages & audit trail (owner student or faculty only)
-router.get('/:id', protect, getDoubtById);
+router.get('/:id', doubtGeneralLimiter, protect, getDoubtById);
 
 // 24. Serve private authenticated image attachment (owner student or faculty only)
-router.get('/:id/attachments/:index', protect, getAttachment);
+router.get('/:id/attachments/:index', doubtGeneralLimiter, protect, getAttachment);
 
 module.exports = router;

@@ -191,6 +191,11 @@ mongoose.connection.once('open', () => {
       if (count > 0) console.log(`🧹 [DOUBT SWEEPER]: Swept ${count} stuck doubt jobs from previous server run.`);
     })
     .catch(() => {});
+
+  // Recurring sweeper: periodically cleans stuck jobs (>5m) and deletes abandoned drafts (>7d)
+  setInterval(() => {
+    sweepStuckDoubtJobs().catch(() => {});
+  }, 10 * 60 * 1000);
 });
 
 // Startup verification for Gemini API Key

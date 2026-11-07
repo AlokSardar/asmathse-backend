@@ -61,11 +61,55 @@ const doubtLimiter = rateLimit({
   max: 40, // Limit each IP to 40 doubt queries per 10 minutes
   standardHeaders: true,
   legacyHeaders: false,
+  skip: (req) => {
+    const ip = req.ip || req.connection?.remoteAddress || '';
+    return ip.includes('127.0.0.1') || ip === '::1' || process.env.NODE_ENV === 'test';
+  },
   message: {
     success: false,
     status: 429,
     error: 'Too Many Requests',
     message: 'Too many doubt solving queries submitted in a short period. Please wait a few minutes before submitting another doubt.',
+  },
+});
+
+/**
+ * 3b. High-Frequency General Read Rate Limiter for Doubts Queue & My Doubts
+ */
+const doubtGeneralLimiter = rateLimit({
+  windowMs: 1 * 60 * 1000, // 1 minute
+  max: 180, // Limit each IP to 180 requests per minute
+  standardHeaders: true,
+  legacyHeaders: false,
+  skip: (req) => {
+    const ip = req.ip || req.connection?.remoteAddress || '';
+    return ip.includes('127.0.0.1') || ip === '::1' || process.env.NODE_ENV === 'test';
+  },
+  message: {
+    success: false,
+    status: 429,
+    error: 'Too Many Requests',
+    message: 'Too many requests on doubts service. Please slow down.',
+  },
+});
+
+/**
+ * 3c. Heavy Operations Rate Limiter (CSV Export, Complex Analytics Aggregation)
+ */
+const analyticsLimiter = rateLimit({
+  windowMs: 5 * 60 * 1000, // 5 minutes
+  max: 40, // Limit each IP to 40 export/analytics requests per 5 minutes
+  standardHeaders: true,
+  legacyHeaders: false,
+  skip: (req) => {
+    const ip = req.ip || req.connection?.remoteAddress || '';
+    return ip.includes('127.0.0.1') || ip === '::1' || process.env.NODE_ENV === 'test';
+  },
+  message: {
+    success: false,
+    status: 429,
+    error: 'Too Many Requests',
+    message: 'Too many analytics or export requests. Please wait a moment before trying again.',
   },
 });
 
@@ -151,6 +195,8 @@ module.exports = {
   apiLimiter,
   authLimiter,
   doubtLimiter,
+  doubtGeneralLimiter,
+  analyticsLimiter,
   securityHeaders,
   strictCors,
   corsOptions,

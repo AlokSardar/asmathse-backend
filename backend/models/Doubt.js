@@ -158,9 +158,26 @@ const doubtSchema = new mongoose.Schema(
     ],
 
     lastErrorMessage: { type: String },
+    
+    // Learning & FAQ Flag
+    isFaq: { type: Boolean, default: false, index: true },
+    faqId: { type: mongoose.Schema.Types.ObjectId, ref: 'DoubtFaq' },
+
+    // Student Feedback & Satisfaction Rating
+    studentRating: {
+      score: { type: Number, min: 1, max: 5 }, // 1 = Not Helpful, 5 = Helpful
+      feedback: { type: String, trim: true },
+      ratedAt: { type: Date },
+    },
   },
   { timestamps: true }
 );
+
+// High-Performance Query Indexes (Queue, My Doubts, SLA Audits)
+doubtSchema.index({ status: 1, course: 1, branch: 1, createdAt: 1 });
+doubtSchema.index({ student: 1, createdAt: -1 });
+doubtSchema.index({ 'assignedTeacher.id': 1, status: 1 });
+doubtSchema.index({ slaDeadline: 1, status: 1 });
 
 // Pre-validate hook to generate human-readable Doubt Code & attachment URLs
 doubtSchema.pre('validate', async function () {

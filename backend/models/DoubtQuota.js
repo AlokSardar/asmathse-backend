@@ -44,6 +44,15 @@ const doubtQuotaSchema = new mongoose.Schema(
       of: Number,
       default: () => new Map(),
     },
+    failuresByType: {
+      type: Map,
+      of: Number,
+      default: () => new Map(),
+    },
+    fallbackQueries: {
+      type: Number,
+      default: 0,
+    },
   },
   { timestamps: true }
 );
@@ -123,20 +132,46 @@ doubtQuotaSchema.statics.getStudentQuotaStatus = async function (studentId, limi
 /**
  * Record a successful AI query in platform telemetry (strictly for admin monitoring, never hard-blocking)
  */
-doubtQuotaSchema.statics.recordSuccessfulQuery = async function (modelName = 'gemini-3.8-flash') {
+doubtQuotaSchema.statics.recordSuccessfulQuery = async function (modelName = 'gemini-3.8-flash', isFallback = false) {
   const today = new Date().toISOString().slice(0, 10);
   const safeModelKey = String(modelName).replace(/\./g, '_');
+
+  const incUpdate = {
+    totalQueries: 1,
+    [`modelCounts.${safeModelKey}`]: 1,
+  };
+  if (isFallback) {
+    incUpdate.fallbackQueries = 1;
+  }
+
+  await this.updateOne(
+    { date: today },
+    { $inc: incUpdate },
+    { upsert: true }
+  );
+};
+
+/**
+ * Record failure event in telemetry (e.g. 429 quota exhaustion, timeout, 5xx upstream)
+ */
+doubtQuotaSchema.statics.recordFailure = async function (failureType = '5xx') {
+  const today = new Date().toISOString().slice(0, 10);
+  const safeType = String(failureType).toLowerCase().replace(/[^a-z0-9]/g, '_');
 
   await this.updateOne(
     { date: today },
     {
       $inc: {
-        totalQueries: 1,
-        [`modelCounts.${safeModelKey}`]: 1,
+        [`failuresByType.${safeType}`]: 1,
       },
     },
     { upsert: true }
   );
+};
+
+doubtQuotaSchema.statics.getStudentUsageForDate = async function (dateStr) {
+  const date = dateStr || new Date().toISOString().slice(0, 10);
+  return StudentDailyQuota.find({ date }).sort({ count: -1 }).limit(50);
 };
 
 // Backward compatibility methods
