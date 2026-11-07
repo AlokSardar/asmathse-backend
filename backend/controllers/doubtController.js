@@ -268,8 +268,10 @@ exports.askDoubt = async (req, res) => {
     }
 
     const {
-      title,
+      question,
+      questionText,
       problemText,
+      title,
       mathLatex,
       whatITried,
       language = 'en',
@@ -283,7 +285,7 @@ exports.askDoubt = async (req, res) => {
       attachments = [],
     } = req.body || {};
 
-    const effectiveTitle = (problemText || title || '').trim();
+    const effectiveTitle = (question || questionText || problemText || title || '').trim();
     const effectiveLatex = (mathLatex || '').trim();
 
     // 0. Atomic Total Daily Cap (Direct-to-faculty + AI, default: 10 per day)
