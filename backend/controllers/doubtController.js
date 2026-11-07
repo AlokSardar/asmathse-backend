@@ -409,7 +409,57 @@ exports.askDoubt = async (req, res) => {
       attachments: doubt.attachments.map((a) => ({ url: a.url, fileName: a.fileName })),
     });
 
-    // 5. Fire Background Worker (Non-blocking HTTP 202)
+    // 5. Check if AI Kill Switch is active (DOUBTS_AI_ENABLED=false)
+    const isAiEnabled = process.env.DOUBTS_AI_ENABLED !== 'false';
+
+    if (!isAiEnabled) {
+      // Direct Escalation to Teacher Queue (Bypass AI step entirely)
+      const slaDeadline = new Date(Date.now() + 24 * 60 * 60 * 1000);
+      doubt.status = 'escalated';
+      doubt.priority = 'normal';
+      doubt.slaDeadline = slaDeadline;
+      doubt.slaDueAt = slaDeadline;
+      doubt.escalatedAt = new Date();
+      doubt.escalationReason = 'Direct routing to faculty (AI doubt solver is currently paused via maintenance policy).';
+      doubt.unreadByTeacher = true;
+      doubt.auditTrail.push({
+        status: 'escalated',
+        changedBy: 'System Policy Guard (AI Kill Switch Active)',
+        role: 'system',
+        note: 'AI solver disabled via maintenance policy. Routed directly to faculty queue with 24-hour SLA.',
+      });
+      await doubt.save();
+
+      // Refund student AI quota since AI was bypassed
+      await DoubtQuota.rollbackStudentQuota(studentId);
+
+      // Create notification for teachers
+      try {
+        await Notification.create({
+          id: `notif_esc_${doubt._id}_${Date.now()}`,
+          title: `New Direct Faculty Doubt: ${doubt.doubtCode}`,
+          message: `Doubt ${doubt.doubtCode} (${doubt.topic}) was submitted directly to faculty under maintenance policy. SLA: 24 hours.`,
+          type: 'doubt_escalated',
+          course: doubt.course,
+          branch: doubt.branch,
+          doubtId: doubt._id,
+          targetRole: 'teacher',
+          isRead: false,
+        });
+      } catch (_) {}
+
+      return res.status(202).json({
+        success: true,
+        message: 'AI solver is currently paused. Your question has been forwarded directly to faculty for review within 24 hours.',
+        doubtId: doubt._id,
+        doubtCode: doubt.doubtCode,
+        status: 'escalated',
+        hasImages,
+        remainingQuota: quotaCheck.remaining + 1,
+      });
+    }
+
+    // 6. Fire Background Worker (Non-blocking HTTP 202)
     setImmediate(() => {
       processDoubtJob(doubt._id, 'initial');
     });

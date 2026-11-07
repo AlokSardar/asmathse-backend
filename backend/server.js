@@ -9,6 +9,15 @@ const connectDB = require('./config/db');
 // Load environment variables
 dotenv.config();
 
+// Fail-Fast Startup Validation for Required Security & DB Credentials
+const requiredEnvVars = ['MONGO_URI', 'JWT_SECRET'];
+const missingRequired = requiredEnvVars.filter((k) => !process.env[k] || !process.env[k].trim());
+if (missingRequired.length > 0) {
+  console.error(`❌ [FATAL CONFIG ERROR]: Missing required environment variable(s): ${missingRequired.join(', ')}`);
+  console.error('Server cannot start without essential security and database credentials. Exiting immediately.');
+  process.exit(1);
+}
+
 // Connect to MongoDB Atlas
 connectDB();
 
@@ -128,6 +137,9 @@ app.get('/api/health', async (req, res) => {
     } catch (e) {}
   }
 
+  const isAiConfigured = Boolean(process.env.GEMINI_API_KEY && process.env.GEMINI_API_KEY.trim());
+  const isAiKillSwitchActive = process.env.DOUBTS_AI_ENABLED === 'false';
+
   res.json({
     status: 'ok',
     database: 'MongoDB Atlas',
@@ -135,6 +147,9 @@ app.get('/api/health', async (req, res) => {
     connected: state === 1,
     host: mongoose.connection.host || null,
     dbName: mongoose.connection.name || 'asmaths_lms',
+    aiConfigured: isAiConfigured,
+    aiKillSwitchActive: isAiKillSwitchActive,
+    aiModel: process.env.GEMINI_DOUBT_MODEL || 'gemini-3.8-flash',
     stats,
     timestamp: new Date().toISOString(),
   });
