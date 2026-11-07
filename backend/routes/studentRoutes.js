@@ -46,22 +46,10 @@ const attachStudentContext = async (req, res, next) => {
   next();
 };
 
-const { protect } = require('../middleware/authMiddleware');
-const { askDoubt } = require('../controllers/doubtController');
-
-// Protected redirection from legacy doubt endpoints to the new Doubts Escalator pipeline
-const legacyDoubtHandler = (req, res) => {
-  req.body = {
-    ...req.body,
-    title: req.body.questionText || req.body.title || '',
-    mathLatex: req.body.latexEquation || req.body.mathLatex || '',
-    topic: req.body.topic || 'Higher Mathematics',
-  };
-  return askDoubt(req, res);
-};
-
-router.post('/solve-doubt', protect, legacyDoubtHandler);
-router.post('/doubt', protect, legacyDoubtHandler);
+// Legacy Doubt Solving Endpoints: preserved with attachStudentContext and solveStudentDoubt
+// for 100% seamless backwards compatibility during deployment window.
+router.post('/solve-doubt', attachStudentContext, solveStudentDoubt);
+router.post('/doubt', attachStudentContext, solveStudentDoubt);
 
 // Public / Flexible Student Submission Endpoints (persists to MongoDB Atlas)
 router.post('/submit-exam', attachStudentContext, submitAssignment);

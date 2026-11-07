@@ -53,18 +53,44 @@ const authLimiter = rateLimit({
 });
 
 /**
+ * Helper to generate rate limiter key:
+ * Uses authenticated user ID if present (or decodes Bearer JWT token if available),
+ * falling back to client IP only for unauthenticated callers.
+ * This guarantees an entire college classroom or campus sharing a single Wi-Fi / NAT IP
+ * will never block each other from submitting or reviewing doubts.
+ */
+const getAuthUserOrIpKey = (req) => {
+  if (req.user?._id) return `user_${req.user._id}`;
+  if (req.user?.id) return `user_${req.user.id}`;
+  try {
+    const authHeader = req.headers?.authorization;
+    if (authHeader && authHeader.startsWith('Bearer ')) {
+      const token = authHeader.split(' ')[1];
+      const jwt = require('jsonwebtoken');
+      const decoded = jwt.decode(token);
+      if (decoded?.id || decoded?._id) {
+        return `user_${decoded.id || decoded._id}`;
+      }
+    }
+  } catch (err) {
+    // ignore decode error and fallback to IP
+  }
+  return `ip_${req.ip || req.connection?.remoteAddress || '127.0.0.1'}`;
+};
+
+/**
  * 3. AI Doubt Clearing Rate Limiter
- * Prevents spamming and cost exhaustion on Gemini AI solver endpoints
+ * Per-user rate limiter keyed by authenticated student ID.
+ * Generously sized for daily quota of 5 doubts + transcription revisions + 15 follow-ups (60 submissions / 15m)
  */
 const doubtLimiter = rateLimit({
-  windowMs: 10 * 60 * 1000, // 10 minutes
-  max: 40, // Limit each IP to 40 doubt queries per 10 minutes
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  max: 60, // Limit each user to 60 doubt submissions / follow-ups per 15 minutes window
+  keyGenerator: getAuthUserOrIpKey,
+  validate: { keyGeneratorIpFallback: false, xForwardedForHeader: false },
   standardHeaders: true,
   legacyHeaders: false,
-  skip: (req) => {
-    const ip = req.ip || req.connection?.remoteAddress || '';
-    return ip.includes('127.0.0.1') || ip === '::1' || process.env.NODE_ENV === 'test';
-  },
+  skip: (req) => process.env.DISABLE_RATE_LIMITING === 'true',
   message: {
     success: false,
     status: 429,
@@ -75,16 +101,16 @@ const doubtLimiter = rateLimit({
 
 /**
  * 3b. High-Frequency General Read Rate Limiter for Doubts Queue & My Doubts
+ * Generously sized for real-time polling (300 reads / min per authenticated user)
  */
 const doubtGeneralLimiter = rateLimit({
   windowMs: 1 * 60 * 1000, // 1 minute
-  max: 180, // Limit each IP to 180 requests per minute
+  max: 300, // Limit each user to 300 reads/polls per minute
+  keyGenerator: getAuthUserOrIpKey,
+  validate: { keyGeneratorIpFallback: false, xForwardedForHeader: false },
   standardHeaders: true,
   legacyHeaders: false,
-  skip: (req) => {
-    const ip = req.ip || req.connection?.remoteAddress || '';
-    return ip.includes('127.0.0.1') || ip === '::1' || process.env.NODE_ENV === 'test';
-  },
+  skip: (req) => process.env.DISABLE_RATE_LIMITING === 'true',
   message: {
     success: false,
     status: 429,
@@ -98,13 +124,12 @@ const doubtGeneralLimiter = rateLimit({
  */
 const analyticsLimiter = rateLimit({
   windowMs: 5 * 60 * 1000, // 5 minutes
-  max: 40, // Limit each IP to 40 export/analytics requests per 5 minutes
+  max: 60, // Limit each user to 60 export/analytics requests per 5 minutes
+  keyGenerator: getAuthUserOrIpKey,
+  validate: { keyGeneratorIpFallback: false, xForwardedForHeader: false },
   standardHeaders: true,
   legacyHeaders: false,
-  skip: (req) => {
-    const ip = req.ip || req.connection?.remoteAddress || '';
-    return ip.includes('127.0.0.1') || ip === '::1' || process.env.NODE_ENV === 'test';
-  },
+  skip: (req) => process.env.DISABLE_RATE_LIMITING === 'true',
   message: {
     success: false,
     status: 429,
