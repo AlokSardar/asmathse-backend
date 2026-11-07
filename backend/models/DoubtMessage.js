@@ -25,6 +25,7 @@ const doubtMessageSchema = new mongoose.Schema(
       type: String,
       enum: [
         'student_question',
+        'initial_question',
         'transcription',
         'explanation',
         'followup',
@@ -62,6 +63,16 @@ const doubtMessageSchema = new mongoose.Schema(
     ],
     modelUsed: { type: String },
     isFallbackModel: { type: Boolean, default: false },
+    disclaimer: { type: String },
+    attempts: [
+      {
+        model: { type: String },
+        durationMs: { type: Number },
+        status: { type: String },
+        error: { type: String },
+        timestamp: { type: Date, default: Date.now },
+      },
+    ],
     helpfulRating: { type: Number, min: 1, max: 5 },
     createdAt: { type: Date, default: Date.now },
   },

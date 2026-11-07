@@ -8,6 +8,7 @@ const {
   validateImageMagicBytes,
   stripExifMetadata,
   normalizeQuery,
+  computeDoubtCacheKey,
   PRIMARY_EXPLAIN_MODEL,
 } = require('../services/aiDoubtService');
 
@@ -116,9 +117,19 @@ async function runDoubtPipelineTests() {
   const hash2 = normalizeQuery(query2);
   const hash3 = normalizeQuery(query3);
 
-  assert.strictEqual(hash1, hash2, 'Whitespace and case variations must map to identical SHA-256 cache key');
+  assert.strictEqual(hash1, hash2, 'Whitespace and case variations must map to identical normalized text');
   assert.notStrictEqual(hash1, hash3, 'Distinct mathematical questions must produce distinct cache hashes');
-  console.log('  ✅ PASS: Cache keys are deterministic, whitespace-resilient, and conflict-free.\n');
+
+  // Verify computeDoubtCacheKey incorporates language, model, promptVersion, and text
+  const keyEn1 = computeDoubtCacheKey({ language: 'en', model: 'gemini-3.8-flash', promptVersion: 'v3', text: query1 });
+  const keyEn2 = computeDoubtCacheKey({ language: 'en', model: 'gemini-3.8-flash', promptVersion: 'v3', text: query2 });
+  const keyBn = computeDoubtCacheKey({ language: 'bn', model: 'gemini-3.8-flash', promptVersion: 'v3', text: query1 });
+  const keyModel2 = computeDoubtCacheKey({ language: 'en', model: 'gemini-3.5-flash', promptVersion: 'v3', text: query1 });
+
+  assert.strictEqual(keyEn1, keyEn2, 'Identical queries must produce identical cache keys');
+  assert.notStrictEqual(keyEn1, keyBn, 'Different languages must produce distinct cache keys');
+  assert.notStrictEqual(keyEn1, keyModel2, 'Different models must produce distinct cache keys');
+  console.log('  ✅ PASS: Cache keys are deterministic, include language+model+version, and conflict-free.\n');
 
 
   // ────────────────────────────────────────────────────────────────────────────
@@ -126,9 +137,9 @@ async function runDoubtPipelineTests() {
   // ────────────────────────────────────────────────────────────────────────────
   console.log('▶ [Test 5] Daily Student Quota Enforcement...');
   // Verify DoubtQuota static methods exist
-  assert.strictEqual(typeof DoubtQuota.canStudentQuery, 'function', 'canStudentQuery must be a static function');
-  assert.strictEqual(typeof DoubtQuota.recordQuery, 'function', 'recordQuery must be a static function');
-  assert.strictEqual(typeof DoubtQuota.getTodayRecord, 'function', 'getTodayRecord must be a static function');
+  assert.strictEqual(typeof DoubtQuota.reserveStudentQuota, 'function', 'reserveStudentQuota must be a static function');
+  assert.strictEqual(typeof DoubtQuota.rollbackStudentQuota, 'function', 'rollbackStudentQuota must be a static function');
+  assert.strictEqual(typeof DoubtQuota.getStudentQuotaStatus, 'function', 'getStudentQuotaStatus must be a static function');
 
   // Verify daily limit default of 5 queries per day
   const defaultLimit = Number(process.env.DAILY_STUDENT_DOUBT_LIMIT) || 5;

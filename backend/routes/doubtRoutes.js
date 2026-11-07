@@ -20,6 +20,7 @@ const {
   getTeacherQueue,
   getDoubtById,
   getQuotaStatus,
+  getAttachment,
 } = require('../controllers/doubtController');
 
 /**
@@ -99,5 +100,8 @@ router.post('/:id/teacher-reply', requireAdmin, optionalFileUpload, submitTeache
 
 // 12. Fetch full doubt thread with messages & audit trail (owner student or faculty only)
 router.get('/:id', protect, getDoubtById);
+
+// 13. Serve private authenticated image attachment (owner student or faculty only)
+router.get('/:id/attachments/:index', protect, getAttachment);
 
 module.exports = router;

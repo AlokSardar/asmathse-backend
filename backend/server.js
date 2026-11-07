@@ -95,9 +95,6 @@ app.use(['/api/student', '/student'], studentRoutes);
 app.use('/api/tests', testRoutes);
 app.use('/api/fees', feeRoutes);
 
-// Direct Aliases for AI Doubt Solver API with rate limiting
-const { solveStudentDoubt } = require('./controllers/studentController');
-app.post(['/api/solve-doubt', '/api/doubt'], doubtLimiter, solveStudentDoubt);
 
 // ── Lightweight Health Routes for External Uptime Pingers ────────────────────────
 // Responds with instant 200 OK without database queries or rate limiting.
@@ -185,8 +182,15 @@ mongoose.connection.on('connected', () => {
     })
     .catch(() => {});
 });
+const { sweepStuckDoubtJobs } = require('./controllers/doubtController');
+
 mongoose.connection.once('open', () => {
   forceAdminUpsert();
+  sweepStuckDoubtJobs()
+    .then((count) => {
+      if (count > 0) console.log(`🧹 [DOUBT SWEEPER]: Swept ${count} stuck doubt jobs from previous server run.`);
+    })
+    .catch(() => {});
 });
 
 // Startup verification for Gemini API Key

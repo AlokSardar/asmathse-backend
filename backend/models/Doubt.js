@@ -67,7 +67,8 @@ const doubtSchema = new mongoose.Schema(
     // Secure Attachments (Never raw public links)
     attachments: [
       {
-        url: { type: String, required: true },
+        url: { type: String, default: '' },
+        base64Data: { type: String },
         publicId: { type: String },
         fileName: { type: String },
         mimeType: { type: String },
@@ -75,7 +76,7 @@ const doubtSchema = new mongoose.Schema(
         storageType: {
           type: String,
           enum: ['cloudinary', 'local', 'private_stream'],
-          default: 'cloudinary',
+          default: 'private_stream',
         },
       },
     ],
@@ -91,6 +92,15 @@ const doubtSchema = new mongoose.Schema(
       confirmedByUser: { type: Boolean, default: false },
       transcribedAt: { type: Date },
       modelUsed: { type: String },
+      attempts: [
+        {
+          model: { type: String },
+          durationMs: { type: Number },
+          status: { type: String },
+          error: { type: String },
+          timestamp: { type: Date, default: Date.now },
+        },
+      ],
     },
 
     // Stage 2: AI Explanation
@@ -110,6 +120,16 @@ const doubtSchema = new mongoose.Schema(
       commonMistakes: [{ type: String }],
       modelUsed: { type: String },
       isFallbackModel: { type: Boolean, default: false },
+      disclaimer: { type: String },
+      attempts: [
+        {
+          model: { type: String },
+          durationMs: { type: Number },
+          status: { type: String },
+          error: { type: String },
+          timestamp: { type: Date, default: Date.now },
+        },
+      ],
       generatedAt: { type: Date },
     },
 
@@ -137,6 +157,24 @@ const doubtSchema = new mongoose.Schema(
   },
   { timestamps: true }
 );
+
+// Pre-validate hook to generate human-readable Doubt Code & attachment URLs
+doubtSchema.pre('validate', async function () {
+  if (!this.doubtCode) {
+    const yearSuffix = new Date().getFullYear().toString().slice(-2);
+    const randomSuffix = Math.random().toString(36).substring(2, 6).toUpperCase();
+    const count = await this.constructor.countDocuments();
+    const seq = String(count + 1).padStart(4, '0');
+    this.doubtCode = `DBT-${yearSuffix}-${seq}-${randomSuffix}`;
+  }
+  if (Array.isArray(this.attachments)) {
+    this.attachments.forEach((att, idx) => {
+      if (!att.url) {
+        att.url = `/api/doubts/${this._id}/attachments/${idx}`;
+      }
+    });
+  }
+});
 
 // Generate human-readable Doubt Code
 doubtSchema.statics.generateDoubtCode = async function () {
