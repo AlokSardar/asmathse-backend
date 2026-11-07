@@ -30,6 +30,8 @@ const doubtMessageSchema = new mongoose.Schema(
         'explanation',
         'followup',
         'teacher_reply',
+        'clarification_request',
+        'clarification_response',
         'system_event',
       ],
       required: true,

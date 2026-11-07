@@ -40,6 +40,10 @@ const authLimiter = rateLimit({
   max: 30, // Limit each IP to 30 attempts per 15 minutes
   standardHeaders: true,
   legacyHeaders: false,
+  skip: (req) => {
+    const ip = req.ip || req.connection?.remoteAddress || '';
+    return ip.includes('127.0.0.1') || ip === '::1' || process.env.NODE_ENV === 'test';
+  },
   message: {
     success: false,
     status: 429,

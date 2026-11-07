@@ -15,12 +15,22 @@ const {
   resolveDoubt,
   reopenDoubt,
   claimDoubt,
+  unclaimDoubt,
+  reassignDoubt,
+  requestClarification,
+  respondToClarification,
   submitTeacherReply,
   getMyDoubts,
   getTeacherQueue,
   getDoubtById,
   getQuotaStatus,
   getAttachment,
+  getTemplates,
+  createTemplate,
+  deleteTemplate,
+  getDoubtNotifications,
+  markDoubtNotificationRead,
+  markAllDoubtNotificationsRead,
 } = require('../controllers/doubtController');
 
 /**
@@ -62,20 +72,7 @@ const optionalFileUpload = (req, res, next) => {
 // 1. Submit a new doubt (typed or photo/PDF)
 router.post('/ask', doubtLimiter, requireStudent, optionalFileUpload, askDoubt);
 
-// 2. Confirm or edit Stage 1 transcription (for image doubts)
-router.post('/:id/confirm-transcription', doubtLimiter, requireStudent, confirmTranscription);
-
-// 3. Ask a pedagogical follow-up question (up to 3 in thread)
-router.post('/:id/followup', doubtLimiter, requireStudent, askFollowup);
-
-// 4. Escalate to teacher queue (with 24h SLA)
-router.post('/:id/escalate', requireStudent, escalateDoubt);
-
-// 5. Mark doubt as resolved (student owner or faculty)
-router.post('/:id/resolve', protect, resolveDoubt);
-
-// 6. Reopen a resolved doubt (up to 1 time)
-router.post('/:id/reopen', requireStudent, reopenDoubt);
+// ── Shared Collections & Preferences (Before /:id) ───────────────────────────
 
 // 7. Get student's doubts list (with filters)
 router.get('/my', requireStudent, getMyDoubts);
@@ -83,25 +80,59 @@ router.get('/my', requireStudent, getMyDoubts);
 // 8. Check student's daily quota status and remaining limits
 router.get('/quota', protect, getQuotaStatus);
 
+// 9. Faculty Saved Templates CRUD
+router.get('/templates', requireAdmin, getTemplates);
+router.post('/templates', requireAdmin, createTemplate);
+router.delete('/templates/:id', requireAdmin, deleteTemplate);
 
-// ── Teacher / Faculty Escalation Queue Endpoints ──────────────────────────────
+// 10. Doubts Notification Stream & Acknowledgment
+router.get('/notifications', protect, getDoubtNotifications);
+router.put('/notifications/read-all', protect, markAllDoubtNotificationsRead);
+router.put('/notifications/:id/read', protect, markDoubtNotificationRead);
 
-// 9. Fetch teacher review queue (filtered by teacher's assigned course/branch; admin sees all)
+// 11. Fetch teacher review queue (filtered by teacher's assigned course/branch; admin sees all)
 router.get('/teacher/queue', requireAdmin, getTeacherQueue);
 
-// 10. Claim an escalated doubt ticket
+
+// ── Specific Ticket Operations (Parameterized by :id) ──────────────────────────
+
+// 12. Confirm or edit Stage 1 transcription (for image doubts)
+router.post('/:id/confirm-transcription', doubtLimiter, requireStudent, confirmTranscription);
+
+// 13. Ask a pedagogical follow-up question (up to 3 in thread)
+router.post('/:id/followup', doubtLimiter, requireStudent, askFollowup);
+
+// 14. Student responds to faculty clarification request
+router.post('/:id/respond-clarification', requireStudent, respondToClarification);
+
+// 15. Escalate to teacher queue (with 24h SLA)
+router.post('/:id/escalate', requireStudent, escalateDoubt);
+
+// 16. Mark doubt as resolved (student owner or faculty)
+router.post('/:id/resolve', protect, resolveDoubt);
+
+// 17. Reopen a resolved doubt (up to 1 time)
+router.post('/:id/reopen', requireStudent, reopenDoubt);
+
+// 18. Faculty claims an escalated doubt ticket (atomic race guard)
 router.post('/:id/claim', requireAdmin, claimDoubt);
 
-// 11. Submit teacher LaTeX verified solution
+// 19. Faculty unclaims ticket back to queue
+router.post('/:id/unclaim', requireAdmin, unclaimDoubt);
+
+// 20. Faculty or Admin reassigns ticket
+router.post('/:id/reassign', requireAdmin, reassignDoubt);
+
+// 21. Faculty requests clarification from student
+router.post('/:id/request-clarification', requireAdmin, requestClarification);
+
+// 22. Faculty submits verified LaTeX solution
 router.post('/:id/teacher-reply', requireAdmin, optionalFileUpload, submitTeacherReply);
 
-
-// ── Shared Ticket Detail Endpoint ─────────────────────────────────────────────
-
-// 12. Fetch full doubt thread with messages & audit trail (owner student or faculty only)
+// 23. Fetch full doubt thread with messages & audit trail (owner student or faculty only)
 router.get('/:id', protect, getDoubtById);
 
-// 13. Serve private authenticated image attachment (owner student or faculty only)
+// 24. Serve private authenticated image attachment (owner student or faculty only)
 router.get('/:id/attachments/:index', protect, getAttachment);
 
 module.exports = router;

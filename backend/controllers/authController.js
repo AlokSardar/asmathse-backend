@@ -491,19 +491,22 @@ const loginUser = async (req, res) => {
       return res.status(401).json({ message: 'Invalid email or password' });
     }
 
-    const isAdmin = String(user.role || '').toLowerCase() === 'admin';
+    const roleLower = String(user.role || '').toLowerCase();
+    const isAdmin = roleLower === 'admin';
+    const isTeacher = roleLower === 'teacher';
+    const isFaculty = isAdmin || isTeacher;
 
     // Strict Role-Based Authentication & Login Isolation Enforcement
-    if (requestedRole === 'admin' && !isAdmin) {
-      console.log(`[AUTH LOGIN] ❌ Role Isolation Block: Student "${cleanEmail}" rejected from Admin portal.`);
+    if (requestedRole === 'admin' && !isFaculty) {
+      console.log(`[AUTH LOGIN] ❌ Role Isolation Block: Student "${cleanEmail}" rejected from Admin/Faculty portal.`);
       return res.status(403).json({
         message: 'Access Denied: Student accounts cannot access the Educator / Admin Portal. Please use the Student Login tab.',
         roleMismatch: true,
       });
     }
 
-    if (requestedRole === 'student' && isAdmin) {
-      console.log(`[AUTH LOGIN] ❌ Role Isolation Block: Admin "${cleanEmail}" rejected from Student portal.`);
+    if (requestedRole === 'student' && isFaculty) {
+      console.log(`[AUTH LOGIN] ❌ Role Isolation Block: Faculty "${cleanEmail}" rejected from Student portal.`);
       return res.status(403).json({
         message: 'Access Denied: Educator credentials cannot access the Student Portal. Please switch to the Teacher / Admin Login tab.',
         roleMismatch: true,
@@ -512,7 +515,7 @@ const loginUser = async (req, res) => {
 
     // Registration Approval / Verification check:
     // If student has isApproved: false, refuse access until admin manually approves
-    if (!isAdmin && user.isApproved === false) {
+    if (!isFaculty && user.isApproved === false) {
       return res.status(403).json({
         message: 'Your account registration is pending approval by the teacher/admin. Please wait for activation.',
         pendingApproval: true,
@@ -561,7 +564,7 @@ const loginUser = async (req, res) => {
       id: user._id,
       name: user.name,
       email: user.email,
-      role: isAdmin ? 'admin' : 'student',
+      role: user.role || (isAdmin ? 'admin' : (isTeacher ? 'teacher' : 'student')),
       isApproved: user.isApproved !== false,
       mobile: user.mobile || (studentDoc && studentDoc.whatsapp),
       whatsapp: user.whatsapp || user.studentWhatsapp || (studentDoc && (studentDoc.whatsapp || studentDoc.studentWhatsapp)),

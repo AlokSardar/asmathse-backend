@@ -5,6 +5,8 @@ const Doubt = require('../models/Doubt');
 const DoubtMessage = require('../models/DoubtMessage');
 const DoubtQuota = require('../models/DoubtQuota');
 const Notification = require('../models/Notification');
+const DoubtTemplate = require('../models/DoubtTemplate');
+const User = require('../models/User');
 const {
   validateImageMagicBytes,
   stripExifMetadata,
@@ -558,12 +560,15 @@ exports.escalateDoubt = async (req, res) => {
     doubt.status = 'escalated';
     doubt.escalationReason = reason;
     doubt.slaDeadline = slaDeadline;
+    doubt.slaDueAt = slaDeadline;
+    doubt.escalatedAt = new Date();
     doubt.unreadByTeacher = true;
     doubt.auditTrail.push({
       status: 'escalated',
       changedBy: studentUser.name || 'Student',
       role: 'student',
       note: `Escalated to faculty queue: ${reason}`,
+      timestamp: new Date(),
     });
     await doubt.save();
 
@@ -573,10 +578,12 @@ exports.escalateDoubt = async (req, res) => {
         id: `notif_${Date.now()}_${Math.random().toString(36).substr(2, 5)}`,
         title: 'New Student Doubt Escalated',
         message: `${studentUser.name} escalated doubt ${doubt.doubtCode} (${doubt.topic}) with 24h SLA.`,
-        type: 'classtest',
+        type: 'doubt_escalation',
         course: doubt.course,
+        branch: doubt.branch,
+        doubtId: doubt._id,
         targetRole: 'teacher',
-        read: false,
+        isRead: false,
       });
     } catch (_) {}
 
@@ -694,7 +701,7 @@ exports.reopenDoubt = async (req, res) => {
 };
 
 /**
- * @desc    Faculty claims/assigns doubt to self with course/branch isolation
+ * @desc    Faculty claims/assigns doubt to self with atomic race-condition guard & course/branch isolation
  * @route   POST /api/doubts/:id/claim
  * @access  Protected (Teacher/Admin)
  */
@@ -702,13 +709,14 @@ exports.claimDoubt = async (req, res) => {
   try {
     const teacherUser = req.user;
     const { id } = req.params;
+    const teacherId = teacherUser._id || teacherUser.id;
+    const userRole = String(teacherUser?.role || '').toLowerCase();
 
     const doubt = await Doubt.findById(id);
     if (!doubt) {
       return res.status(404).json({ success: false, message: 'Doubt not found' });
     }
 
-    const userRole = String(teacherUser?.role || '').toLowerCase();
     // Teacher Course & Branch Isolation (Admins have global visibility)
     if (userRole === 'teacher' && teacherUser.id !== 'master_admin_id') {
       const teacherCourse = teacherUser.targetCourse || teacherUser.course;
@@ -727,25 +735,349 @@ exports.claimDoubt = async (req, res) => {
       }
     }
 
-    doubt.status = 'teacher_assigned';
-    doubt.assignedTeacher = {
-      id: teacherUser._id || teacherUser.id,
-      name: teacherUser.name || 'Faculty',
-      email: teacherUser.email || '',
-      assignedAt: new Date(),
-    };
+    // Race-condition proof atomic claim: only claim if unassigned or already claimed by this teacher
+    const claimedDoubt = await Doubt.findOneAndUpdate(
+      {
+        _id: id,
+        $or: [
+          { 'assignedTeacher.id': { $exists: false } },
+          { 'assignedTeacher.id': null },
+          { 'assignedTeacher.id': teacherId },
+        ],
+      },
+      {
+        $set: {
+          status: 'teacher_assigned',
+          unreadByTeacher: false,
+          assignedTeacher: {
+            id: teacherId,
+            name: teacherUser.name || 'Faculty',
+            email: teacherUser.email || '',
+            assignedAt: new Date(),
+          },
+        },
+        $push: {
+          auditTrail: {
+            status: 'teacher_assigned',
+            changedBy: teacherUser.name || 'Faculty',
+            role: 'teacher',
+            note: `Ticket claimed by faculty ${teacherUser.name}`,
+            timestamp: new Date(),
+          },
+        },
+      },
+      { new: true }
+    );
+
+    if (!claimedDoubt) {
+      const fresh = await Doubt.findById(id);
+      if (fresh && fresh.assignedTeacher && fresh.assignedTeacher.id) {
+        return res.status(409).json({
+          success: false,
+          message: `Conflict: This ticket has already been claimed by faculty ${fresh.assignedTeacher.name || 'another teacher'}.`,
+        });
+      }
+      return res.status(400).json({
+        success: false,
+        message: 'Ticket cannot be claimed in its current status.',
+      });
+    }
+
+    // Notify student that faculty claimed the doubt
+    try {
+      await Notification.create({
+        id: `notif_${Date.now()}_${Math.random().toString(36).substr(2, 5)}`,
+        title: 'Faculty Claimed Your Doubt',
+        message: `Faculty ${teacherUser.name} has claimed your doubt ${claimedDoubt.doubtCode} and is reviewing it.`,
+        type: 'doubt_claimed',
+        course: claimedDoubt.course,
+        userId: claimedDoubt.student,
+        doubtId: claimedDoubt._id,
+        targetRole: 'student',
+        isRead: false,
+      });
+    } catch (_) {}
+
+    return res.json({
+      success: true,
+      message: 'Doubt assigned to you.',
+      doubt: claimedDoubt,
+    });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+/**
+ * @desc    Faculty unclaims doubt and returns it to the pool
+ * @route   POST /api/doubts/:id/unclaim
+ * @access  Protected (Assigned Teacher or Admin)
+ */
+exports.unclaimDoubt = async (req, res) => {
+  try {
+    const user = req.user;
+    const { id } = req.params;
+    const doubt = await Doubt.findById(id);
+    if (!doubt) {
+      return res.status(404).json({ success: false, message: 'Doubt not found' });
+    }
+
+    const userId = String(user._id || user.id);
+    const assignedId = String(doubt.assignedTeacher?.id || '');
+    const isAdmin = String(user.role || '').toLowerCase() === 'admin' || user.id === 'master_admin_id';
+
+    if (assignedId !== userId && !isAdmin) {
+      return res.status(403).json({
+        success: false,
+        message: 'Access denied: Only the assigned faculty or an admin can unclaim this ticket.',
+      });
+    }
+
+    doubt.status = 'escalated';
+    doubt.assignedTeacher = null;
     doubt.auditTrail.push({
-      status: 'teacher_assigned',
-      changedBy: teacherUser.name || 'Faculty',
+      status: 'escalated',
+      changedBy: user.name || 'Faculty',
       role: 'teacher',
-      note: `Ticket claimed by faculty ${teacherUser.name}`,
+      note: `Ticket unclaimed by ${user.name} and returned to the faculty pool.`,
+      timestamp: new Date(),
     });
     await doubt.save();
 
     return res.json({
       success: true,
-      message: 'Doubt assigned to you.',
+      message: 'Ticket unclaimed and returned to faculty queue.',
       doubt,
+    });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+/**
+ * @desc    Reassign doubt ticket to another faculty member
+ * @route   POST /api/doubts/:id/reassign
+ * @access  Protected (Assigned Teacher or Admin)
+ */
+exports.reassignDoubt = async (req, res) => {
+  try {
+    const user = req.user;
+    const { id } = req.params;
+    const { newTeacherId, note } = req.body || {};
+
+    if (!newTeacherId) {
+      return res.status(400).json({ success: false, message: 'Please provide newTeacherId for reassignment.' });
+    }
+
+    const doubt = await Doubt.findById(id);
+    if (!doubt) {
+      return res.status(404).json({ success: false, message: 'Doubt not found' });
+    }
+
+    const userId = String(user._id || user.id);
+    const assignedId = String(doubt.assignedTeacher?.id || '');
+    const isAdmin = String(user.role || '').toLowerCase() === 'admin' || user.id === 'master_admin_id';
+
+    if (assignedId && assignedId !== userId && !isAdmin) {
+      return res.status(403).json({
+        success: false,
+        message: 'Access denied: Only the assigned faculty or an admin can reassign this ticket.',
+      });
+    }
+
+    const targetUser = await User.findById(newTeacherId);
+    if (!targetUser || !['teacher', 'admin'].includes(String(targetUser.role || '').toLowerCase())) {
+      return res.status(404).json({ success: false, message: 'Target faculty member not found.' });
+    }
+
+    doubt.assignedTeacher = {
+      id: targetUser._id,
+      name: targetUser.name,
+      email: targetUser.email,
+      assignedAt: new Date(),
+    };
+    doubt.status = 'teacher_assigned';
+    doubt.auditTrail.push({
+      status: 'teacher_assigned',
+      changedBy: user.name || 'Faculty',
+      role: 'teacher',
+      note: `Reassigned from ${user.name} to ${targetUser.name}. ${note || ''}`.trim(),
+      timestamp: new Date(),
+    });
+    await doubt.save();
+
+    // Notify new teacher
+    try {
+      await Notification.create({
+        id: `notif_${Date.now()}_${Math.random().toString(36).substr(2, 5)}`,
+        title: 'Doubt Reassigned to You',
+        message: `Faculty ${user.name} reassigned doubt ${doubt.doubtCode} to you.`,
+        type: 'doubt_assigned',
+        course: doubt.course,
+        userId: targetUser._id,
+        doubtId: doubt._id,
+        targetRole: 'teacher',
+        isRead: false,
+      });
+    } catch (_) {}
+
+    return res.json({
+      success: true,
+      message: `Ticket successfully reassigned to ${targetUser.name}.`,
+      doubt,
+    });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+/**
+ * @desc    Faculty requests clarification from student
+ * @route   POST /api/doubts/:id/request-clarification
+ * @access  Protected (Assigned Teacher or Admin)
+ */
+exports.requestClarification = async (req, res) => {
+  try {
+    const user = req.user;
+    const { id } = req.params;
+    const { prompt } = req.body || {};
+
+    if (!prompt || !prompt.trim()) {
+      return res.status(400).json({ success: false, message: 'Please provide a clarification prompt.' });
+    }
+
+    const doubt = await Doubt.findById(id);
+    if (!doubt) {
+      return res.status(404).json({ success: false, message: 'Doubt not found' });
+    }
+
+    const userId = String(user._id || user.id);
+    const assignedId = String(doubt.assignedTeacher?.id || '');
+    const isAdmin = String(user.role || '').toLowerCase() === 'admin' || user.id === 'master_admin_id';
+
+    if (assignedId && assignedId !== userId && !isAdmin) {
+      return res.status(403).json({
+        success: false,
+        message: 'Access denied: You are not the assigned faculty for this doubt.',
+      });
+    }
+
+    doubt.status = 'clarification_requested';
+    doubt.clarificationPrompt = prompt.trim();
+    doubt.clarificationRequestedAt = new Date();
+    doubt.unreadByStudent = true;
+    doubt.auditTrail.push({
+      status: 'clarification_requested',
+      changedBy: user.name || 'Faculty',
+      role: 'teacher',
+      note: `Faculty requested clarification: "${prompt.trim().slice(0, 100)}..."`,
+      timestamp: new Date(),
+    });
+    await doubt.save();
+
+    const msg = await DoubtMessage.create({
+      doubt: doubt._id,
+      authorRole: 'teacher',
+      authorId: user._id || user.id,
+      authorName: user.name || 'Faculty',
+      messageType: 'clarification_request',
+      contentPlain: prompt.trim(),
+    });
+
+    // Notify student
+    try {
+      await Notification.create({
+        id: `notif_${Date.now()}_${Math.random().toString(36).substr(2, 5)}`,
+        title: 'Faculty Requested Clarification',
+        message: `Faculty ${user.name} needs clarification on your doubt ${doubt.doubtCode}.`,
+        type: 'doubt_clarification',
+        course: doubt.course,
+        userId: doubt.student,
+        doubtId: doubt._id,
+        targetRole: 'student',
+        isRead: false,
+      });
+    } catch (_) {}
+
+    return res.json({
+      success: true,
+      message: 'Clarification request sent to student.',
+      doubt,
+      messageRecord: msg,
+    });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+/**
+ * @desc    Student responds to faculty clarification request
+ * @route   POST /api/doubts/:id/respond-clarification
+ * @access  Protected (Student Owner)
+ */
+exports.respondToClarification = async (req, res) => {
+  try {
+    const studentUser = req.user;
+    const { id } = req.params;
+    const { message, mathLatex } = req.body || {};
+
+    if (!message && !mathLatex) {
+      return res.status(400).json({ success: false, message: 'Please provide your clarification response.' });
+    }
+
+    const doubt = await Doubt.findById(id);
+    if (!doubt) {
+      return res.status(404).json({ success: false, message: 'Doubt not found' });
+    }
+
+    if (String(doubt.student) !== String(studentUser._id || studentUser.id)) {
+      return res.status(403).json({ success: false, message: 'Access denied: You do not own this doubt ticket.' });
+    }
+
+    doubt.status = 'teacher_assigned';
+    doubt.unreadByTeacher = true;
+    doubt.clarificationPrompt = '';
+    doubt.auditTrail.push({
+      status: 'teacher_assigned',
+      changedBy: studentUser.name || 'Student',
+      role: 'student',
+      note: `Student responded to faculty clarification: "${(message || '').slice(0, 100)}..."`,
+      timestamp: new Date(),
+    });
+    await doubt.save();
+
+    const msg = await DoubtMessage.create({
+      doubt: doubt._id,
+      authorRole: 'student',
+      authorId: studentUser._id || studentUser.id,
+      authorName: studentUser.name || 'Student',
+      messageType: 'clarification_response',
+      contentPlain: message || '',
+      contentLatex: mathLatex || '',
+    });
+
+    // Notify assigned teacher
+    if (doubt.assignedTeacher?.id) {
+      try {
+        await Notification.create({
+          id: `notif_${Date.now()}_${Math.random().toString(36).substr(2, 5)}`,
+          title: 'Student Clarification Received',
+          message: `${studentUser.name} responded to your clarification request on ${doubt.doubtCode}.`,
+          type: 'doubt_clarification_reply',
+          course: doubt.course,
+          userId: doubt.assignedTeacher.id,
+          doubtId: doubt._id,
+          targetRole: 'teacher',
+          isRead: false,
+        });
+      } catch (_) {}
+    }
+
+    return res.json({
+      success: true,
+      message: 'Clarification sent to faculty.',
+      doubt,
+      messageRecord: msg,
     });
   } catch (error) {
     res.status(500).json({ success: false, message: error.message });
@@ -761,7 +1093,7 @@ exports.submitTeacherReply = async (req, res) => {
   try {
     const teacherUser = req.user;
     const { id } = req.params;
-    const { solutionPlain, solutionLatex, attachments = [], markResolved = true } = req.body || {};
+    const { solutionPlain, solutionLatex, markResolved = true } = req.body || {};
 
     if (!solutionPlain && !solutionLatex) {
       return res.status(400).json({ success: false, message: 'Please provide solution content or LaTeX equations.' });
@@ -773,7 +1105,12 @@ exports.submitTeacherReply = async (req, res) => {
     }
 
     const userRole = String(teacherUser?.role || '').toLowerCase();
-    if (userRole === 'teacher' && teacherUser.id !== 'master_admin_id') {
+    const userId = String(teacherUser._id || teacherUser.id);
+    const assignedId = String(doubt.assignedTeacher?.id || '');
+    const isAdmin = userRole === 'admin' || teacherUser.id === 'master_admin_id';
+
+    // Academic Course & Branch Isolation checks
+    if (userRole === 'teacher' && !isAdmin) {
       const teacherCourse = teacherUser.targetCourse || teacherUser.course;
       if (teacherCourse && doubt.course && teacherCourse.toLowerCase() !== doubt.course.toLowerCase()) {
         return res.status(403).json({
@@ -781,12 +1118,59 @@ exports.submitTeacherReply = async (req, res) => {
           message: `Access denied: You cannot submit solutions to doubts outside your assigned course "${teacherCourse}".`,
         });
       }
+      const teacherBranch = teacherUser.branch || teacherUser.stream;
+      if (teacherBranch && doubt.branch && teacherBranch.toLowerCase() !== doubt.branch.toLowerCase()) {
+        return res.status(403).json({
+          success: false,
+          message: `Access denied: You are assigned to branch "${teacherBranch}" and cannot submit solutions to doubts from branch "${doubt.branch}".`,
+        });
+      }
+      // Must not publish on a doubt claimed by another teacher
+      if (assignedId && assignedId !== userId) {
+        return res.status(403).json({
+          success: false,
+          message: `Access denied: This ticket is currently claimed by faculty ${doubt.assignedTeacher.name || 'another teacher'}.`,
+        });
+      }
     }
 
-    doubt.status = markResolved ? 'resolved' : 'teacher_answered';
+    // Process file attachments if uploaded
+    let processedAttachments = [];
+    if (req.files && Array.isArray(req.files) && req.files.length > 0) {
+      if (req.files.length > 3) {
+        return res.status(400).json({ success: false, message: 'Maximum 3 attachments allowed per reply.' });
+      }
+      for (const file of req.files) {
+        const isValid = validateImageMagicBytes(file.buffer);
+        if (!isValid) {
+          return res.status(400).json({
+            success: false,
+            message: `File ${file.originalname} has invalid magic bytes or unsupported format. Only JPEG, PNG, WEBP, or PDF allowed.`,
+          });
+        }
+        let finalBuffer = file.buffer;
+        let mimeType = file.mimetype || 'image/jpeg';
+        if (mimeType.startsWith('image/')) {
+          finalBuffer = await stripExifMetadata(finalBuffer);
+          finalBuffer = await compressImageBuffer(finalBuffer, 500 * 1024);
+        }
+        const b64 = finalBuffer.toString('base64');
+        processedAttachments.push({
+          url: `data:${mimeType};base64,${b64}`,
+          fileName: file.originalname || 'Solution_Attachment.jpg',
+          mimeType,
+          size: finalBuffer.length,
+        });
+      }
+    } else if (Array.isArray(req.body.attachments)) {
+      processedAttachments = req.body.attachments.slice(0, 3);
+    }
+
+    const willResolve = markResolved === true || markResolved === 'true';
+    doubt.status = willResolve ? 'resolved' : 'teacher_answered';
     doubt.unreadByStudent = true;
     doubt.unreadByTeacher = false;
-    if (markResolved) {
+    if (willResolve) {
       doubt.resolvedAt = new Date();
       doubt.resolvedBy = 'teacher';
     }
@@ -795,7 +1179,8 @@ exports.submitTeacherReply = async (req, res) => {
       status: doubt.status,
       changedBy: teacherUser.name || 'Faculty',
       role: 'teacher',
-      note: `Faculty solution published by ${teacherUser.name}`,
+      note: `Faculty solution published by ${teacherUser.name} (${willResolve ? 'marked resolved' : 'pending student review'})`,
+      timestamp: new Date(),
     });
     await doubt.save();
 
@@ -807,7 +1192,7 @@ exports.submitTeacherReply = async (req, res) => {
       messageType: 'teacher_reply',
       contentPlain: solutionPlain || '',
       contentLatex: solutionLatex || '',
-      attachments: attachments.map((a) => ({ url: a.url, fileName: a.fileName || 'Solution_Attachment.jpg' })),
+      attachments: processedAttachments,
       isFallbackModel: false,
     });
 
@@ -817,11 +1202,12 @@ exports.submitTeacherReply = async (req, res) => {
         id: `notif_${Date.now()}_${Math.random().toString(36).substr(2, 5)}`,
         title: 'Faculty Answered Your Doubt',
         message: `Faculty ${teacherUser.name} has provided a verified resolution for ${doubt.doubtCode}.`,
-        type: 'classtest',
+        type: 'doubt_reply',
         course: doubt.course,
+        userId: doubt.student,
+        doubtId: doubt._id,
         targetRole: 'student',
-        studentId: String(doubt.student),
-        read: false,
+        isRead: false,
       });
     } catch (_) {}
 
@@ -879,7 +1265,7 @@ exports.getMyDoubts = async (req, res) => {
 };
 
 /**
- * @desc    Get faculty review queue (filtered by teacher's course/branch)
+ * @desc    Get faculty review queue with comprehensive filters, counters, SLA calculations & course/branch isolation
  * @route   GET /api/doubts/teacher/queue
  * @access  Protected (Teacher/Admin)
  */
@@ -887,20 +1273,49 @@ exports.getTeacherQueue = async (req, res) => {
   try {
     const user = req.user;
     const userRole = String(user?.role || '').toLowerCase();
-    const { status, priority, limit = 30 } = req.query;
+    const {
+      status = 'all',
+      subject = 'all',
+      chapter,
+      topic,
+      branch,
+      priority = 'all',
+      slaState = 'all',
+      search = '',
+      assigned = 'all',
+      sort = 'oldest',
+      page = 1,
+      limit = 30,
+    } = req.query;
 
     const filter = {};
-    if (status) {
+
+    // Filter by status
+    if (status && status !== 'all') {
       filter.status = status;
     } else {
-      filter.status = { $in: ['escalated', 'teacher_assigned', 'teacher_answered'] };
+      filter.status = {
+        $in: ['escalated', 'teacher_assigned', 'teacher_answered', 'clarification_requested', 'reopened', 'resolved'],
+      };
     }
 
-    if (priority) {
+    if (subject && subject !== 'all') {
+      filter.subject = new RegExp(`^${subject}$`, 'i');
+    }
+
+    if (chapter || topic) {
+      const term = chapter || topic;
+      filter.$or = [
+        { topic: new RegExp(term, 'i') },
+        { title: new RegExp(term, 'i') },
+      ];
+    }
+
+    if (priority && priority !== 'all') {
       filter.priority = priority;
     }
 
-    // Teacher course/branch isolation: Admin sees all, teacher sees assigned course
+    // Teacher course/branch isolation: Admin sees all, teacher sees assigned course & branch
     if (userRole === 'teacher' && user?.id !== 'master_admin_id') {
       const teacherCourse = user?.targetCourse || user?.course;
       if (teacherCourse) {
@@ -908,23 +1323,126 @@ exports.getTeacherQueue = async (req, res) => {
       }
       const teacherBranch = user?.branch || user?.stream;
       if (teacherBranch) {
-        filter.$or = [
-          { branch: new RegExp(`^${teacherBranch}$`, 'i') },
-          { branch: { $exists: false } },
-          { branch: '' },
-        ];
+        filter.branch = new RegExp(`^${teacherBranch}$`, 'i');
+      }
+    } else if (branch && branch !== 'all') {
+      filter.branch = new RegExp(`^${branch}$`, 'i');
+    }
+
+    // Assigned filter
+    const userId = user._id || user.id;
+    if (assigned === 'mine') {
+      filter['assignedTeacher.id'] = userId;
+    } else if (assigned === 'unassigned') {
+      filter.$and = filter.$and || [];
+      filter.$and.push({
+        $or: [
+          { 'assignedTeacher.id': { $exists: false } },
+          { 'assignedTeacher.id': null },
+        ],
+      });
+    }
+
+    // Search query
+    if (search && search.trim()) {
+      const term = search.trim();
+      const searchRegex = new RegExp(term, 'i');
+      const searchCond = [
+        { doubtCode: searchRegex },
+        { title: searchRegex },
+        { topic: searchRegex },
+        { studentName: searchRegex },
+        { studentRoll: searchRegex },
+      ];
+      if (filter.$or) {
+        filter.$and = filter.$and || [];
+        filter.$and.push({ $or: searchCond });
+      } else {
+        filter.$or = searchCond;
       }
     }
 
-    const queue = await Doubt.find(filter)
-      .sort({ priority: -1, slaDeadline: 1, createdAt: -1 })
-      .limit(parseInt(limit, 10))
-      .populate('student', 'name email rollNumber');
+    // Sort order
+    let sortObj = { createdAt: 1 }; // Oldest first default
+    if (sort === 'newest') sortObj = { createdAt: -1 };
+    else if (sort === 'sla') sortObj = { slaDeadline: 1, slaDueAt: 1, createdAt: 1 };
+    else if (sort === 'priority') sortObj = { priority: -1, createdAt: 1 };
+
+    const skip = (Math.max(1, parseInt(page, 10)) - 1) * parseInt(limit, 10);
+
+    const allMatched = await Doubt.find(filter)
+      .sort(sortObj)
+      .populate('student', 'name email rollNumber course stream');
+
+    const now = Date.now();
+    // Enrich with SLA fields & filter by SLA state
+    const enriched = allMatched.map((doc) => {
+      const d = doc.toObject();
+      const deadline = d.slaDeadline || d.slaDueAt || (d.escalatedAt ? new Date(new Date(d.escalatedAt).getTime() + 24 * 3600 * 1000) : new Date(new Date(d.createdAt).getTime() + 24 * 3600 * 1000));
+      const remainingMs = new Date(deadline).getTime() - now;
+      const isBreached = remainingMs <= 0 && !['resolved', 'closed'].includes(d.status);
+      const isDueSoon = remainingMs > 0 && remainingMs < 4 * 3600 * 1000 && !['resolved', 'closed'].includes(d.status);
+      const computedSlaState = isBreached ? 'breached' : (isDueSoon ? 'due_soon' : 'on_time');
+
+      d.slaDeadline = deadline;
+      d.slaRemainingMs = remainingMs;
+      d.isBreached = isBreached;
+      d.isDueSoon = isDueSoon;
+      d.slaState = computedSlaState;
+      return d;
+    });
+
+    let finalFiltered = enriched;
+    if (slaState && slaState !== 'all') {
+      finalFiltered = enriched.filter((d) => d.slaState === slaState);
+    }
+
+    // Global summary counters across scoped doubts (unfiltered by view filters)
+    const scopeFilter = {};
+    if (userRole === 'teacher' && user?.id !== 'master_admin_id') {
+      const teacherCourse = user?.targetCourse || user?.course;
+      if (teacherCourse) scopeFilter.course = new RegExp(`^${teacherCourse}$`, 'i');
+      const teacherBranch = user?.branch || user?.stream;
+      if (teacherBranch) scopeFilter.branch = new RegExp(`^${teacherBranch}$`, 'i');
+    }
+    const allScoped = await Doubt.find({
+      ...scopeFilter,
+      status: { $in: ['escalated', 'teacher_assigned', 'teacher_answered', 'clarification_requested', 'reopened', 'resolved'] },
+    });
+
+    const counters = {
+      total: allScoped.length,
+      escalated: allScoped.filter((d) => d.status === 'escalated').length,
+      teacher_assigned: allScoped.filter((d) => d.status === 'teacher_assigned').length,
+      teacher_answered: allScoped.filter((d) => d.status === 'teacher_answered').length,
+      reopened: allScoped.filter((d) => d.status === 'reopened').length,
+      resolved: allScoped.filter((d) => d.status === 'resolved').length,
+      unassigned: allScoped.filter((d) => !d.assignedTeacher?.id && ['escalated', 'reopened'].includes(d.status)).length,
+      assignedToMe: allScoped.filter((d) => d.assignedTeacher?.id && String(d.assignedTeacher.id) === String(userId)).length,
+      dueSoon: 0,
+      breached: 0,
+    };
+
+    allScoped.forEach((d) => {
+      if (['resolved', 'closed'].includes(d.status)) return;
+      const dl = d.slaDeadline || d.slaDueAt || new Date(new Date(d.createdAt).getTime() + 24 * 3600 * 1000);
+      const rem = new Date(dl).getTime() - now;
+      if (rem <= 0) counters.breached += 1;
+      else if (rem < 4 * 3600 * 1000) counters.dueSoon += 1;
+    });
+
+    const paginated = finalFiltered.slice(skip, skip + parseInt(limit, 10));
 
     return res.json({
       success: true,
-      queue,
-      totalCount: queue.length,
+      queue: paginated,
+      counters,
+      pagination: {
+        total: finalFiltered.length,
+        page: parseInt(page, 10),
+        pages: Math.ceil(finalFiltered.length / parseInt(limit, 10)),
+        limit: parseInt(limit, 10),
+      },
     });
   } catch (error) {
     res.status(500).json({ success: false, message: error.message });
@@ -932,7 +1450,7 @@ exports.getTeacherQueue = async (req, res) => {
 };
 
 /**
- * @desc    Get full doubt thread with messages and audit trail (owner or faculty only)
+ * @desc    Get full doubt thread with messages and audit trail (owner or faculty in scope only)
  * @route   GET /api/doubts/:id
  * @access  Protected
  */
@@ -954,6 +1472,24 @@ exports.getDoubtById = async (req, res) => {
         success: false,
         message: 'Access denied: You are not authorized to view this doubt.',
       });
+    }
+
+    // Course and branch isolation for teachers
+    if (userRole === 'teacher' && req.user.id !== 'master_admin_id') {
+      const teacherCourse = req.user.targetCourse || req.user.course;
+      if (teacherCourse && doubt.course && teacherCourse.toLowerCase() !== doubt.course.toLowerCase()) {
+        return res.status(403).json({
+          success: false,
+          message: `Access denied: You are assigned to course "${teacherCourse}" and cannot view doubts from course "${doubt.course}".`,
+        });
+      }
+      const teacherBranch = req.user.branch || req.user.stream;
+      if (teacherBranch && doubt.branch && teacherBranch.toLowerCase() !== doubt.branch.toLowerCase()) {
+        return res.status(403).json({
+          success: false,
+          message: `Access denied: You are assigned to branch "${teacherBranch}" and cannot view doubts from branch "${doubt.branch}".`,
+        });
+      }
     }
 
     // Stuck job sweeper on status poll: if stuck in processing > sweeper limit, mark as error
@@ -988,7 +1524,7 @@ exports.getDoubtById = async (req, res) => {
 /**
  * @desc    Serve private authenticated image attachment
  * @route   GET /api/doubts/:id/attachments/:index
- * @access  Protected (Student Owner or Faculty/Admin)
+ * @access  Protected (Student Owner or Faculty/Admin in scope)
  */
 exports.getAttachment = async (req, res) => {
   try {
@@ -1010,6 +1546,16 @@ exports.getAttachment = async (req, res) => {
       });
     }
 
+    if (userRole === 'teacher' && req.user.id !== 'master_admin_id') {
+      const teacherCourse = req.user.targetCourse || req.user.course;
+      if (teacherCourse && doubt.course && teacherCourse.toLowerCase() !== doubt.course.toLowerCase()) {
+        return res.status(403).json({
+          success: false,
+          message: `Access denied: You are not authorized to view attachments outside your course "${teacherCourse}".`,
+        });
+      }
+    }
+
     const attIndex = parseInt(index, 10);
     const attachment = doubt.attachments?.[attIndex];
     if (!attachment) {
@@ -1027,6 +1573,194 @@ exports.getAttachment = async (req, res) => {
     return res.status(404).json({ success: false, message: 'Attachment binary not found' });
   } catch (error) {
     res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+/**
+ * @desc    Get faculty saved reply templates
+ * @route   GET /api/doubts/templates
+ * @access  Protected (Teacher/Admin)
+ */
+exports.getTemplates = async (req, res) => {
+  try {
+    const teacherId = req.user._id || req.user.id;
+    const templates = await DoubtTemplate.find({ teacher: teacherId }).sort({ createdAt: -1 });
+    return res.json({ success: true, templates });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+/**
+ * @desc    Create a new saved reply template
+ * @route   POST /api/doubts/templates
+ * @access  Protected (Teacher/Admin)
+ */
+exports.createTemplate = async (req, res) => {
+  try {
+    const teacherId = req.user._id || req.user.id;
+    const { title, category = 'General', contentPlain = '', contentLatex = '' } = req.body || {};
+    if (!title || !title.trim()) {
+      return res.status(400).json({ success: false, message: 'Template title is required.' });
+    }
+    const template = await DoubtTemplate.create({
+      teacher: teacherId,
+      title: title.trim(),
+      category: category.trim(),
+      contentPlain: contentPlain.trim(),
+      contentLatex: contentLatex.trim(),
+    });
+    return res.json({ success: true, message: 'Template saved.', template });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+/**
+ * @desc    Delete a saved reply template
+ * @route   DELETE /api/doubts/templates/:id
+ * @access  Protected (Teacher/Admin)
+ */
+exports.deleteTemplate = async (req, res) => {
+  try {
+    const teacherId = req.user._id || req.user.id;
+    const { id } = req.params;
+    const deleted = await DoubtTemplate.findOneAndDelete({ _id: id, teacher: teacherId });
+    if (!deleted) {
+      return res.status(404).json({ success: false, message: 'Template not found or not owned by you.' });
+    }
+    return res.json({ success: true, message: 'Template deleted.' });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+/**
+ * @desc    Get user notifications with SLA breach checks
+ * @route   GET /api/doubts/notifications
+ * @access  Protected
+ */
+exports.getDoubtNotifications = async (req, res) => {
+  try {
+    const user = req.user;
+    const userId = user._id || user.id;
+    const userRole = String(user.role || '').toLowerCase();
+
+    // Background SLA breach detection: if unresolved doubt has passed deadline, alert assigned teacher & admin
+    const now = new Date();
+    const breachedDoubts = await Doubt.find({
+      status: { $in: ['escalated', 'teacher_assigned', 'reopened', 'clarification_requested'] },
+      $or: [
+        { slaDeadline: { $lt: now } },
+        { slaDueAt: { $lt: now } },
+      ],
+    });
+
+    for (const d of breachedDoubts) {
+      const existingBreachNotif = await Notification.findOne({
+        doubtId: d._id,
+        type: 'doubt_sla_breach',
+      });
+      if (!existingBreachNotif) {
+        const targets = [];
+        if (d.assignedTeacher?.id) targets.push(d.assignedTeacher.id);
+        targets.push('master_admin_id');
+
+        for (const tId of targets) {
+          try {
+            await Notification.create({
+              id: `notif_breach_${d._id}_${Date.now()}`,
+              title: `SLA Breached: ${d.doubtCode}`,
+              message: `Doubt ${d.doubtCode} (${d.topic}) has breached its 24-hour SLA deadline. Immediate action required.`,
+              type: 'doubt_sla_breach',
+              course: d.course,
+              branch: d.branch,
+              userId: tId,
+              doubtId: d._id,
+              targetRole: 'teacher',
+              isRead: false,
+            });
+          } catch (_) {}
+        }
+      }
+    }
+
+    // Query notifications for this user
+    const query = {
+      $or: [
+        { userId: userId },
+        { userId: String(userId) },
+      ],
+    };
+
+    if (['teacher', 'admin'].includes(userRole)) {
+      const teacherCourse = user.targetCourse || user.course;
+      const roleQuery = { targetRole: 'teacher', userId: { $exists: false } };
+      if (userRole === 'teacher' && teacherCourse) {
+        roleQuery.course = new RegExp(`^${teacherCourse}$`, 'i');
+      }
+      query.$or.push(roleQuery);
+    }
+
+    const notifications = await Notification.find(query)
+      .sort({ createdAt: -1 })
+      .limit(40);
+
+    const unreadCount = notifications.filter((n) => !n.isRead && !n.readAt).length;
+
+    return res.json({
+      success: true,
+      notifications,
+      unreadCount,
+    });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+/**
+ * @desc    Mark single notification as read
+ * @route   PUT /api/doubts/notifications/:id/read
+ * @access  Protected
+ */
+exports.markDoubtNotificationRead = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const notif = await Notification.findOneAndUpdate(
+      { $or: [{ _id: mongoose.Types.ObjectId.isValid(id) ? id : null }, { id }] },
+      { $set: { isRead: true, readAt: new Date() } },
+      { new: true }
+    );
+    if (!notif) {
+      return res.status(404).json({ success: false, message: 'Notification not found' });
+    }
+    return res.json({ success: true, notification: notif });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+/**
+ * @desc    Mark all user notifications as read
+ * @route   PUT /api/doubts/notifications/read-all
+ * @access  Protected
+ */
+exports.markAllDoubtNotificationsRead = async (req, res) => {
+  try {
+    const userId = req.user._id || req.user.id;
+    await Notification.updateMany(
+      {
+        $or: [
+          { userId },
+          { userId: String(userId) },
+        ],
+        isRead: false,
+      },
+      { $set: { isRead: true, readAt: new Date() } }
+    );
+    return res.json({ success: true, message: 'All notifications marked as read.' });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
   }
 };
 
