@@ -409,24 +409,29 @@ exports.askDoubt = async (req, res) => {
       attachments: doubt.attachments.map((a) => ({ url: a.url, fileName: a.fileName })),
     });
 
-    // 5. Check if AI Kill Switch is active (DOUBTS_AI_ENABLED=false)
-    const isAiEnabled = process.env.DOUBTS_AI_ENABLED !== 'false';
+    // 5. Check if AI Kill Switch is active (DOUBTS_AI_ENABLED=false) or GEMINI_API_KEY is missing
+    const hasApiKey = Boolean(process.env.GEMINI_API_KEY && process.env.GEMINI_API_KEY.trim());
+    const isAiEnabled = process.env.DOUBTS_AI_ENABLED !== 'false' && hasApiKey;
 
     if (!isAiEnabled) {
-      // Direct Escalation to Teacher Queue (Bypass AI step entirely)
+      // Direct Escalation to Teacher Queue (Bypass AI step entirely; NEVER fabricate answers)
       const slaDeadline = new Date(Date.now() + 24 * 60 * 60 * 1000);
       doubt.status = 'escalated';
       doubt.priority = 'normal';
       doubt.slaDeadline = slaDeadline;
       doubt.slaDueAt = slaDeadline;
       doubt.escalatedAt = new Date();
-      doubt.escalationReason = 'Direct routing to faculty (AI doubt solver is currently paused via maintenance policy).';
+      doubt.escalationReason = !hasApiKey
+        ? 'Direct routing to faculty (AI service key unconfigured; never fabricating answers).'
+        : 'Direct routing to faculty (AI doubt solver is currently paused via maintenance policy).';
       doubt.unreadByTeacher = true;
       doubt.auditTrail.push({
         status: 'escalated',
-        changedBy: 'System Policy Guard (AI Kill Switch Active)',
+        changedBy: 'System Policy Guard (AI Bypass / Missing Key)',
         role: 'system',
-        note: 'AI solver disabled via maintenance policy. Routed directly to faculty queue with 24-hour SLA.',
+        note: !hasApiKey
+          ? 'GEMINI_API_KEY is missing. Never fabricating answers; routed directly to faculty queue with 24-hour SLA.'
+          : 'AI solver disabled via maintenance policy. Routed directly to faculty queue with 24-hour SLA.',
       });
       await doubt.save();
 
@@ -438,7 +443,7 @@ exports.askDoubt = async (req, res) => {
         await Notification.create({
           id: `notif_esc_${doubt._id}_${Date.now()}`,
           title: `New Direct Faculty Doubt: ${doubt.doubtCode}`,
-          message: `Doubt ${doubt.doubtCode} (${doubt.topic}) was submitted directly to faculty under maintenance policy. SLA: 24 hours.`,
+          message: `Doubt ${doubt.doubtCode} (${doubt.topic}) was submitted directly to faculty. SLA: 24 hours.`,
           type: 'doubt_escalated',
           course: doubt.course,
           branch: doubt.branch,
@@ -450,7 +455,7 @@ exports.askDoubt = async (req, res) => {
 
       return res.status(202).json({
         success: true,
-        message: 'AI solver is currently paused. Your question has been forwarded directly to faculty for review within 24 hours.',
+        message: 'AI solver is currently offline. Your question has been forwarded directly to faculty for review within 24 hours.',
         doubtId: doubt._id,
         doubtCode: doubt.doubtCode,
         status: 'escalated',
