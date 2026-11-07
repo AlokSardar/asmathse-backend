@@ -103,7 +103,8 @@ async function captureViews() {
 
   // 1. TEACHER / ADMIN VIEWS: Analytics Dashboard & FAQ Library
   console.log('\n[Capture 1]: Logging in as Master Admin to capture full Analytics...');
-  await loginAs('admin@asmaths.com', 'AdminPassword123!', 'admin');
+  const adminPassword = process.env.ADMIN_PASSWORD || 'AdminPassword123!';
+  await loginAs('admin@asmaths.com', adminPassword, 'admin');
 
   // Navigate to Doubts Escalator
   await page.evaluate(() => {
@@ -158,7 +159,8 @@ async function captureViews() {
 
   // 2. STUDENT VIEWS: Similar Doubts Search & Rating View
   console.log('\n[Capture 2]: Logging in as Student to capture Composer Search & Solution Rating...');
-  await loginAs('student@asmaths.edu', 'TestPassword123!', 'student');
+  const studentPassword = process.env.TEST_STUDENT_PASSWORD || 'TestPassword123!';
+  await loginAs('student@asmaths.edu', studentPassword, 'student');
 
   // Navigate to Doubts / Ask Doubt
   await page.evaluate(() => {

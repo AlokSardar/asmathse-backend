@@ -738,18 +738,76 @@ const getMySubmissions = async (req, res) => {
 };
 
 const { generateDoubtSolutionForStudent } = require('../services/geminiService');
+const DoubtQuota = require('../models/DoubtQuota');
 
-// @desc    Solve student mathematical doubt with intent-aware Gemini AI
+// @desc    Solve student mathematical doubt with intent-aware Gemini AI (Legacy Endpoint with full security controls)
 // @route   POST /api/student/solve-doubt
-// @access  Public / Student
+// @access  Protected / Student (Backward Compatible with Deployment Window)
 const solveStudentDoubt = async (req, res) => {
+  // 1. Env Flag: Check if legacy endpoint is retired
+  const isLegacyEnabled = process.env.LEGACY_DOUBT_ENDPOINT_ENABLED !== 'false';
+  if (!isLegacyEnabled) {
+    return res.status(410).json({
+      success: false,
+      status: 410,
+      error: 'ENDPOINT_DEPRECATED',
+      message: 'The legacy doubt solving endpoint has been retired. Please refresh your browser to use the updated Doubts Escalator.',
+    });
+  }
+
+  // 2. Kill Switch: DOUBTS_AI_ENABLED and API Key guard
+  const hasApiKey = Boolean(process.env.GEMINI_API_KEY && process.env.GEMINI_API_KEY.trim());
+  const isAiEnabled = process.env.DOUBTS_AI_ENABLED !== 'false' && hasApiKey;
+  if (!isAiEnabled) {
+    return res.status(503).json({
+      success: false,
+      status: 503,
+      error: 'AI_SERVICE_UNAVAILABLE',
+      message: 'AI doubt solving is currently paused for system maintenance. Please refresh your browser to submit your doubt directly to your faculty mentor.',
+    });
+  }
+
+  const studentId = String(req.user?._id || req.user?.id || req.body?.studentId || req.ip || 'legacy_student');
+  const DAILY_STUDENT_DOUBT_LIMIT = parseInt(process.env.DAILY_STUDENT_DOUBT_LIMIT || '5', 10);
+  const DAILY_STUDENT_TOTAL_DOUBT_LIMIT = parseInt(process.env.DAILY_STUDENT_TOTAL_DOUBT_LIMIT || '10', 10);
+
+  // 3. Daily Total Submission Cap Guard
+  const totalCheck = await DoubtQuota.reserveTotalStudentLimit(studentId, DAILY_STUDENT_TOTAL_DOUBT_LIMIT);
+  if (!totalCheck.allowed) {
+    return res.status(429).json({
+      success: false,
+      status: 429,
+      error: 'DAILY_TOTAL_LIMIT_EXCEEDED',
+      message: `You have reached your daily total limit (${totalCheck.limit} doubts/day). Please review your existing tickets or ask again tomorrow!`,
+      limit: totalCheck.limit,
+      current: totalCheck.current,
+    });
+  }
+
+  // 4. Atomic AI Quota Reservation Guard
+  const quotaCheck = await DoubtQuota.reserveStudentQuota(studentId, DAILY_STUDENT_DOUBT_LIMIT);
+  if (!quotaCheck.allowed) {
+    await DoubtQuota.rollbackTotalStudentLimit(studentId);
+    return res.status(429).json({
+      success: false,
+      status: 429,
+      error: 'STUDENT_QUOTA_EXCEEDED',
+      message: `You have reached your daily AI doubt limit (${quotaCheck.limit} queries/day). Please refresh the app to submit your doubt directly to faculty.`,
+      limit: quotaCheck.limit,
+      current: quotaCheck.current,
+      canEscalate: true,
+    });
+  }
+
   try {
     const { questionText, latexEquation, topic, course, stream, semester } = req.body || {};
 
     if (!questionText && !latexEquation && !topic) {
+      await DoubtQuota.rollbackStudentQuota(studentId);
+      await DoubtQuota.rollbackTotalStudentLimit(studentId);
       return res.status(400).json({
         success: false,
-        message: 'Please provide questionText, latexEquation, or topic to solve.'
+        message: 'Please provide questionText, latexEquation, or topic to solve.',
       });
     }
 
@@ -767,10 +825,13 @@ const solveStudentDoubt = async (req, res) => {
       aiSolution,
     });
   } catch (error) {
-    console.error('Error in solveStudentDoubt API handler:', error);
+    // 5. Automatic quota refund on failure: Student is never penalized for errors
+    await DoubtQuota.rollbackStudentQuota(studentId);
+    await DoubtQuota.rollbackTotalStudentLimit(studentId);
+    console.error('Error in solveStudentDoubt API handler:', error.message);
     return res.status(500).json({
       success: false,
-      message: 'Failed to generate doubt resolution',
+      message: 'Failed to generate doubt resolution. Your daily quota has been refunded.',
       error: error.message,
     });
   }

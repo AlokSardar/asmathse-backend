@@ -246,7 +246,8 @@ async function captureViews() {
     const res = await fetch('http://localhost:5000/api/auth/login', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ email: 'mukherjee.eng@asmaths.edu', password: 'TestPassword123!' }),
+      const teacherPassword = process.env.TEST_TEACHER_PASSWORD || 'TestPassword123!';
+      body: JSON.stringify({ email: 'mukherjee.eng@asmaths.edu', password: teacherPassword }),
     });
     const authData = await res.json();
     await page.evaluate((data) => {

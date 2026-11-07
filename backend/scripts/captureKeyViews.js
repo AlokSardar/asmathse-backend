@@ -204,7 +204,8 @@ async function run() {
   const loginRes = await fetch('http://localhost:5000/api/auth/login', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ email: 'student@asmaths.edu', password: 'TestPassword123!' }),
+    const testPassword = process.env.TEST_STUDENT_PASSWORD || 'TestPassword123!';
+    body: JSON.stringify({ email: 'student@asmaths.edu', password: testPassword }),
   });
   const loginData = await loginRes.json();
   const token = loginData.token;

@@ -1,10 +1,16 @@
 /**
  * Safe Test Data Cleanup Utility for asmaths_lms Database
  *
+ * Rules:
+ * - By default, NEVER deletes any users (even with --confirm).
+ * - Users can ONLY be deleted if BOTH --delete-users AND --emails=email1,email2,... are explicitly passed.
+ * - Prints exact list of document ObjectIds before executing any deletion.
+ * - Enforces zero-tolerance safety guard against touching @gmail.com or admin@asmaths.com.
+ *
  * Usage:
- *   node cleanTestData.js            -> Dry-run mode (Default: lists all test records, deletes nothing)
- *   node cleanTestData.js --dry-run  -> Explicit dry-run mode
- *   node cleanTestData.js --confirm  -> Executes deletion with strict safety assertions
+ *   node scripts/cleanTestData.js            -> Dry-run (lists all test doubts/messages/notifications/FAQs)
+ *   node scripts/cleanTestData.js --confirm  -> Safely deletes only test doubts, messages, notifications, quotas, FAQs (leaves users intact)
+ *   node scripts/cleanTestData.js --confirm --delete-users --emails=student@asmaths.edu,student2@asmaths.edu -> Deletes specific approved test users
  */
 
 const mongoose = require('mongoose');
@@ -18,7 +24,6 @@ const DoubtQuota = require('../models/DoubtQuota');
 const Notification = require('../models/Notification');
 const DoubtFaq = require('../models/DoubtFaq');
 
-// Strict whitelist of known test emails generated during development/tests
 const KNOWN_TEST_EMAILS = [
   'student@asmaths.edu',
   'student2@asmaths.edu',
@@ -31,12 +36,13 @@ const KNOWN_TEST_EMAILS = [
   'smoke.teacher.2026@asmaths.edu',
 ];
 
-// Production accounts that MUST NEVER be touched
 const PROTECTED_ACCOUNTS = ['admin@asmaths.com'];
 
 async function run() {
   const isConfirm = process.argv.includes('--confirm');
-  const mode = isConfirm ? 'CONFIRM (DESTRUCTIVE)' : 'DRY-RUN (AUDIT ONLY)';
+  const allowDeleteUsers = process.argv.includes('--delete-users');
+  const emailsArg = process.argv.find((a) => a.startsWith('--emails='));
+  const explicitEmails = emailsArg ? emailsArg.replace('--emails=', '').split(',').map((e) => e.trim().toLowerCase()) : [];
 
   await mongoose.connect(process.env.MONGO_URI);
   const dbName = mongoose.connection.name;
@@ -44,7 +50,8 @@ async function run() {
   console.log('='.repeat(75));
   console.log(`DATABASE TEST DATA AUDIT & CLEANUP TOOL`);
   console.log(`Target Database : ${dbName}`);
-  console.log(`Execution Mode  : ${mode}`);
+  console.log(`Mode            : ${isConfirm ? 'CONFIRM (DESTRUCTIVE)' : 'DRY-RUN (AUDIT ONLY)'}`);
+  console.log(`User Deletion   : ${allowDeleteUsers ? 'ENABLED (Explicit emails required)' : 'STRICTLY DISABLED (Users will NOT be touched)'}`);
   console.log('='.repeat(75));
 
   // 1. Identify Test Users
@@ -68,67 +75,100 @@ async function run() {
   });
   const testDoubtIds = testDoubts.map((d) => d._id);
 
-  // 3. Identify Test Doubt Messages
+  // 3. Identify Test Messages
   const testMessages = await DoubtMessage.find({
     $or: [
       { doubtId: { $in: testDoubtIds } },
       { authorId: { $in: testUserIds.map(String) } },
     ],
   });
+  const testMessageIds = testMessages.map((m) => m._id);
 
   // 4. Identify Test Quota Records
   const testQuotas = await DoubtQuota.find({
     student: { $in: testUserIds },
   });
+  const testQuotaIds = testQuotas.map((q) => q._id);
 
   // 5. Identify Test Notifications
   const testNotifications = await Notification.find({
-    userId: { $in: testUserIds },
+    $or: [
+      { userId: { $in: testUserIds } },
+      { doubtId: { $in: testDoubtIds } },
+    ],
   });
+  const testNotificationIds = testNotifications.map((n) => n._id);
 
-  // 6. Identify Test FAQs (created from test doubts)
+  // 6. Identify Test FAQs
   const testFaqs = await DoubtFaq.find({
     $or: [
       { originalDoubtId: { $in: testDoubtIds } },
       { title: /limit of \(sin x\)\/x/i },
     ],
   });
+  const testFaqIds = testFaqs.map((f) => f._id);
 
-  console.log('\n--- AUDIT FINDINGS ---');
-  console.log(`1. Test Users Identified        : ${testUsers.length}`);
-  testUsers.forEach((u) => console.log(`   - [${u.role}] ${u.email} (${u.name})`));
+  // Print exact document IDs
+  console.log('\n--- TARGET DOCUMENT IDS FOR CLEANUP ---');
+  console.log(`Doubts to remove (${testDoubtIds.length} records):`);
+  console.log(JSON.stringify(testDoubtIds, null, 2));
 
-  console.log(`\n2. Test Doubts Identified       : ${testDoubts.length}`);
-  testDoubts.forEach((d) => console.log(`   - ${d.doubtCode} | Status: ${d.status} | Title: "${d.title}"`));
+  console.log(`\nDoubt Messages to remove (${testMessageIds.length} records):`);
+  console.log(JSON.stringify(testMessageIds, null, 2));
 
-  console.log(`\n3. Test Messages Identified     : ${testMessages.length}`);
-  console.log(`4. Test Quota Records Identified: ${testQuotas.length}`);
-  console.log(`5. Test Notifications Identified: ${testNotifications.length}`);
-  console.log(`6. Test FAQs Identified         : ${testFaqs.length}`);
-  testFaqs.forEach((f) => console.log(`   - FAQ: "${f.title}" (${f.subject})`));
+  console.log(`\nNotifications to remove (${testNotificationIds.length} records):`);
+  console.log(JSON.stringify(testNotificationIds, null, 2));
+
+  console.log(`\nQuota Records to remove (${testQuotaIds.length} records):`);
+  console.log(JSON.stringify(testQuotaIds, null, 2));
+
+  console.log(`\nFAQ entries to remove (${testFaqIds.length} records):`);
+  console.log(JSON.stringify(testFaqIds, null, 2));
+
+  console.log(`\nTest User Accounts Present in Database (${testUsers.length} accounts):`);
+  testUsers.forEach((u) => console.log(`   - ID: ${u._id} | [${u.role}] ${u.email} (${u.name})`));
+
+  let usersToDelete = [];
+  if (allowDeleteUsers) {
+    if (explicitEmails.length === 0) {
+      console.error('\n🚨 ERROR: --delete-users was passed but no --emails=... list provided. Aborting user deletion for safety.');
+      process.exit(1);
+    }
+    usersToDelete = testUsers.filter((u) => explicitEmails.includes(u.email.toLowerCase()));
+    console.log(`\n⚠️  USERS EXPLICITLY MARKED FOR DELETION (${usersToDelete.length} accounts):`);
+    usersToDelete.forEach((u) => console.log(`   - ID: ${u._id} | ${u.email}`));
+  } else {
+    console.log('\n🔒 POLICY ENFORCED: Zero users will be deleted. All 7 test accounts remain in database.');
+  }
 
   console.log('\n' + '='.repeat(75));
 
   if (!isConfirm) {
-    console.log('ℹ️  DRY-RUN COMPLETE: No data was modified or deleted.');
-    console.log('   To permanently remove these test records, rerun with:');
+    console.log('ℹ️  DRY-RUN COMPLETE: No database records were modified or deleted.');
+    console.log('   To permanently remove test doubts, messages, notifications, and FAQs without touching users:');
     console.log('   node scripts/cleanTestData.js --confirm\n');
   } else {
     console.log('⚡ EXECUTING DELETIONS (--confirm was passed)...');
 
-    const deletedMsgs = await DoubtMessage.deleteMany({ _id: { $in: testMessages.map((m) => m._id) } });
+    const deletedMsgs = await DoubtMessage.deleteMany({ _id: { $in: testMessageIds } });
     const deletedDoubts = await Doubt.deleteMany({ _id: { $in: testDoubtIds } });
-    const deletedQuotas = await DoubtQuota.deleteMany({ _id: { $in: testQuotas.map((q) => q._id) } });
-    const deletedNotifs = await Notification.deleteMany({ _id: { $in: testNotifications.map((n) => n._id) } });
-    const deletedFaqs = await DoubtFaq.deleteMany({ _id: { $in: testFaqs.map((f) => f._id) } });
-    const deletedUsers = await User.deleteMany({ _id: { $in: testUserIds } });
+    const deletedQuotas = await DoubtQuota.deleteMany({ _id: { $in: testQuotaIds } });
+    const deletedNotifs = await Notification.deleteMany({ _id: { $in: testNotificationIds } });
+    const deletedFaqs = await DoubtFaq.deleteMany({ _id: { $in: testFaqIds } });
 
-    console.log(`✅ Test Messages Deleted    : ${deletedMsgs.deletedCount}`);
-    console.log(`✅ Test Doubts Deleted      : ${deletedDoubts.deletedCount}`);
-    console.log(`✅ Test Quotas Deleted      : ${deletedQuotas.deletedCount}`);
-    console.log(`✅ Test Notifications Deleted: ${deletedNotifs.deletedCount}`);
-    console.log(`✅ Test FAQs Deleted        : ${deletedFaqs.deletedCount}`);
-    console.log(`✅ Test Users Deleted       : ${deletedUsers.deletedCount}`);
+    console.log(`✅ Doubt Messages Deleted    : ${deletedMsgs.deletedCount}`);
+    console.log(`✅ Doubts Deleted            : ${deletedDoubts.deletedCount}`);
+    console.log(`✅ Quotas Deleted            : ${deletedQuotas.deletedCount}`);
+    console.log(`✅ Notifications Deleted     : ${deletedNotifs.deletedCount}`);
+    console.log(`✅ FAQs Deleted              : ${deletedFaqs.deletedCount}`);
+
+    if (allowDeleteUsers && usersToDelete.length > 0) {
+      const deletedUsers = await User.deleteMany({ _id: { $in: usersToDelete.map((u) => u._id) } });
+      console.log(`✅ Explicit Users Deleted    : ${deletedUsers.deletedCount}`);
+    } else {
+      console.log(`🔒 User Accounts Untouched   : ${testUsers.length} test accounts preserved.`);
+    }
+
     console.log('='.repeat(75));
     console.log('🎉 Cleanup successfully completed. Real student accounts and exams untouched.\n');
   }

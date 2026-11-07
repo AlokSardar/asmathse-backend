@@ -118,6 +118,7 @@ async function runPhase2_5Verification() {
   };
 
   // Upsert test user documents in MongoDB so User.findById(decoded.id) succeeds
+  const testPassword = process.env.TEST_PASSWORD || 'TestPassword123!';
   await User.findByIdAndUpdate(
     studentA.id,
     {
@@ -129,11 +130,11 @@ async function runPhase2_5Verification() {
       branch: studentA.branch,
       stream: studentA.stream,
       semester: studentA.semester,
-      password: 'TestPassword123!',
+      password: testPassword,
       isApproved: true,
       profileCompleted: true,
     },
-    { upsert: true, new: true }
+    { upsert: true, returnDocument: 'after' }
   );
 
   await User.findByIdAndUpdate(
@@ -147,11 +148,11 @@ async function runPhase2_5Verification() {
       branch: studentB.branch,
       stream: studentB.stream,
       semester: studentB.semester,
-      password: 'TestPassword123!',
+      password: testPassword,
       isApproved: true,
       profileCompleted: true,
     },
-    { upsert: true, new: true }
+    { upsert: true, returnDocument: 'after' }
   );
 
   await User.findByIdAndUpdate(
@@ -164,11 +165,11 @@ async function runPhase2_5Verification() {
       targetCourse: teacher1Eng.targetCourse,
       branch: teacher1Eng.branch,
       stream: teacher1Eng.stream,
-      password: 'TestPassword123!',
+      password: testPassword,
       isApproved: true,
       profileCompleted: true,
     },
-    { upsert: true, new: true }
+    { upsert: true, returnDocument: 'after' }
   );
 
   await User.findByIdAndUpdate(
@@ -181,11 +182,11 @@ async function runPhase2_5Verification() {
       targetCourse: teacher2Bsc.targetCourse,
       branch: teacher2Bsc.branch,
       stream: teacher2Bsc.stream,
-      password: 'TestPassword123!',
+      password: testPassword,
       isApproved: true,
       profileCompleted: true,
     },
-    { upsert: true, new: true }
+    { upsert: true, returnDocument: 'after' }
   );
 
   const tokenStudentA = jwt.sign(studentA, JWT_SECRET, { expiresIn: '2h' });

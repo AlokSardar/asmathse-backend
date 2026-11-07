@@ -248,9 +248,24 @@ exports.askDoubt = async (req, res) => {
     const effectiveTitle = (problemText || title || '').trim();
     const effectiveLatex = (mathLatex || '').trim();
 
-    // 1. Atomic Quota Reservation
+    // 0. Atomic Total Daily Cap (Direct-to-faculty + AI, default: 10 per day)
+    // Prevents escalation flooding during AI maintenance or direct teacher bursts
+    const DAILY_STUDENT_TOTAL_DOUBT_LIMIT = parseInt(process.env.DAILY_STUDENT_TOTAL_DOUBT_LIMIT || '10', 10);
+    const totalCheck = await DoubtQuota.reserveTotalStudentLimit(studentId, DAILY_STUDENT_TOTAL_DOUBT_LIMIT);
+    if (!totalCheck.allowed) {
+      return res.status(429).json({
+        success: false,
+        error: 'DAILY_TOTAL_LIMIT_EXCEEDED',
+        message: `You have reached your daily limit of ${totalCheck.limit} total doubts for today. Our faculty and mentors are working to provide thorough solutions—please review your existing tickets or ask again tomorrow!`,
+        limit: totalCheck.limit,
+        current: totalCheck.current,
+      });
+    }
+
+    // 1. Atomic AI Quota Reservation
     const quotaCheck = await DoubtQuota.reserveStudentQuota(studentId, DAILY_STUDENT_DOUBT_LIMIT);
     if (!quotaCheck.allowed) {
+      await DoubtQuota.rollbackTotalStudentLimit(studentId);
       return res.status(429).json({
         success: false,
         error: 'STUDENT_QUOTA_EXCEEDED',
@@ -295,6 +310,7 @@ exports.askDoubt = async (req, res) => {
     // Enforce maximum 3 images per doubt
     if (filesToProcess.length > 3) {
       await DoubtQuota.rollbackStudentQuota(studentId);
+      await DoubtQuota.rollbackTotalStudentLimit(studentId);
       return res.status(400).json({
         success: false,
         message: 'Maximum 3 images allowed per doubt. Please select at most 3 images.',
@@ -308,6 +324,7 @@ exports.askDoubt = async (req, res) => {
       if (!magic.valid) {
         // Rollback reserved quota on validation failure
         await DoubtQuota.rollbackStudentQuota(studentId);
+        await DoubtQuota.rollbackTotalStudentLimit(studentId);
         return res.status(400).json({
           success: false,
           message: 'Invalid attachment type. Only real JPEG, PNG, WebP or PDF files are accepted.',
@@ -323,6 +340,7 @@ exports.askDoubt = async (req, res) => {
         compressedResult = await compressImageBuffer(sanitizedBuffer, magic.mimeType);
       } catch (compErr) {
         await DoubtQuota.rollbackStudentQuota(studentId);
+        await DoubtQuota.rollbackTotalStudentLimit(studentId);
         return res.status(400).json({
           success: false,
           message: `Attachment error for "${item.fileName}": ${compErr.message}`,
@@ -331,6 +349,7 @@ exports.askDoubt = async (req, res) => {
 
       if (compressedResult.buffer.length > 512 * 1024) {
         await DoubtQuota.rollbackStudentQuota(studentId);
+        await DoubtQuota.rollbackTotalStudentLimit(studentId);
         return res.status(400).json({
           success: false,
           message: `Attachment "${item.fileName}" exceeds maximum allowed size of 500 KB after compression. Please upload a smaller or clearer photo.`,
@@ -351,6 +370,7 @@ exports.askDoubt = async (req, res) => {
     // Ensure question has content
     if (!effectiveTitle && !effectiveLatex && processedAttachments.length === 0) {
       await DoubtQuota.rollbackStudentQuota(studentId);
+      await DoubtQuota.rollbackTotalStudentLimit(studentId);
       return res.status(400).json({
         success: false,
         message: 'Please provide question text, LaTeX equations, or upload a photo of the problem.',

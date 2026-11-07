@@ -46,10 +46,12 @@ const attachStudentContext = async (req, res, next) => {
   next();
 };
 
-// Legacy Doubt Solving Endpoints: preserved with attachStudentContext and solveStudentDoubt
+const { doubtLimiter } = require('../middleware/securityMiddleware');
+
+// Legacy Doubt Solving Endpoints: preserved with attachStudentContext, doubtLimiter and solveStudentDoubt
 // for 100% seamless backwards compatibility during deployment window.
-router.post('/solve-doubt', attachStudentContext, solveStudentDoubt);
-router.post('/doubt', attachStudentContext, solveStudentDoubt);
+router.post('/solve-doubt', attachStudentContext, doubtLimiter, solveStudentDoubt);
+router.post('/doubt', attachStudentContext, doubtLimiter, solveStudentDoubt);
 
 // Public / Flexible Student Submission Endpoints (persists to MongoDB Atlas)
 router.post('/submit-exam', attachStudentContext, submitAssignment);

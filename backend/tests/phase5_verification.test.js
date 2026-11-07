@@ -31,9 +31,11 @@ async function runPhase5Verification() {
 
   // 1. Authenticate Actors
   console.log('\n[STEP 1]: Authenticating Test Actors...');
+  const testPassword = process.env.TEST_PASSWORD || 'TestPassword123!';
+  const adminPassword = process.env.ADMIN_PASSWORD || 'AdminPassword123!';
   const studentRes = await api('/auth/login', {
     method: 'POST',
-    body: JSON.stringify({ email: 'student@asmaths.edu', password: 'TestPassword123!' }),
+    body: JSON.stringify({ email: 'student@asmaths.edu', password: testPassword }),
   });
   assert.strictEqual(studentRes.status, 200, 'Student login should succeed');
   const studentToken = studentRes.data.token;
@@ -41,7 +43,7 @@ async function runPhase5Verification() {
 
   const teacherRes = await api('/auth/login', {
     method: 'POST',
-    body: JSON.stringify({ email: 'mukherjee.eng@asmaths.edu', password: 'TestPassword123!' }),
+    body: JSON.stringify({ email: 'mukherjee.eng@asmaths.edu', password: testPassword }),
   });
   assert.strictEqual(teacherRes.status, 200, 'Engineering Teacher login should succeed');
   const teacherToken = teacherRes.data.token;
@@ -49,7 +51,7 @@ async function runPhase5Verification() {
 
   const adminRes = await api('/auth/login', {
     method: 'POST',
-    body: JSON.stringify({ email: 'admin@asmaths.com', password: 'AdminPassword123!' }),
+    body: JSON.stringify({ email: 'admin@asmaths.com', password: adminPassword }),
   });
   assert.strictEqual(adminRes.status, 200, 'Admin login should succeed');
   const adminToken = adminRes.data.token;

@@ -41,9 +41,11 @@ async function runRegressionSuite() {
 
   // 2. Authentication Flow (Student, Teacher, Admin)
   console.log('\n[TEST 2]: Verifying User Authentication Across Roles...');
+  const testPassword = process.env.TEST_PASSWORD || 'TestPassword123!';
+  const adminPassword = process.env.ADMIN_PASSWORD || 'AdminPassword123!';
   const studentAuth = await api('/auth/login', {
     method: 'POST',
-    body: JSON.stringify({ email: 'student@asmaths.edu', password: 'TestPassword123!' }),
+    body: JSON.stringify({ email: 'student@asmaths.edu', password: testPassword }),
   });
   assert.strictEqual(studentAuth.status, 200, 'Student login must succeed');
   assert.strictEqual(studentAuth.data.role, 'student');
@@ -51,7 +53,7 @@ async function runRegressionSuite() {
 
   const teacherAuth = await api('/auth/login', {
     method: 'POST',
-    body: JSON.stringify({ email: 'mukherjee.eng@asmaths.edu', password: 'TestPassword123!' }),
+    body: JSON.stringify({ email: 'mukherjee.eng@asmaths.edu', password: testPassword }),
   });
   assert.strictEqual(teacherAuth.status, 200, 'Teacher login must succeed');
   assert.strictEqual(teacherAuth.data.role, 'teacher');
@@ -59,7 +61,7 @@ async function runRegressionSuite() {
 
   const adminAuth = await api('/auth/login', {
     method: 'POST',
-    body: JSON.stringify({ email: 'admin@asmaths.com', password: 'AdminPassword123!' }),
+    body: JSON.stringify({ email: 'admin@asmaths.com', password: adminPassword }),
   });
   assert.strictEqual(adminAuth.status, 200, 'Admin login must succeed');
   assert.strictEqual(adminAuth.data.role, 'admin');
@@ -167,6 +169,10 @@ async function runRegressionSuite() {
   };
 
   await mongoose.connect(process.env.MONGO_URI);
+  const StudentDailyQuota = mongoose.models.StudentDailyQuota;
+  const today = new Date().toISOString().slice(0, 10);
+  await StudentDailyQuota.deleteMany({ studentId: studentAuth.data.id || studentAuth.data._id, date: today });
+
   await askDoubt(mockReq, mockRes);
 
   assert.strictEqual(responseStatusCode, 202, 'Kill switch request should return 202');

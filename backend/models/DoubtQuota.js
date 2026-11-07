@@ -18,6 +18,11 @@ const studentDailyQuotaSchema = new mongoose.Schema(
       default: 0,
       min: 0,
     },
+    totalSubmitted: {
+      type: Number,
+      default: 0,
+      min: 0,
+    },
   },
   { timestamps: true }
 );
@@ -77,7 +82,7 @@ doubtQuotaSchema.statics.reserveStudentQuota = async function (studentId, limit 
   const updated = await StudentDailyQuota.findOneAndUpdate(
     { date: today, studentId: studentKey, count: { $lt: limit } },
     { $inc: { count: 1 } },
-    { new: true }
+    { returnDocument: 'after' }
   );
 
   if (!updated) {
@@ -110,6 +115,59 @@ doubtQuotaSchema.statics.rollbackStudentQuota = async function (studentId) {
   await StudentDailyQuota.updateOne(
     { date: today, studentId: studentKey, count: { $gt: 0 } },
     { $inc: { count: -1 } }
+  );
+};
+
+/**
+ * Atomic reservation of student daily TOTAL submissions (AI + Direct-to-Teacher):
+ * Enforces DAILY_STUDENT_TOTAL_DOUBT_LIMIT (default: 10).
+ * Prevents flooding faculty queues during AI outages or direct-to-teacher bursts.
+ */
+doubtQuotaSchema.statics.reserveTotalStudentLimit = async function (studentId, limit = 10) {
+  const today = new Date().toISOString().slice(0, 10);
+  const studentKey = String(studentId);
+
+  await StudentDailyQuota.updateOne(
+    { date: today, studentId: studentKey },
+    { $setOnInsert: { count: 0, totalSubmitted: 0 } },
+    { upsert: true }
+  );
+
+  const updated = await StudentDailyQuota.findOneAndUpdate(
+    { date: today, studentId: studentKey, totalSubmitted: { $lt: limit } },
+    { $inc: { totalSubmitted: 1 } },
+    { returnDocument: 'after' }
+  );
+
+  if (!updated) {
+    const existing = await StudentDailyQuota.findOne({ date: today, studentId: studentKey });
+    const current = existing ? (existing.totalSubmitted !== undefined ? existing.totalSubmitted : existing.count) : limit;
+    return {
+      allowed: false,
+      current,
+      limit,
+      remaining: 0,
+    };
+  }
+
+  return {
+    allowed: true,
+    current: updated.totalSubmitted,
+    limit,
+    remaining: Math.max(0, limit - updated.totalSubmitted),
+  };
+};
+
+/**
+ * Rollback student daily total submission count (e.g. if file validation fails before ticket is created)
+ */
+doubtQuotaSchema.statics.rollbackTotalStudentLimit = async function (studentId) {
+  const today = new Date().toISOString().slice(0, 10);
+  const studentKey = String(studentId);
+
+  await StudentDailyQuota.updateOne(
+    { date: today, studentId: studentKey, totalSubmitted: { $gt: 0 } },
+    { $inc: { totalSubmitted: -1 } }
   );
 };
 

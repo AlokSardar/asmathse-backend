@@ -54,12 +54,14 @@ async function runAllVerificationTests() {
 
   // 1. Authenticate All Personas
   console.log('1. Authenticating test personas with live credentials...');
-  const studentA = await login('student@asmaths.edu', 'TestPassword123!');
-  const studentB = await login('student2@asmaths.edu', 'TestPassword123!');
-  const teacherEng = await login('mukherjee.eng@asmaths.edu', 'TestPassword123!');
-  const teacherEng2 = await login('ghosh.eng@asmaths.edu', 'TestPassword123!');
-  const teacherBsc = await login('banerjee.bsc@asmaths.edu', 'TestPassword123!');
-  const admin = await login('admin@asmaths.com', 'AdminPassword123!');
+  const testPassword = process.env.TEST_PASSWORD || 'TestPassword123!';
+  const adminPassword = process.env.ADMIN_PASSWORD || 'AdminPassword123!';
+  const studentA = await login('student@asmaths.edu', testPassword);
+  const studentB = await login('student2@asmaths.edu', testPassword);
+  const teacherEng = await login('mukherjee.eng@asmaths.edu', testPassword);
+  const teacherEng2 = await login('ghosh.eng@asmaths.edu', testPassword);
+  const teacherBsc = await login('banerjee.bsc@asmaths.edu', testPassword);
+  const admin = await login('admin@asmaths.com', adminPassword);
 
   console.log('   ✓ Student A (Engineering): Authenticated');
   console.log('   ✓ Student B (Engineering): Authenticated');
