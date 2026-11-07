@@ -172,6 +172,46 @@ doubtQuotaSchema.statics.rollbackTotalStudentLimit = async function (studentId) 
 };
 
 /**
+ * Atomic reservation & check of platform-wide global daily AI call cap:
+ * Enforces GLOBAL_DAILY_AI_REQUEST_CAP (default: 40) across all Gemini calls (transcription + explanations + fallbacks).
+ * When cap is reached, new doubts go straight to faculty queue with honest explanation.
+ */
+doubtQuotaSchema.statics.isGlobalAiCapReached = async function (cap = 40) {
+  const today = new Date().toISOString().slice(0, 10);
+  const record = await this.findOne({ date: today }).lean();
+  const totalCalls = record ? (record.totalQueries || 0) : 0;
+  return {
+    capReached: totalCalls >= cap,
+    totalCalls,
+    cap,
+    remaining: Math.max(0, cap - totalCalls),
+  };
+};
+
+/**
+ * Record a real executed Gemini API call in platform telemetry:
+ * Counts every actual call including transcription attempts and fallback explanation attempts.
+ */
+doubtQuotaSchema.statics.recordAiCall = async function (modelName = 'gemini-3.8-flash', isFallback = false) {
+  const today = new Date().toISOString().slice(0, 10);
+  const safeModelKey = String(modelName).replace(/\./g, '_');
+
+  const incUpdate = {
+    totalQueries: 1,
+    [`modelCounts.${safeModelKey}`]: 1,
+  };
+  if (isFallback) {
+    incUpdate.fallbackQueries = 1;
+  }
+
+  await this.updateOne(
+    { date: today },
+    { $inc: incUpdate },
+    { upsert: true }
+  );
+};
+
+/**
  * Read-only status check of student daily quota (without consuming)
  */
 doubtQuotaSchema.statics.getStudentQuotaStatus = async function (studentId, limit = 5) {

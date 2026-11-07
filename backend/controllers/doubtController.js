@@ -124,18 +124,37 @@ async function processDoubtJob(doubtId, jobType = 'initial') {
         });
       } catch (transcribeErr) {
         console.error(`Transcription job failed for doubt ${doubtId}:`, transcribeErr.message);
-        const failType = String(transcribeErr.message).includes('429') ? '429' : (String(transcribeErr.message).includes('timed out') ? 'timeout' : '5xx');
+        const isQuota429 = String(transcribeErr.message).includes('429') || String(transcribeErr.message).includes('RESOURCE_EXHAUSTED');
+        const failType = isQuota429 ? '429' : (String(transcribeErr.message).includes('timed out') ? 'timeout' : '5xx');
         await DoubtQuota.recordFailure(failType).catch(() => {});
-        doubt.status = 'error';
-        doubt.lastErrorMessage = transcribeErr.message;
-        doubt.auditTrail.push({
-          status: 'error',
-          changedBy: 'System',
-          role: 'system',
-          note: `Transcription error: ${transcribeErr.message}`,
-        });
+
+        if (isQuota429) {
+          const slaDeadline = new Date(Date.now() + 24 * 60 * 60 * 1000);
+          doubt.status = 'escalated';
+          doubt.priority = 'normal';
+          doubt.slaDeadline = slaDeadline;
+          doubt.slaDueAt = slaDeadline;
+          doubt.escalatedAt = new Date();
+          doubt.escalationReason = 'Gemini free-tier quota reached during transcription. Forwarded directly to faculty queue for verified review.';
+          doubt.unreadByTeacher = true;
+          doubt.auditTrail.push({
+            status: 'escalated',
+            changedBy: 'System (Quota Fallback)',
+            role: 'system',
+            note: 'Daily Gemini quota exhausted across models. Forwarded directly to faculty with 24-hour SLA. Zero synthetic answers.',
+          });
+        } else {
+          doubt.status = 'error';
+          doubt.lastErrorMessage = transcribeErr.message;
+          doubt.auditTrail.push({
+            status: 'error',
+            changedBy: 'System',
+            role: 'system',
+            note: `Transcription error: ${transcribeErr.message}`,
+          });
+        }
         await doubt.save();
-        // Refund quota for failed AI attempt
+        // Refund student AI quota (total daily cap is not refunded)
         await DoubtQuota.rollbackStudentQuota(doubt.student);
       }
     } else {
@@ -195,18 +214,37 @@ async function processDoubtJob(doubtId, jobType = 'initial') {
         await DoubtQuota.recordSuccessfulQuery(explanationRes.modelUsed, explanationRes.isFallbackModel);
       } catch (explainErr) {
         console.error(`Explanation job failed for doubt ${doubtId}:`, explainErr.message);
-        const failType = String(explainErr.message).includes('429') ? '429' : (String(explainErr.message).includes('timed out') ? 'timeout' : '5xx');
+        const isQuota429 = String(explainErr.message).includes('429') || String(explainErr.message).includes('RESOURCE_EXHAUSTED');
+        const failType = isQuota429 ? '429' : (String(explainErr.message).includes('timed out') ? 'timeout' : '5xx');
         await DoubtQuota.recordFailure(failType).catch(() => {});
-        doubt.status = 'error';
-        doubt.lastErrorMessage = explainErr.message;
-        doubt.auditTrail.push({
-          status: 'error',
-          changedBy: 'System',
-          role: 'system',
-          note: `AI Explanation error: ${explainErr.message}`,
-        });
+
+        if (isQuota429) {
+          const slaDeadline = new Date(Date.now() + 24 * 60 * 60 * 1000);
+          doubt.status = 'escalated';
+          doubt.priority = 'normal';
+          doubt.slaDeadline = slaDeadline;
+          doubt.slaDueAt = slaDeadline;
+          doubt.escalatedAt = new Date();
+          doubt.escalationReason = 'Gemini free-tier quota reached across all fallback models. Forwarded directly to faculty queue for verified solution.';
+          doubt.unreadByTeacher = true;
+          doubt.auditTrail.push({
+            status: 'escalated',
+            changedBy: 'System (Quota Fallback)',
+            role: 'system',
+            note: 'Daily Gemini free-tier quota exhausted across all models. Escalated directly to faculty queue with 24-hour SLA. Zero synthetic answers.',
+          });
+        } else {
+          doubt.status = 'error';
+          doubt.lastErrorMessage = explainErr.message;
+          doubt.auditTrail.push({
+            status: 'error',
+            changedBy: 'System',
+            role: 'system',
+            note: `AI Explanation error: ${explainErr.message}`,
+          });
+        }
         await doubt.save();
-        // Refund quota for failed AI attempt
+        // Refund student AI quota (total daily cap is not refunded)
         await DoubtQuota.rollbackStudentQuota(doubt.student);
       }
     }
@@ -429,11 +467,16 @@ exports.askDoubt = async (req, res) => {
       attachments: doubt.attachments.map((a) => ({ url: a.url, fileName: a.fileName })),
     });
 
-    // 5. Check if AI Kill Switch is active (DOUBTS_AI_ENABLED=false) or GEMINI_API_KEY is missing
-    const hasApiKey = Boolean(process.env.GEMINI_API_KEY && process.env.GEMINI_API_KEY.trim());
+    // 5. Check if AI Kill Switch is active (DOUBTS_AI_ENABLED=false), API key is missing, or global capacity reached
+    const doubtsApiKey = (process.env.GEMINI_DOUBTS_API_KEY && process.env.GEMINI_DOUBTS_API_KEY.trim()) ||
+                         (process.env.GEMINI_API_KEY && process.env.GEMINI_API_KEY.trim()) || '';
+    const hasApiKey = Boolean(doubtsApiKey);
     const isAiEnabled = process.env.DOUBTS_AI_ENABLED !== 'false' && hasApiKey;
 
-    if (!isAiEnabled) {
+    const GLOBAL_DAILY_AI_REQUEST_CAP = parseInt(process.env.GLOBAL_DAILY_AI_REQUEST_CAP || '40', 10);
+    const globalCapStatus = await DoubtQuota.isGlobalAiCapReached(GLOBAL_DAILY_AI_REQUEST_CAP);
+
+    if (!isAiEnabled || globalCapStatus.capReached) {
       // Direct Escalation to Teacher Queue (Bypass AI step entirely; NEVER fabricate answers)
       const slaDeadline = new Date(Date.now() + 24 * 60 * 60 * 1000);
       doubt.status = 'escalated';
@@ -441,21 +484,32 @@ exports.askDoubt = async (req, res) => {
       doubt.slaDeadline = slaDeadline;
       doubt.slaDueAt = slaDeadline;
       doubt.escalatedAt = new Date();
-      doubt.escalationReason = !hasApiKey
-        ? 'Direct routing to faculty (AI service key unconfigured; never fabricating answers).'
-        : 'Direct routing to faculty (AI doubt solver is currently paused via maintenance policy).';
+
+      if (globalCapStatus.capReached) {
+        doubt.escalationReason = `Daily platform AI capacity reached for today (${globalCapStatus.totalCalls}/${globalCapStatus.cap} calls used). Routed directly to your faculty mentor for personal attention.`;
+        doubt.auditTrail.push({
+          status: 'escalated',
+          changedBy: 'Global Capacity Policy Guard',
+          role: 'system',
+          note: `Global daily AI capacity limit reached (${globalCapStatus.totalCalls}/${globalCapStatus.cap}). Escalated directly to faculty queue with 24-hour SLA. Zero synthetic answers.`,
+        });
+      } else {
+        doubt.escalationReason = !hasApiKey
+          ? 'Direct routing to faculty (AI service key unconfigured; never fabricating answers).'
+          : 'Direct routing to faculty (AI doubt solver is currently paused via maintenance policy).';
+        doubt.auditTrail.push({
+          status: 'escalated',
+          changedBy: 'System Policy Guard (AI Bypass / Missing Key)',
+          role: 'system',
+          note: !hasApiKey
+            ? 'GEMINI_DOUBTS_API_KEY and GEMINI_API_KEY are missing. Never fabricating answers; routed directly to faculty queue with 24-hour SLA.'
+            : 'AI solver disabled via maintenance policy. Routed directly to faculty queue with 24-hour SLA.',
+        });
+      }
       doubt.unreadByTeacher = true;
-      doubt.auditTrail.push({
-        status: 'escalated',
-        changedBy: 'System Policy Guard (AI Bypass / Missing Key)',
-        role: 'system',
-        note: !hasApiKey
-          ? 'GEMINI_API_KEY is missing. Never fabricating answers; routed directly to faculty queue with 24-hour SLA.'
-          : 'AI solver disabled via maintenance policy. Routed directly to faculty queue with 24-hour SLA.',
-      });
       await doubt.save();
 
-      // Refund student AI quota since AI was bypassed
+      // Refund student AI quota since AI was bypassed (total daily cap remains consumed)
       await DoubtQuota.rollbackStudentQuota(studentId);
 
       // Create notification for teachers
@@ -2150,13 +2204,17 @@ exports.getAdminCapacity = async (req, res) => {
     const totalQueries = todayRecord.totalQueries || 0;
     const fallbackQueries = todayRecord.fallbackQueries || 0;
     const fallbackRate = totalQueries > 0 ? Number(((fallbackQueries / totalQueries) * 100).toFixed(1)) : 0;
+    const globalCap = parseInt(process.env.GLOBAL_DAILY_AI_REQUEST_CAP || '40', 10);
+    const remainingCapacity = Math.max(0, globalCap - totalQueries);
 
     return res.json({
       success: true,
       telemetry: {
         date: todayStr,
-        dailyGlobalLimit: 1000,
+        dailyGlobalLimit: globalCap,
         totalQueriesToday: totalQueries,
+        remainingCapacityToday: remainingCapacity,
+        isFreeTier: true,
         modelUsage: modelCounts,
         fallbackQueries,
         fallbackRate,

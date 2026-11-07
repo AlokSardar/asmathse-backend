@@ -275,13 +275,23 @@ async function callGeminiModel(ai, model, contents, config, timeoutMs = DEFAULT_
   }
 }
 
+// Resolve dedicated Doubts API Key (GEMINI_DOUBTS_API_KEY) with fallback to primary GEMINI_API_KEY
+// Ensures doubt-clearing free-tier usage does not consume AI Import / Question Bank quotas.
+function getDoubtsApiKey() {
+  return (
+    (process.env.GEMINI_DOUBTS_API_KEY && process.env.GEMINI_DOUBTS_API_KEY.trim()) ||
+    (process.env.GEMINI_API_KEY && process.env.GEMINI_API_KEY.trim()) ||
+    ''
+  );
+}
+
 /**
  * STAGE 1: Problem Transcription from Handwritten/Printed Photos
  */
 async function transcribeProblem({ imageBase64, mimeType = 'image/jpeg', studentNote = '', topic = '' }) {
-  const apiKey = process.env.GEMINI_API_KEY;
+  const apiKey = getDoubtsApiKey();
   if (!apiKey) {
-    throw new Error('GEMINI_API_KEY is not configured on the server.');
+    throw new Error('GEMINI_DOUBTS_API_KEY or GEMINI_API_KEY is not configured on the server.');
   }
 
   const ai = new GoogleGenAI({ apiKey });
@@ -347,6 +357,9 @@ RULES (CRITICAL):
         responseMimeType: 'application/json',
       };
 
+      // Count all executed Gemini calls towards GLOBAL_DAILY_AI_REQUEST_CAP
+      await DoubtQuota.recordAiCall(model, model !== TRANSCRIPTION_MODEL_CHAIN[0]).catch(() => {});
+
       const result = await callGeminiModel(ai, model, contents, config, currentTimeoutMs);
       const text = result.text || '';
       const parsed = parseMathJson(text);
@@ -411,9 +424,9 @@ async function explainProblem({
   studentNote = '',
   previousMessages = [], // Thread context for follow-up questions
 }) {
-  const apiKey = process.env.GEMINI_API_KEY;
+  const apiKey = getDoubtsApiKey();
   if (!apiKey) {
-    throw new Error('GEMINI_API_KEY is not configured on the server.');
+    throw new Error('GEMINI_DOUBTS_API_KEY or GEMINI_API_KEY is not configured on the server.');
   }
 
   const ai = new GoogleGenAI({ apiKey });
@@ -548,6 +561,9 @@ Please solve this pedagogical doubt adhering to the JSON schema.`;
         temperature: 0.2, // Low temperature for mathematical rigor
         responseMimeType: 'application/json',
       };
+
+      // Count all executed Gemini calls towards GLOBAL_DAILY_AI_REQUEST_CAP
+      await DoubtQuota.recordAiCall(model, model !== PRIMARY_EXPLAIN_MODEL).catch(() => {});
 
       const result = await callGeminiModel(ai, model, contents, config, currentTimeoutMs);
       const text = result.text || '';

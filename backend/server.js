@@ -26,6 +26,17 @@ const app = express();
 // Trust proxy for accurate client IP identification on Render / cloud reverse proxies
 app.set('trust proxy', 1);
 
+// Reverse Proxy & Client IP Diagnostic Logger (Logs first incoming client IP after startup for verification)
+let hasLoggedClientIp = false;
+app.use((req, res, next) => {
+  if (!hasLoggedClientIp && req.path.startsWith('/api')) {
+    const rawForwarded = req.headers['x-forwarded-for'];
+    console.log(`[PROXY DIAGNOSTIC] Express identified Client IP: "${req.ip}" (X-Forwarded-For: "${rawForwarded || 'none'}")`);
+    hasLoggedClientIp = true;
+  }
+  next();
+});
+
 // Security Hardening: HTTP Security Headers via Helmet (XSS, Clickjacking, MIME sniffing protection)
 const {
   securityHeaders,
@@ -137,7 +148,11 @@ app.get('/api/health', async (req, res) => {
     } catch (e) {}
   }
 
-  const isAiConfigured = Boolean(process.env.GEMINI_API_KEY && process.env.GEMINI_API_KEY.trim());
+  const isAiConfigured = Boolean(
+    (process.env.GEMINI_DOUBTS_API_KEY && process.env.GEMINI_DOUBTS_API_KEY.trim()) ||
+    (process.env.GEMINI_API_KEY && process.env.GEMINI_API_KEY.trim())
+  );
+  const hasSeparateDoubtsKey = Boolean(process.env.GEMINI_DOUBTS_API_KEY && process.env.GEMINI_DOUBTS_API_KEY.trim());
   const isAiKillSwitchActive = process.env.DOUBTS_AI_ENABLED === 'false';
 
   res.json({
@@ -147,9 +162,12 @@ app.get('/api/health', async (req, res) => {
     connected: state === 1,
     host: mongoose.connection.host || null,
     dbName: mongoose.connection.name || 'asmaths_lms',
+    clientIp: req.ip,
     aiConfigured: isAiConfigured,
+    hasSeparateDoubtsKey,
     aiKillSwitchActive: isAiKillSwitchActive,
     aiModel: process.env.GEMINI_DOUBT_MODEL || 'gemini-3.8-flash',
+    globalDailyCap: parseInt(process.env.GLOBAL_DAILY_AI_REQUEST_CAP || '40', 10),
     stats,
     timestamp: new Date().toISOString(),
   });

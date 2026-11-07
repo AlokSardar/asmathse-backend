@@ -755,8 +755,10 @@ const solveStudentDoubt = async (req, res) => {
     });
   }
 
-  // 2. Kill Switch: DOUBTS_AI_ENABLED and API Key guard
-  const hasApiKey = Boolean(process.env.GEMINI_API_KEY && process.env.GEMINI_API_KEY.trim());
+  // 2. Kill Switch: DOUBTS_AI_ENABLED and API Key guard (supports GEMINI_DOUBTS_API_KEY)
+  const doubtsKey = (process.env.GEMINI_DOUBTS_API_KEY && process.env.GEMINI_DOUBTS_API_KEY.trim()) ||
+                    (process.env.GEMINI_API_KEY && process.env.GEMINI_API_KEY.trim()) || '';
+  const hasApiKey = Boolean(doubtsKey);
   const isAiEnabled = process.env.DOUBTS_AI_ENABLED !== 'false' && hasApiKey;
   if (!isAiEnabled) {
     return res.status(503).json({
