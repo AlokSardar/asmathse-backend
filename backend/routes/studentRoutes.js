@@ -1,3 +1,4 @@
+const { verifyToken } = require('../config/jwt');
 const express = require('express');
 const jwt = require('jsonwebtoken');
 const router = express.Router();
@@ -19,8 +20,7 @@ const attachStudentContext = async (req, res, next) => {
   if (authHeader && authHeader.startsWith('Bearer ')) {
     const token = authHeader.split(' ')[1];
     try {
-      const secret = process.env.JWT_SECRET || 'asmaths_secret_jwt_key_2026_cluster0';
-      const decoded = jwt.verify(token, secret);
+      const decoded = verifyToken(token);
       if (decoded.id === 'master_admin_id') {
         req.user = { _id: 'master_admin_id', id: 'master_admin_id', role: 'admin', name: 'Dr. A. Sardar', email: 'admin@asmaths.com' };
       } else {

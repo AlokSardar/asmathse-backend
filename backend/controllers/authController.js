@@ -2,26 +2,26 @@ const mongoose = require('mongoose');
 const User = require('../models/User');
 const Student = require('../models/Student');
 const jwt = require('jsonwebtoken');
+const { signToken } = require('../config/jwt');
 const crypto = require('crypto');
 const nodemailer = require('nodemailer');
 const bcrypt = require('bcryptjs');
 
-// Generate JWT
+// Generate JWT using centralized, validated secret
 const generateToken = (id, extra = {}) => {
-  return jwt.sign({ id, ...extra }, process.env.JWT_SECRET || 'asmaths_secret_jwt_key_2026_cluster0', {
-    expiresIn: '30d',
-  });
+  return signToken({ id, ...extra });
 };
 
-// Task 3 & 4: Foolproof startup script that automatically UPDATES (or creates)
-// an admin account with these EXACT credentials every time the server starts:
-// - Email: admin@asmaths.com
-// - Password: AdminPassword123!
-// - role: "admin"
-// - isApproved: true
-const forceAdminUpsert = async () => {
+/**
+ * Safe Administrator Initialization:
+ * Checks if ANY administrator account exists in the database.
+ * - Never overwrites an existing administrator's password, email, or role.
+ * - If no administrator exists at all, creates one ONLY if ADMIN_BOOTSTRAP_EMAIL
+ *   and ADMIN_BOOTSTRAP_PASSWORD environment variables are supplied.
+ * - Enforces the institutional password policy on ADMIN_BOOTSTRAP_PASSWORD.
+ */
+const bootstrapAdminIfEmpty = async () => {
   try {
-    // Ensure MongoDB connection is fully open before attempting DB operations
     if (mongoose.connection.readyState !== 1) {
       await new Promise((resolve) => {
         if (mongoose.connection.readyState === 1) return resolve();
@@ -30,41 +30,44 @@ const forceAdminUpsert = async () => {
       });
     }
 
-    // Hash AdminPassword123! exactly ONCE using standard 10 salt rounds
+    const adminCount = await User.countDocuments({ role: 'admin' });
+    if (adminCount > 0) {
+      console.log(`ℹ️ [ADMIN BOOTSTRAP]: Active administrator account(s) present (${adminCount} found). Bootstrap skipped.`);
+      return;
+    }
+
+    const bootstrapEmail = (process.env.ADMIN_BOOTSTRAP_EMAIL || '').toLowerCase().trim();
+    const bootstrapPassword = (process.env.ADMIN_BOOTSTRAP_PASSWORD || '').trim();
+
+    if (!bootstrapEmail || !bootstrapPassword) {
+      console.log('ℹ️ [ADMIN BOOTSTRAP]: No administrator account exists, and ADMIN_BOOTSTRAP_EMAIL / ADMIN_BOOTSTRAP_PASSWORD are not configured. Skipping initial admin creation.');
+      return;
+    }
+
+    const { validatePasswordPolicy } = require('../utils/passwordPolicy');
+    const policy = validatePasswordPolicy(bootstrapPassword, { name: 'Administrator', email: bootstrapEmail });
+    if (!policy.isValid) {
+      console.error(`❌ [ADMIN BOOTSTRAP ERROR]: ADMIN_BOOTSTRAP_PASSWORD does not satisfy institutional password policy: ${policy.errors.join(', ')}. Admin not created.`);
+      return;
+    }
+
     const salt = await bcrypt.genSalt(10);
-    const hashedPassword = await bcrypt.hash('AdminPassword123!', salt);
+    const hashedPassword = await bcrypt.hash(bootstrapPassword, salt);
 
-    // Direct findOneAndUpdate with $set to bypass any conflicting save hooks
-    const admin = await User.findOneAndUpdate(
-      { email: 'admin@asmaths.com' },
-      {
-        $set: {
-          name: 'Dr. A. Sardar',
-          email: 'admin@asmaths.com',
-          password: hashedPassword,
-          role: 'admin',
-          isApproved: true,
-          profileCompleted: true,
-        },
-      },
-      { upsert: true, returnDocument: 'after', setDefaultsOnInsert: true }
-    );
+    await User.create({
+      name: 'System Administrator',
+      email: bootstrapEmail,
+      password: hashedPassword,
+      role: 'admin',
+      isApproved: true,
+      profileCompleted: true,
+      tokenVersion: 0,
+      mustChangePassword: false,
+    });
 
-    // Verify immediately in-memory that bcrypt can compare correctly
-    const testMatch = await bcrypt.compare('AdminPassword123!', admin.password);
-
-    console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-    console.log('🔐 [ADMIN STARTUP UPSERT] Guaranteed Admin Credentials Active:');
-    console.log(`   Email:        admin@asmaths.com`);
-    console.log(`   Password:     AdminPassword123!`);
-    console.log(`   Role:         ${admin.role}`);
-    console.log(`   isApproved:   ${admin.isApproved}`);
-    console.log(`   Single-Hash:  ${admin.password.substring(0, 15)}... (length: ${admin.password.length})`);
-    console.log(`   Bcrypt Match: ${testMatch ? '✅ MATCH CONFIRMED (Ready to log in)' : '❌ HASH MISMATCH'}`);
-    console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-    return admin;
+    console.log(`✅ [ADMIN BOOTSTRAP]: Initial administrator account created for "${bootstrapEmail}".`);
   } catch (err) {
-    console.error('❌ [ADMIN STARTUP UPSERT ERROR]:', err.message);
+    console.error('❌ [ADMIN BOOTSTRAP ERROR]:', err.message);
   }
 };
 
@@ -495,27 +498,7 @@ const loginUser = async (req, res) => {
       console.warn(`[AUTH LOGIN] MongoDB query notice:`, dbErr.message);
     }
 
-    // Emergency admin fallback if database is currently connecting/firewalled
-    if (!user && cleanEmail === 'admin@asmaths.com' && password === 'AdminPassword123!') {
-      if (requestedRole === 'student') {
-        return res.status(403).json({
-          message: 'Access Denied: Educator credentials cannot access the Student Portal. Please use the Teacher / Admin login.',
-          roleMismatch: true,
-        });
-      }
-      console.log(`[AUTH LOGIN] ✅ Admin Master Credentials Verified directly!`);
-      const token = generateToken('master_admin_id');
-      return res.json({
-        _id: 'master_admin_id',
-        id: 'master_admin_id',
-        name: 'Dr. A. Sardar',
-        email: 'admin@asmaths.com',
-        role: 'admin',
-        isApproved: true,
-        profileCompleted: true,
-        token,
-      });
-    }
+
 
     if (!user) {
       // Timing-attack prevention: perform dummy bcrypt compare so execution time matches real user check
@@ -531,17 +514,7 @@ const loginUser = async (req, res) => {
     // Enforce strict bcrypt password verification against stored database hash
     let isMatch = await user.matchPassword(password);
 
-    // Self-healing: if admin credentials match master, ensure hash in DB is healed to single-hash
-    if (!isMatch && cleanEmail === 'admin@asmaths.com' && password === 'AdminPassword123!') {
-      console.log(`[AUTH LOGIN] ⚠️ Admin password matched master credentials; self-healing database hash...`);
-      const salt = await bcrypt.genSalt(10);
-      const newHash = await bcrypt.hash('AdminPassword123!', salt);
-      user.password = newHash;
-      user.role = 'admin';
-      user.isApproved = true;
-      await User.updateOne({ _id: user._id }, { $set: { password: newHash, role: 'admin', isApproved: true } }).catch(() => {});
-      isMatch = true;
-    }
+
 
     console.log(`[AUTH LOGIN] 🔑 Password match: ${isMatch ? 'TRUE' : 'FALSE'}`);
     console.log(`========================================\n`);
@@ -1125,7 +1098,7 @@ const updateProfile = async (req, res) => {
     try {
       const decoded = jwt.verify(
         req.headers.authorization.split(' ')[1],
-        process.env.JWT_SECRET || 'asmaths_secret_jwt_key_2026_cluster0'
+        require('../config/jwt').getJwtSecret()
       );
       targetId = decoded.id;
     } catch (e) {}
@@ -1370,5 +1343,5 @@ module.exports = {
   updateProfile,
   forgotPassword,
   resetPassword,
-  forceAdminUpsert,
+  bootstrapAdminIfEmpty,
 };

@@ -221,6 +221,50 @@ async function runTestSuite() {
     console.log('✅ Item 1 Verified: Login brute-force limiter (10 attempts -> 429), identical responses, timing attack resistance, and per-email isolation.');
 
     // ──────────────────────────────────────────────────
+    // ITEM 1B: ADMIN SELF-HEALING AUDIT & IMMUTABILITY PROOF
+    // ──────────────────────────────────────────────────
+    console.log('\n--- ITEM 1B: Admin Password Immutability on Restart / Login ---');
+    const { bootstrapAdminIfEmpty } = require('../controllers/authController');
+
+    // 1. Record existing admin's current password hash
+    const adminDocBefore = await User.findById(admin1._id);
+    const initialHash = adminDocBefore.password;
+    assert(initialHash && initialHash.length > 20, 'Admin must have a valid bcrypt password hash');
+
+    // 2. Simulate server restart: invoke bootstrapAdminIfEmpty()
+    await bootstrapAdminIfEmpty();
+
+    // Verify hash is completely unchanged after server startup logic
+    const adminDocAfterRestart = await User.findById(admin1._id);
+    assert.strictEqual(
+      adminDocAfterRestart.password,
+      initialHash,
+      'Server startup / restart MUST NEVER overwrite or reset an existing admin password hash!'
+    );
+
+    // 3. Simulate failed login with old default credentials
+    await login(admin1Email, 'WrongDefaultAttempt123!', 'admin');
+
+    // 4. Simulate successful login
+    await login(admin1Email, 'AdminPassword123!', 'admin');
+
+    // Verify hash is STILL completely unchanged
+    const adminDocAfterLogins = await User.findById(admin1._id);
+    assert.strictEqual(
+      adminDocAfterLogins.password,
+      initialHash,
+      'Admin login attempts MUST NEVER alter or "self-heal" an existing admin password hash!'
+    );
+
+    results.item1B_adminPasswordImmutability = {
+      initialHashRecorded: true,
+      hashUnchangedAfterRestart: true,
+      hashUnchangedAfterLogins: true,
+      noHardcodedOverride: true,
+    };
+    console.log('✅ Item 1B Verified: Startup and login routines never alter or overwrite an existing administrator password hash.');
+
+    // ──────────────────────────────────────────────────
     // ITEM 2: EMAIL CHANGE ROBUSTNESS, RECOVERY & TOKEN INVALIDATION
     // ──────────────────────────────────────────────────
     console.log('\n--- ITEM 2: Email Change Robustness, Recovery & Token Invalidation ---');

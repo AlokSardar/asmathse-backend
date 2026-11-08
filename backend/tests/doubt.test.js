@@ -16,7 +16,7 @@ const Doubt = require('../models/Doubt');
 const DoubtMessage = require('../models/DoubtMessage');
 const DoubtQuota = require('../models/DoubtQuota');
 
-const JWT_SECRET = process.env.JWT_SECRET || 'asmaths_secret_jwt_key_2026_cluster0';
+const JWT_SECRET = process.env.JWT_SECRET || require('crypto').randomBytes(32).toString('hex');
 
 async function runDoubtPipelineTests() {
   console.log('🧪 Starting AS Maths "Doubts Escalator" Comprehensive Unit & Integration Tests...\n');

@@ -1,3 +1,4 @@
+const { verifyToken } = require('../config/jwt');
 const mongoose = require('mongoose');
 const jwt = require('jsonwebtoken');
 const ClassTest = require('../models/ClassTest');
@@ -15,8 +16,7 @@ const isAuthorizedAdmin = (req) => {
   if (authHeader && authHeader.startsWith('Bearer ')) {
     try {
       const token = authHeader.split(' ')[1];
-      const secret = process.env.JWT_SECRET || 'asmaths_secret_jwt_key_2026_cluster0';
-      const decoded = jwt.verify(token, secret);
+      const decoded = verifyToken(token);
       const decodedRole = String(decoded.role || '').toLowerCase();
       if (decodedRole === 'admin' || decodedRole === 'teacher' || decoded.id === 'master_admin_id') {
         return true;

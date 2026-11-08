@@ -448,7 +448,7 @@ async function captureScreenshots() {
       branch: seed.studentUser.branch,
       semester: seed.studentUser.semester,
     },
-    process.env.JWT_SECRET || 'asmaths_secret_jwt_key_2026_cluster0',
+    process.env.JWT_SECRET || require('crypto').randomBytes(32).toString('hex'),
     { expiresIn: '2h' }
   );
 
@@ -461,7 +461,7 @@ async function captureScreenshots() {
       course: seed.teacherUser.course,
       branch: seed.teacherUser.branch,
     },
-    process.env.JWT_SECRET || 'asmaths_secret_jwt_key_2026_cluster0',
+    process.env.JWT_SECRET || require('crypto').randomBytes(32).toString('hex'),
     { expiresIn: '2h' }
   );
 

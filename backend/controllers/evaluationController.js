@@ -1,3 +1,4 @@
+const { verifyToken } = require('../config/jwt');
 const fs = require('fs');
 const path = require('path');
 const mongoose = require('mongoose');
@@ -15,8 +16,7 @@ const getRequestUser = (req) => {
   if (authHeader && authHeader.startsWith('Bearer ')) {
     try {
       const token = authHeader.split(' ')[1];
-      const secret = process.env.JWT_SECRET || 'asmaths_secret_jwt_key_2026_cluster0';
-      return jwt.verify(token, secret);
+      return verifyToken(token);
     } catch (_) {}
   }
   return null;

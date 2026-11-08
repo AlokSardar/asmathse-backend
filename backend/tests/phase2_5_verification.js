@@ -16,7 +16,7 @@ const User = require('../models/User');
 
 const TEST_PORT = 5088;
 const BASE_URL = `http://localhost:${TEST_PORT}`;
-const JWT_SECRET = process.env.JWT_SECRET || 'asmaths_secret_jwt_key_2026_cluster0';
+const JWT_SECRET = process.env.JWT_SECRET || require('crypto').randomBytes(32).toString('hex');
 
 // Helper for HTTP requests
 async function makeRequest(endpoint, { method = 'GET', headers = {}, body = null } = {}) {

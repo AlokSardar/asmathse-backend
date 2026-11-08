@@ -19,7 +19,7 @@ const evaluationRoutes = require('../routes/evaluationRoutes');
 const studentRoutes = require('../routes/studentRoutes');
 
 const TEMP_DB_NAME = 'test_eval_gaps_tmp';
-const JWT_SECRET = process.env.JWT_SECRET || 'asmaths_secret_jwt_key_2026_cluster0';
+const JWT_SECRET = process.env.JWT_SECRET || require('crypto').randomBytes(32).toString('hex');
 
 // Ensure private uploads directory exists
 const privateUploadsDir = path.resolve(__dirname, '../uploads/private_scripts');

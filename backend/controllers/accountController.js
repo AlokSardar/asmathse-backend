@@ -2,6 +2,7 @@ const crypto = require('crypto');
 const bcrypt = require('bcryptjs');
 const mongoose = require('mongoose');
 const jwt = require('jsonwebtoken');
+const { signToken } = require('../config/jwt');
 const User = require('../models/User');
 const SecurityEvent = require('../models/SecurityEvent');
 const EmailChangeRequest = require('../models/EmailChangeRequest');
@@ -13,9 +14,7 @@ const { maskIp } = require('../utils/redact');
 
 // Generate JWT with tokenVersion
 const generateToken = (id, extra = {}) => {
-  return jwt.sign({ id, ...extra }, process.env.JWT_SECRET || 'asmaths_secret_jwt_key_2026_cluster0', {
-    expiresIn: '30d',
-  });
+  return signToken({ id, ...extra });
 };
 
 // In-memory rate limiter for password change attempts (5 attempts per 15 min per user & IP)

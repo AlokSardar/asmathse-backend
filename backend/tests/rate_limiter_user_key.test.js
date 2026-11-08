@@ -16,7 +16,7 @@ const rateLimit = require('express-rate-limit');
 const jwt = require('jsonwebtoken');
 const http = require('http');
 
-const JWT_SECRET = process.env.JWT_SECRET || 'asmaths_secret_jwt_key_2026_cluster0';
+const JWT_SECRET = process.env.JWT_SECRET || require('crypto').randomBytes(32).toString('hex');
 
 // 1. Re-import the exact keyGenerator from securityMiddleware
 const {

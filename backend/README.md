@@ -11,7 +11,9 @@ RESTful Backend for the AS Maths Educator Learning Management System (LMS) and D
 | Variable | Type | Default | Description & Missing Behavior |
 | :--- | :--- | :--- | :--- |
 | `MONGO_URI` | String | *None* | **REQUIRED.** MongoDB Atlas connection string. Server immediately terminates at startup if missing (`process.exit(1)`). |
-| `JWT_SECRET` | String | `asmaths_secret_jwt_key_2026_cluster0` | Secret key used to sign and verify HMAC SHA-256 session tokens. Must be overridden with a cryptographically strong secret in production. |
+| `JWT_SECRET` | String | *None* | **REQUIRED.** Cryptographically strong secret (minimum 32 characters) used to sign and verify HMAC SHA-256 session tokens via `config/jwt.js`. Server refuses to start in all environments if missing (except `NODE_ENV=test`, which generates an isolated per-session secret). In production, secrets $< 32$ characters or matching known defaults cause immediate startup abort (`process.exit(1)`). |
+| `ADMIN_BOOTSTRAP_EMAIL` | String | *None* | *(Optional Initial Provisioning)* If database contains zero administrators on server startup, creates an initial admin with this email. |
+| `ADMIN_BOOTSTRAP_PASSWORD` | String | *None* | *(Optional Initial Provisioning)* Password for initial bootstrap admin. Must satisfy institutional policy (10+ chars, uppercase, lowercase, number, symbol, not dictionary blocklisted). Never overwrites existing administrators. |
 
 ---
 
@@ -40,8 +42,8 @@ RESTful Backend for the AS Maths Educator Learning Management System (LMS) and D
 | Variable | Type | Default | Description |
 | :--- | :--- | :--- | :--- |
 | `PORT` | Number | `5000` | HTTP listening port for Express. |
-| `NODE_ENV` | String | `development` | Setting to `production` enables strict cookie security and CORS enforcement. |
-| `FRONTEND_URL` | String | `http://localhost:5173` | Allowed frontend origin for CORS. |
+| `NODE_ENV` | String | `development` | Setting to `production` enables strict cookie security, CORS enforcement, and enforces 32+ char non-default `JWT_SECRET`. |
+| `FRONTEND_URL` | String | `https://asmathseducator.vercel.app` | Allowed frontend origin for CORS. |
 | `ALLOWED_ORIGINS` | String | *None* | Comma-separated list of additional allowed CORS origins. |
 | `DISABLE_RATE_LIMITING` | Boolean | `false` | Disables rate limiters (for testing environments only). |
 
@@ -49,22 +51,9 @@ RESTful Backend for the AS Maths Educator Learning Management System (LMS) and D
 
 ### 4. Optional Third-Party Notification & Storage Providers
 
-| Variable Group | Variables | Purpose |
-| :--- | :--- | :--- |
-| **Cloudinary** | `CLOUDINARY_CLOUD_NAME`, `CLOUDINARY_API_KEY`, `CLOUDINARY_API_SECRET`, `CLOUDINARY_URL` | Optional external CDN for file storage (defaults to MongoDB Base64 / disk uploads). |
-| **WhatsApp / SMS** | `FAST2SMS_API_KEY`, `META_PHONE_NUMBER_ID`, `META_WHATSAPP_TOKEN`, `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`, `TWILIO_PHONE_NUMBER`, `TWILIO_WHATSAPP_NUMBER`, `WATI_ACCESS_TOKEN`, `WATI_API_ENDPOINT` | SMS & WhatsApp notifications for class notices and exam alerts. |
-| **SMTP Email** | `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASS`, `SMTP_SECURE`, `SMTP_FROM` | Transactional email delivery for registration approvals and password resets. |
-
----
-
-## Database Migrations
-
-### Notification Partial Unique Index Migration
-To migrate legacy rigid `id_1` index to partial unique:
-```bash
-# Dry run
-node scripts/migrateNotificationIndex.js --db=asmaths_lms
-
-# Execute
-node scripts/migrateNotificationIndex.js --db=asmaths_lms --confirm
-```
+| Variable | Description |
+| :--- | :--- |
+| `CLOUDINARY_CLOUD_NAME`, `CLOUDINARY_API_KEY`, `CLOUDINARY_API_SECRET` | Credentials for Cloudinary direct document and PDF answer script hosting. When unconfigured, falls back to local disk storage. |
+| `META_WHATSAPP_TOKEN`, `META_PHONE_NUMBER_ID` | Meta WhatsApp Cloud API credentials for automated OTP and registration verification dispatches. |
+| `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`, `TWILIO_WHATSAPP_NUMBER` | Secondary WhatsApp SMS gateway fallback. |
+| `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASS` | SMTP transport for institutional faculty password recovery and alert notifications. |

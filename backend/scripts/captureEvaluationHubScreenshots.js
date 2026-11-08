@@ -500,7 +500,7 @@ async function captureAllViews(teacher) {
 
   // Helper to log in as Teacher Sharma
   const loginAsTeacher = async () => {
-    const jwtSecret = process.env.JWT_SECRET || 'asmaths_secret_jwt_key_2026_cluster0';
+    const jwtSecret = process.env.JWT_SECRET || require('crypto').randomBytes(32).toString('hex');
     const signedToken = jwt.sign(
       {
         id: teacher._id.toString(),

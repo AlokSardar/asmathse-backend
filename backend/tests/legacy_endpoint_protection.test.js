@@ -24,7 +24,7 @@ const { solveStudentDoubt } = require('../controllers/studentController');
 const { askDoubt } = require('../controllers/doubtController');
 const { doubtLimiter } = require('../middleware/securityMiddleware');
 
-const JWT_SECRET = process.env.JWT_SECRET || 'asmaths_secret_jwt_key_2026_cluster0';
+const JWT_SECRET = process.env.JWT_SECRET || require('crypto').randomBytes(32).toString('hex');
 
 async function runTests() {
   console.log('='.repeat(75));

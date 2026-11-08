@@ -1,4 +1,5 @@
 const jwt = require('jsonwebtoken');
+const { verifyToken } = require('../config/jwt');
 const User = require('../models/User');
 
 const protect = async (req, res, next) => {
@@ -10,8 +11,7 @@ const protect = async (req, res, next) => {
   ) {
     try {
       token = req.headers.authorization.split(' ')[1];
-      const secret = process.env.JWT_SECRET || 'asmaths_secret_jwt_key_2026_cluster0';
-      const decoded = jwt.verify(token, secret);
+      const decoded = verifyToken(token);
 
       if (decoded.id === 'master_admin_id') {
         req.user = {
@@ -106,8 +106,7 @@ const verifyRoleSegregation = (req, res, next) => {
   if (req.headers.authorization && req.headers.authorization.startsWith('Bearer')) {
     try {
       const token = req.headers.authorization.split(' ')[1];
-      const secret = process.env.JWT_SECRET || 'asmaths_secret_jwt_key_2026_cluster0';
-      const decoded = jwt.verify(token, secret);
+      const decoded = verifyToken(token);
       const role = (decoded.role || '').toLowerCase();
 
       const path = req.originalUrl || req.url || '';

@@ -35,7 +35,7 @@ const mongoose = require('mongoose');
 const jwt = require('jsonwebtoken');
 
 const DEV_DB_NAME = 'asmaths_lms_dev';
-const JWT_SECRET = process.env.JWT_SECRET || 'asmaths_secret_jwt_key_2026_cluster0';
+const JWT_SECRET = process.env.JWT_SECRET || require('crypto').randomBytes(32).toString('hex');
 
 // Force MONGO_URI to target asmaths_lms_dev
 const rawMongo = process.env.MONGO_URI || 'mongodb://localhost:27017/asmaths_lms_dev';

@@ -22,7 +22,7 @@ const Evaluation = require('../models/Evaluation');
 const Submission = require('../models/Submission');
 const app = require('../server');
 
-const JWT_SECRET = process.env.JWT_SECRET || 'secret';
+const JWT_SECRET = process.env.JWT_SECRET || require('crypto').randomBytes(32).toString('hex');
 
 function createToken(payload) {
   return jwt.sign(payload, JWT_SECRET, { expiresIn: '1h' });

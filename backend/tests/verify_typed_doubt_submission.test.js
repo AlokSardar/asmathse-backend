@@ -48,7 +48,7 @@ async function run() {
 
   const token = jwt.sign(
     { id: student._id, role: 'student', email: student.email },
-    process.env.JWT_SECRET || 'asmaths_secret_jwt_key_2026_cluster0'
+    process.env.JWT_SECRET || require('crypto').randomBytes(32).toString('hex')
   );
 
   // 2. Build test server

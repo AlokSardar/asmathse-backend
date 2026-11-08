@@ -18,33 +18,22 @@ if (missingRequired.length > 0) {
   process.exit(1);
 }
 
-// JWT_SECRET security verification across all environments
-const isProduction = process.env.NODE_ENV === 'production';
-const jwtSecret = (process.env.JWT_SECRET || '').trim();
-const knownWeakSecrets = [
-  'asmaths_secret_jwt_key_2026_cluster0',
-  'secret',
-  'jwtsecret',
-  '123456',
-  'changeme',
-  'supersecret',
-  'password',
-];
-const isWeakJwtSecret = !jwtSecret || jwtSecret.length < 32 || knownWeakSecrets.includes(jwtSecret);
-
-if (isWeakJwtSecret) {
-  if (isProduction) {
-    console.error('❌ [FATAL SECURITY ERROR]: Production environment requires a strong, non-default JWT_SECRET of at least 32 characters.');
-    console.error(`Current secret length: ${jwtSecret.length} chars (minimum required: 32). Server refused to start.`);
-    process.exit(1);
-  } else {
+// Centralized JWT Secret Security Validation
+const { getJwtSecret, knownWeakSecrets } = require('./config/jwt');
+try {
+  const secret = getJwtSecret();
+  const isWeak = secret.length < 32 || knownWeakSecrets.includes(secret);
+  if (isWeak && process.env.NODE_ENV !== 'test') {
     console.warn('\n⚠️  ═══════════════════════════════════════════════════════════════════════════════');
     console.warn('⚠️  [SECURITY WARNING]: Insecure or known-default JWT_SECRET detected in environment!');
-    console.warn(`⚠️  The current secret (${jwtSecret ? `length: ${jwtSecret.length} chars` : 'empty'}) matches a public/default repository string.`);
-    console.warn('⚠️  Treat this default as public. Before deploying to production, override JWT_SECRET');
-    console.warn('⚠️  with a cryptographically strong secret of at least 32 characters (e.g., in Render).');
+    console.warn(`⚠️  The current secret (length: ${secret.length} chars) matches a known/default repository string.`);
+    console.warn('⚠️  Treat this default as public. Override JWT_SECRET with a cryptographically');
+    console.warn('⚠️  strong secret of at least 32 characters before production deployment.');
     console.warn('⚠️  ═══════════════════════════════════════════════════════════════════════════════\n');
   }
+} catch (err) {
+  console.error(err.message);
+  process.exit(1);
 }
 
 // Connect to MongoDB Atlas
@@ -252,11 +241,11 @@ app.use((err, _req, res, _next) => {
 const PORT = process.env.PORT || 5000;
 
 // Force Admin Upsert on Startup
-const { forceAdminUpsert } = require('./controllers/authController');
+const { bootstrapAdminIfEmpty } = require('./controllers/authController');
 const ExtractionCache = require('./models/ExtractionCache');
 
 mongoose.connection.on('connected', () => {
-  forceAdminUpsert();
+  bootstrapAdminIfEmpty();
   // Clear legacy extraction cache once
   ExtractionCache.deleteMany({ promptVersion: { $ne: 'v2-ocr-pure-transcription' } })
     .then((res) => {
@@ -269,7 +258,7 @@ mongoose.connection.on('connected', () => {
 const { sweepStuckDoubtJobs } = require('./controllers/doubtController');
 
 mongoose.connection.once('open', () => {
-  forceAdminUpsert();
+  bootstrapAdminIfEmpty();
   sweepStuckDoubtJobs()
     .then((count) => {
       if (count > 0) console.log(`🧹 [DOUBT SWEEPER]: Swept ${count} stuck doubt jobs from previous server run.`);
