@@ -224,44 +224,51 @@ async function runCompatibilityTests() {
     console.log('  ✔ Disqualified attempt cannot be overwritten by subsequent submissions');
 
     // -------------------------------------------------------------------------
-    // TEST 4: Legacy Production Format Visibility (Audit Verification)
+    // TEST 4: Strict Student Visibility Rule ({ published: true } OR { autoGraded: true })
     // -------------------------------------------------------------------------
-    console.log('\n▶ TEST 4: Legacy production format visibility (preserving all 50 existing results)');
-    // Seed a legacy online exam (no examType, status: "evaluated", score: "44", published: false)
-    const legacyOnlineEval = await Evaluation.create({
-      id: 'legacy_online_001',
+    console.log('\n▶ TEST 4: Strict student visibility rule verification');
+    // Seed an auto-graded MCQ exam (autoGraded: true)
+    const autoGradedEval = await Evaluation.create({
+      id: 'eval_autograde_001',
       studentId: String(student._id),
       studentEmail: student.email,
-      testId: 'up_legacy_101',
-      testTitle: 'Legacy Unit Test',
-      score: '44 / 50',
-      marks: 44,
+      testId: 'up_auto_101',
+      testTitle: 'Linear Algebra Quiz',
+      examType: 'Automated MCQ',
+      score: 16,
+      marksObtained: 16,
+      totalMarks: 20,
+      status: 'Evaluated',
+      autoGraded: true,
+      published: true,
+    });
+
+    // Seed a teacher-published written evaluation (published: true, autoGraded: false)
+    const publishedWrittenEval = await Evaluation.create({
+      id: 'eval_wrt_pub_002',
+      studentId: String(student._id),
+      studentEmail: student.email,
+      testId: 'up_wrt_102',
+      testTitle: 'Calculus Midterm Written',
+      examType: 'Written / Upload',
+      score: 45,
+      marksObtained: 45,
       totalMarks: 50,
-      status: 'evaluated',
-      published: false,
+      status: 'Evaluated',
+      autoGraded: false,
+      published: true,
     });
 
-    // Seed a legacy anti-cheat disqualified exam (status: "disqualified", score: 0, published: false)
-    const legacyDisqualifiedEval = await Evaluation.create({
-      id: 'disqualified_legacy_002',
+    // Seed an unpublished written answer script (published: false, autoGraded: false)
+    const unpublishedScript = await Evaluation.create({
+      id: 'eval_wrt_unpub_003',
       studentId: String(student._id),
       studentEmail: student.email,
-      testId: 'up_legacy_102',
-      testTitle: 'Legacy Proctor Test',
-      score: 0,
-      status: 'disqualified',
-      published: false,
-    });
-
-    // Seed an unpublished written answer script with uploaded pages
-    const legacyUnpublishedScript = await Evaluation.create({
-      id: 'sub_unpub_script_003',
-      studentId: String(student._id),
-      studentEmail: student.email,
-      testId: 'up_legacy_103',
-      testTitle: 'Written Exam Submission',
+      testId: 'up_wrt_103',
+      testTitle: 'Draft Unreviewed Script',
       examType: 'Written / Upload',
       status: 'Pending Evaluation',
+      autoGraded: false,
       published: false,
       marksObtained: null,
       answerPages: [{ id: 'p1', name: 'Script.pdf', pageNumber: 1 }],
@@ -272,15 +279,12 @@ async function runCompatibilityTests() {
     assert.strictEqual(resStudentAll.status, 200);
 
     const idsInStudentView = resStudentAll.body.map((e) => e.id);
-    // Student MUST see legacy online exam
-    assert(idsInStudentView.includes('legacy_online_001'), 'Legacy online exam must be visible');
-    // Student MUST see legacy disqualified exam
-    assert(idsInStudentView.includes('disqualified_legacy_002'), 'Legacy disqualified exam must be visible');
-    // Student MUST NOT see unpublished written script
-    assert(!idsInStudentView.includes('sub_unpub_script_003'), 'Unpublished written script MUST remain hidden');
-    console.log('  ✔ Legacy online exam (score: 44) is visible to student');
-    console.log('  ✔ Legacy disqualified exam (score: 0) is visible to student');
-    console.log('  ✔ Unpublished written script is strictly hidden from student');
+    assert(idsInStudentView.includes('eval_autograde_001'), 'Auto-graded MCQ attempt must be visible');
+    assert(idsInStudentView.includes('eval_wrt_pub_002'), 'Teacher-published written evaluation must be visible');
+    assert(!idsInStudentView.includes('eval_wrt_unpub_003'), 'Unpublished written script MUST remain strictly hidden');
+    console.log('  ✔ Auto-graded MCQ attempt (autoGraded: true) is visible to student');
+    console.log('  ✔ Teacher-published written evaluation (published: true) is visible to student');
+    console.log('  ✔ Unpublished written script (published: false, autoGraded: false) is strictly hidden from student');
 
     // -------------------------------------------------------------------------
     // TEST 5: Student Written Script Submission & Self-Award Neutralization

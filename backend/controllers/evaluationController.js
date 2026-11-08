@@ -61,31 +61,11 @@ const getAllEvaluations = async (req, res) => {
           { studentId: sId }
         ]
       };
+      // Strict student visibility: Students see only their own published evaluations or auto-graded MCQ attempts
       const visibilityClause = {
         $or: [
           { published: true },
-          {
-            $and: [
-              { examType: { $ne: 'Written / Upload' } },
-              { status: { $ne: 'Pending Evaluation' } },
-              {
-                $or: [
-                  { examType: 'Automated MCQ' },
-                  { status: { $in: ['Evaluated', 'evaluated', 'disqualified', 'submitted'] } },
-                  { score: { $exists: true, $ne: null } },
-                  { marks: { $exists: true, $ne: null } },
-                  { marksObtained: { $exists: true, $ne: null } }
-                ]
-              },
-              {
-                $or: [
-                  { answerPages: { $exists: false } },
-                  { answerPages: { $size: 0 } },
-                  { answerPages: null }
-                ]
-              }
-            ]
-          }
+          { autoGraded: true }
         ]
       };
       query.$and = [identityClause, visibilityClause];
@@ -171,9 +151,8 @@ const getEvaluationById = async (req, res) => {
       if (!isOwner) {
         return res.status(403).json({ message: 'Access denied: You can only view your own evaluation records.' });
       }
-      const hasUploadedPages = Array.isArray(ev.answerPages) && ev.answerPages.length > 0;
-      const isUnpublishedWrittenScript = ev.examType === 'Written / Upload' || ev.status === 'Pending Evaluation' || (hasUploadedPages && !ev.published);
-      const isVisible = ev.published === true || !isUnpublishedWrittenScript;
+      // Strict student visibility: published or auto-graded only
+      const isVisible = ev.published === true || ev.autoGraded === true;
       if (!isVisible) {
         return res.status(403).json({ message: 'Access denied: Evaluation results have not been published yet.' });
       }
@@ -332,6 +311,7 @@ const saveEvaluation = async (req, res) => {
         percentage,
         grade,
         status,
+        autoGraded: examType === 'Automated MCQ',
         published,
         publishedAt: published ? new Date() : undefined,
         feedback,
