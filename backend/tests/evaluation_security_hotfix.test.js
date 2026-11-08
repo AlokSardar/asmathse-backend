@@ -129,6 +129,8 @@ async function runTest() {
     totalMarks: 30,
     maxMarks: 50,
     marks: 30,
+    examType: 'Written / Upload',
+    status: 'Pending Evaluation',
     published: false, // DRAFT / UNPUBLISHED
   });
 

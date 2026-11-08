@@ -64,7 +64,28 @@ const getAllEvaluations = async (req, res) => {
       const visibilityClause = {
         $or: [
           { published: true },
-          { examType: 'Automated MCQ', status: 'Evaluated' }
+          {
+            $and: [
+              { examType: { $ne: 'Written / Upload' } },
+              { status: { $ne: 'Pending Evaluation' } },
+              {
+                $or: [
+                  { examType: 'Automated MCQ' },
+                  { status: { $in: ['Evaluated', 'evaluated', 'disqualified', 'submitted'] } },
+                  { score: { $exists: true, $ne: null } },
+                  { marks: { $exists: true, $ne: null } },
+                  { marksObtained: { $exists: true, $ne: null } }
+                ]
+              },
+              {
+                $or: [
+                  { answerPages: { $exists: false } },
+                  { answerPages: { $size: 0 } },
+                  { answerPages: null }
+                ]
+              }
+            ]
+          }
         ]
       };
       query.$and = [identityClause, visibilityClause];
@@ -150,7 +171,9 @@ const getEvaluationById = async (req, res) => {
       if (!isOwner) {
         return res.status(403).json({ message: 'Access denied: You can only view your own evaluation records.' });
       }
-      const isVisible = ev.published === true || (ev.examType === 'Automated MCQ' && ev.status === 'Evaluated');
+      const hasUploadedPages = Array.isArray(ev.answerPages) && ev.answerPages.length > 0;
+      const isUnpublishedWrittenScript = ev.examType === 'Written / Upload' || ev.status === 'Pending Evaluation' || (hasUploadedPages && !ev.published);
+      const isVisible = ev.published === true || !isUnpublishedWrittenScript;
       if (!isVisible) {
         return res.status(403).json({ message: 'Access denied: Evaluation results have not been published yet.' });
       }
@@ -220,7 +243,39 @@ const saveEvaluation = async (req, res) => {
       const examType = data.examType || (data.testMode === 'MCQ' ? 'Automated MCQ' : 'Written / Upload');
       const testId = String(data.testId || data.examId || '1');
       const testTitle = String(data.testTitle || data.examTitle || 'Class Examination');
-      const id = data.id || `sub_${Date.now()}_${Math.random().toString(36).substr(2, 6)}`;
+
+      // Duplicate Submission Guard: Enforce one evaluation per student per exam
+      const existingEval = await Evaluation.findOne({
+        $and: [
+          { $or: [{ testId }, { examId: testId }, ...(data.id ? [{ id: data.id }] : [])] },
+          { $or: [{ studentId }, { studentEmail }] }
+        ]
+      });
+
+      if (existingEval) {
+        let allowsRetake = false;
+        try {
+          const Content = require('../models/Content');
+          const examDoc = await Content.findOne({
+            $or: [
+              { id: testId },
+              { testId },
+              ...(mongoose.Types.ObjectId.isValid(testId) ? [{ _id: testId }] : [])
+            ]
+          });
+          if (examDoc) {
+            const attempts = Number(examDoc.attemptsAllowed || 1);
+            allowsRetake = examDoc.allowRetake === true || attempts > 1;
+          }
+        } catch (_) {}
+
+        if (!allowsRetake && data.allowRetake !== true) {
+          // Retakes disallowed: return existing record for backward compatibility without overwriting
+          return res.status(200).json(existingEval);
+        }
+      }
+
+      const id = existingEval ? existingEval.id : (data.id || `sub_${Date.now()}_${Math.random().toString(36).substr(2, 6)}`);
 
       let marksObtained = null;
       let totalMarks = Number(data.totalMarks || 50);
