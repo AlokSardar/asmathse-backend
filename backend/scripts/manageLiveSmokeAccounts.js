@@ -6,143 +6,213 @@ require('dotenv').config({ path: path.resolve(__dirname, '../.env') });
 
 const User = require('../models/User');
 const Doubt = require('../models/Doubt');
-const DoubtMessage = require('../models/DoubtMessage');
-const DoubtQuota = require('../models/DoubtQuota');
 const Notification = require('../models/Notification');
+const SecurityEvent = require('../models/SecurityEvent');
+const EmailChangeRequest = require('../models/EmailChangeRequest');
+const AuditLog = require('../models/AuditLog');
 
-const SMOKE_STUDENT_EMAIL = 'smoke.student.2026@asmaths.edu';
-const SMOKE_TEACHER_EMAIL = 'smoke.teacher.2026@asmaths.edu';
+const SMOKE_TEACHER_EMAIL = 'smoketest.teacher@asmaths.edu';
+
+function parseArgs() {
+  const args = process.argv.slice(2);
+  const mode = args.find((a) => a === 'create' || a === 'cleanup');
+  const dryRun = args.includes('--dry-run');
+
+  const dbArg = args.find((a) => a.startsWith('--db='));
+  const explicitDb = dbArg ? dbArg.split('=')[1].trim() : null;
+
+  return { mode, dryRun, explicitDb };
+}
 
 async function run() {
-  const mode = process.argv[2]; // 'create' | 'cleanup'
-  if (!['create', 'cleanup'].includes(mode)) {
-    console.log('Usage: node manageLiveSmokeAccounts.js [create|cleanup]');
+  const { mode, dryRun, explicitDb } = parseArgs();
+
+  console.log('='.repeat(75));
+  console.log('🔬 [LIVE SMOKE TEST ACCOUNT MANAGER]');
+  console.log('='.repeat(75));
+
+  if (!mode) {
+    console.error('❌ Usage: node manageLiveSmokeAccounts.js [create|cleanup] --db=<database_name> [--dry-run]');
+    console.error('   Example: node manageLiveSmokeAccounts.js create --db=asmaths_lms_dev --dry-run');
+    console.error('   Example: node manageLiveSmokeAccounts.js cleanup --db=asmaths_lms_dev');
     process.exit(1);
   }
 
-  await mongoose.connect(process.env.MONGO_URI);
-  console.log(`Connected to MongoDB Atlas (${mongoose.connection.name}). Mode: ${mode.toUpperCase()}`);
+  // Safety Guard: Database name must be explicitly passed via --db=<name>
+  if (!explicitDb) {
+    console.error('❌ [SAFETY GUARD FAILED]: Database name must be explicitly provided via --db=<database_name>.');
+    console.error('   Preventing accidental execution against unintended environments.');
+    console.error('   Usage: node manageLiveSmokeAccounts.js ' + mode + ' --db=asmaths_lms_dev' + (dryRun ? ' --dry-run' : ''));
+    process.exit(1);
+  }
+
+  const dbUri = process.env.MONGO_URI;
+  if (!dbUri) {
+    console.error('❌ [CONFIG ERROR]: MONGO_URI is missing from environment.');
+    process.exit(1);
+  }
+
+  await mongoose.connect(dbUri);
+  const connectedDb = mongoose.connection.name;
+
+  // Verify connected database matches explicitly passed database name
+  if (connectedDb !== explicitDb) {
+    console.error(`❌ [SAFETY GUARD ABORT]: Target database mismatch!`);
+    console.error(`   Requested Database : "${explicitDb}"`);
+    console.error(`   Connected Database : "${connectedDb}"`);
+    console.error(`   The explicit --db flag must match the active MongoDB connection.`);
+    await mongoose.disconnect();
+    process.exit(1);
+  }
+
+  console.log(`Connected Database : "${connectedDb}" (Matches explicit --db parameter)`);
+  console.log(`Operation Mode     : ${mode.toUpperCase()}`);
+  console.log(`Execution Type     : ${dryRun ? '🔍 DRY RUN (Simulated, zero database writes)' : '⚡ LIVE RUN (Executing database mutations)'}`);
+  console.log('-'.repeat(75));
 
   if (mode === 'create') {
-    // Dynamically generate a cryptographically strong random password for this smoke test run
-    const generatedPassword = crypto.randomBytes(16).toString('base64url') + '!X9';
-    const salt = await bcrypt.genSalt(10);
-    const hashedPassword = await bcrypt.hash(generatedPassword, salt);
+    // Generate secure 16+ char random password with mixed cases, numbers, and symbols
+    const randomHex = crypto.randomBytes(14).toString('base64url');
+    const generatedPassword = `Smk!${randomHex}9Aa#`;
 
-    // 1. Create or Update Dedicated Test Student
-    let student = await User.findOne({ email: SMOKE_STUDENT_EMAIL });
-    if (!student) {
-      student = await User.create({
-        name: '[SMOKE TEST] Rohan Student',
-        email: SMOKE_STUDENT_EMAIL,
-        password: hashedPassword,
-        role: 'student',
-        targetCourse: 'engineering',
-        branch: 'CSE',
-        semester: 1,
-        isApproved: true,
-      });
-      console.log(`✅ Created Smoke Student: ${SMOKE_STUDENT_EMAIL}`);
+    const defaultPreferences = {
+      language: 'en',
+      theme: 'light',
+      defaultCourse: 'Engineering',
+      defaultBranch: 'CSE',
+      defaultSemester: 'Semester 1',
+      notifications: {
+        doubts: true,
+        reEvaluations: true,
+        slaBreaches: true,
+      },
+    };
+
+    const teacherPayload = {
+      name: '[SMOKE TEST] Prof. S. Mukherjee',
+      email: SMOKE_TEACHER_EMAIL,
+      role: 'teacher',
+      stream: 'Engineering',
+      targetCourse: 'engineering',
+      course: 'Engineering',
+      branch: 'CSE',
+      semester: 1,
+      isApproved: true,
+      tokenVersion: 0,
+      mustChangePassword: false,
+      designation: 'Assistant Professor (Mathematics)',
+      bio: 'Dedicated automated smoke test faculty account for production health verifications.',
+      preferences: defaultPreferences,
+    };
+
+    if (dryRun) {
+      console.log('🔍 [DRY RUN CREATE PLAN]:');
+      console.log(`- Target Account     : ${SMOKE_TEACHER_EMAIL}`);
+      console.log(`- Role               : ${teacherPayload.role}`);
+      console.log(`- Course / Branch    : ${teacherPayload.course} / ${teacherPayload.branch}`);
+      console.log(`- isApproved         : ${teacherPayload.isApproved}`);
+      console.log(`- tokenVersion       : ${teacherPayload.tokenVersion}`);
+      console.log(`- mustChangePassword : ${teacherPayload.mustChangePassword}`);
+      console.log(`- Default Preferences:`, JSON.stringify(teacherPayload.preferences));
+      console.log(`- Generated Password : ${generatedPassword}`);
+      console.log('\n[DRY RUN]: Zero records written to database. Run without --dry-run to commit.');
     } else {
-      student.password = hashedPassword;
-      student.name = '[SMOKE TEST] Rohan Student';
-      student.targetCourse = 'engineering';
-      student.branch = 'CSE';
-      student.isApproved = true;
-      await student.save();
-      console.log(`🔄 Updated existing Smoke Student credentials: ${SMOKE_STUDENT_EMAIL}`);
-    }
+      const salt = await bcrypt.genSalt(10);
+      const hashedPassword = await bcrypt.hash(generatedPassword, salt);
+      teacherPayload.password = hashedPassword;
 
-    // 2. Create or Update Dedicated Test Teacher
-    let teacher = await User.findOne({ email: SMOKE_TEACHER_EMAIL });
-    if (!teacher) {
-      teacher = await User.create({
-        name: '[SMOKE TEST] Prof. S. Mukherjee',
-        email: SMOKE_TEACHER_EMAIL,
-        password: hashedPassword,
-        role: 'teacher',
-        targetCourse: 'engineering',
-        branch: 'CSE',
-        isApproved: true,
-      });
-      console.log(`✅ Created Smoke Faculty: ${SMOKE_TEACHER_EMAIL}`);
-    } else {
-      teacher.password = hashedPassword;
-      teacher.name = '[SMOKE TEST] Prof. S. Mukherjee';
-      teacher.targetCourse = 'engineering';
-      teacher.branch = 'CSE';
-      teacher.isApproved = true;
-      await teacher.save();
-      console.log(`🔄 Updated existing Smoke Faculty credentials: ${SMOKE_TEACHER_EMAIL}`);
-    }
+      const user = await User.findOneAndUpdate(
+        { email: SMOKE_TEACHER_EMAIL },
+        { $set: teacherPayload },
+        { upsert: true, new: true, setDefaultsOnInsert: true }
+      );
 
-    console.log('\n' + '='.repeat(70));
-    console.log('🔑 [ONE-TIME LIVE SMOKE TEST CREDENTIALS]');
-    console.log('='.repeat(70));
-    console.log(` Student Email  : ${SMOKE_STUDENT_EMAIL}`);
-    console.log(` Teacher Email  : ${SMOKE_TEACHER_EMAIL}`);
-    console.log(` Password       : ${generatedPassword}`);
-    console.log(' Course / Scope : Engineering / CSE');
-    console.log(' NOTE: This password is ONLY displayed here and is NOT stored in repo.');
-    console.log('='.repeat(70) + '\n');
+      console.log('✅ [LIVE RUN]: Dedicated Smoke Test Teacher account created / refreshed successfully:');
+      console.log(`- Account ID     : ${user._id}`);
+      console.log(`- Email Address  : ${SMOKE_TEACHER_EMAIL}`);
+      console.log(`- Role           : ${user.role}`);
+      console.log(`- Scope          : ${user.stream} / ${user.branch}`);
+      console.log(`- isApproved     : ${user.isApproved}`);
+      console.log(`- tokenVersion   : ${user.tokenVersion}`);
+      console.log(`- mustChangePass : ${user.mustChangePassword}`);
+      console.log('\n' + '='.repeat(75));
+      console.log('🔑 [ONE-TIME LIVE SMOKE TEST TEACHER CREDENTIALS]');
+      console.log('='.repeat(75));
+      console.log(` Portal URL  : /login (Faculty / Teacher Tab)`);
+      console.log(` Login Email : ${SMOKE_TEACHER_EMAIL}`);
+      console.log(` Password    : ${generatedPassword}`);
+      console.log(' NOTE        : This password is ONLY displayed here and is NOT saved in the repo.');
+      console.log('='.repeat(75) + '\n');
+    }
   } else if (mode === 'cleanup') {
-    // 1. Find smoke users by exact dedicated email
-    const smokeUsers = await User.find({
-      email: { $in: [SMOKE_STUDENT_EMAIL, SMOKE_TEACHER_EMAIL] },
-    });
-    const smokeUserIds = smokeUsers.map((u) => u._id);
+    // 1. Locate the smoke teacher account
+    const smokeTeacher = await User.findOne({ email: SMOKE_TEACHER_EMAIL });
+    const teacherId = smokeTeacher ? smokeTeacher._id : null;
 
-    // 2. Find doubts belonging to or assigned to smoke users
-    const smokeDoubts = await Doubt.find({
-      $or: [{ student: { $in: smokeUserIds } }, { 'assignedTeacher.id': { $in: smokeUserIds } }],
-    });
-    const smokeDoubtIds = smokeDoubts.map((d) => d._id);
+    // 2. Count matching documents across collections
+    const userQuery = { email: SMOKE_TEACHER_EMAIL };
+    const secEventQuery = teacherId
+      ? { $or: [{ userId: teacherId }, { userEmail: SMOKE_TEACHER_EMAIL }] }
+      : { userEmail: SMOKE_TEACHER_EMAIL };
+    const emailReqQuery = teacherId
+      ? { $or: [{ userId: teacherId }, { currentEmail: SMOKE_TEACHER_EMAIL }, { requestedEmail: SMOKE_TEACHER_EMAIL }] }
+      : { $or: [{ currentEmail: SMOKE_TEACHER_EMAIL }, { requestedEmail: SMOKE_TEACHER_EMAIL }] };
+    const notifQuery = teacherId
+      ? { $or: [{ userId: teacherId }, { readBy: SMOKE_TEACHER_EMAIL }] }
+      : { readBy: SMOKE_TEACHER_EMAIL };
+    const auditQuery = teacherId
+      ? { $or: [{ actorId: String(teacherId) }, { actorEmail: SMOKE_TEACHER_EMAIL }, { targetId: String(teacherId) }] }
+      : { actorEmail: SMOKE_TEACHER_EMAIL };
+    const doubtQuery = teacherId
+      ? { $or: [{ 'assignedTeacher.id': teacherId }, { 'assignedTeacher.email': SMOKE_TEACHER_EMAIL }] }
+      : { 'assignedTeacher.email': SMOKE_TEACHER_EMAIL };
 
-    // 3. Delete DoubtMessages
-    const deletedMessages = await DoubtMessage.deleteMany({
-      $or: [
-        { doubtId: { $in: smokeDoubtIds } },
-        { authorId: { $in: smokeUserIds.map(String) } },
-      ],
-    });
+    const [userCount, secCount, emailReqCount, notifCount, auditCount, doubtCount] = await Promise.all([
+      User.countDocuments(userQuery),
+      SecurityEvent.countDocuments(secEventQuery),
+      EmailChangeRequest.countDocuments(emailReqQuery),
+      Notification.countDocuments(notifQuery),
+      AuditLog.countDocuments(auditQuery),
+      Doubt.countDocuments(doubtQuery),
+    ]);
 
-    // 4. Delete Doubts
-    const deletedDoubts = await Doubt.deleteMany({
-      _id: { $in: smokeDoubtIds },
-    });
+    if (dryRun) {
+      console.log('🔍 [DRY RUN CLEANUP AUDIT SUMMARY]:');
+      console.log(`- Target Account           : ${SMOKE_TEACHER_EMAIL}`);
+      console.log(`- User Records to Delete   : ${userCount}`);
+      console.log(`- SecurityEvents to Delete : ${secCount}`);
+      console.log(`- EmailRequests to Delete  : ${emailReqCount}`);
+      console.log(`- Notifications to Clean   : ${notifCount}`);
+      console.log(`- AuditLogs to Delete      : ${auditCount}`);
+      console.log(`- Assigned Doubts to Clean : ${doubtCount}`);
+      console.log('\n[DRY RUN]: Zero records deleted. Run without --dry-run to execute.');
+    } else {
+      const [delUser, delSec, delEmail, delNotif, delAudit, delDoubt] = await Promise.all([
+        User.deleteMany(userQuery),
+        SecurityEvent.deleteMany(secEventQuery),
+        EmailChangeRequest.deleteMany(emailReqQuery),
+        Notification.deleteMany(notifQuery),
+        AuditLog.deleteMany(auditQuery),
+        Doubt.deleteMany(doubtQuery),
+      ]);
 
-    // 5. Delete Quota records
-    const deletedQuotas = await DoubtQuota.deleteMany({
-      student: { $in: smokeUserIds },
-    });
-
-    // 6. Delete Notifications
-    const deletedNotifications = await Notification.deleteMany({
-      userId: { $in: smokeUserIds },
-    });
-
-    // 7. Delete Users
-    const deletedUsers = await User.deleteMany({
-      _id: { $in: smokeUserIds },
-    });
-
-    console.log('\n' + '='.repeat(70));
-    console.log('🧹 [SMOKE TEST CLEANUP AUDIT SUMMARY]');
-    console.log('='.repeat(70));
-    console.log(`- Smoke Users Target: [${SMOKE_STUDENT_EMAIL}, ${SMOKE_TEACHER_EMAIL}]`);
-    console.log(`- Users Deleted         : ${deletedUsers.deletedCount}`);
-    console.log(`- Doubts Deleted        : ${deletedDoubts.deletedCount}`);
-    console.log(`- Doubt Messages Deleted: ${deletedMessages.deletedCount}`);
-    console.log(`- Quota Records Deleted : ${deletedQuotas.deletedCount}`);
-    console.log(`- Notifications Deleted : ${deletedNotifications.deletedCount}`);
-    console.log('='.repeat(70));
-    console.log('✅ Smoke test data cleanup completed safely. Zero production accounts touched.\n');
+      console.log('🧹 [LIVE RUN CLEANUP AUDIT SUMMARY]:');
+      console.log(`- Target Account        : ${SMOKE_TEACHER_EMAIL}`);
+      console.log(`- User Records Deleted   : ${delUser.deletedCount}`);
+      console.log(`- SecurityEvents Deleted : ${delSec.deletedCount}`);
+      console.log(`- EmailRequests Deleted  : ${delEmail.deletedCount}`);
+      console.log(`- Notifications Deleted  : ${delNotif.deletedCount}`);
+      console.log(`- AuditLogs Deleted      : ${delAudit.deletedCount}`);
+      console.log(`- Assigned Doubts Deleted: ${delDoubt.deletedCount}`);
+      console.log('='.repeat(75));
+      console.log('✅ Smoke teacher account and all related audit/security entries removed cleanly.');
+    }
   }
 
   await mongoose.disconnect();
 }
 
 run().catch((err) => {
-  console.error('❌ Error managing smoke accounts:', err.message);
+  console.error('❌ Error executing smoke accounts script:', err.message);
   process.exit(1);
 });
