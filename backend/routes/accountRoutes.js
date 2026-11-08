@@ -13,6 +13,7 @@ const {
   getPendingEmailChangeRequests,
   approveEmailChangeRequest,
   rejectEmailChangeRequest,
+  revertEmailChangeRequest,
 } = require('../controllers/accountController');
 const { protect, authorize } = require('../middleware/authMiddleware');
 
@@ -34,5 +35,6 @@ router.post('/admin/reset-password', authorize('admin'), adminResetUserPassword)
 router.get('/admin/email-requests', authorize('admin'), getPendingEmailChangeRequests);
 router.post('/admin/email-requests/:id/approve', authorize('admin'), approveEmailChangeRequest);
 router.post('/admin/email-requests/:id/reject', authorize('admin'), rejectEmailChangeRequest);
+router.post('/admin/email-requests/:id/revert', authorize('admin'), revertEmailChangeRequest);
 
 module.exports = router;

@@ -133,6 +133,23 @@ const updateMyProfile = async (req, res) => {
 
     const { name, phone, designation, bio, preferences } = req.body;
 
+    // Last-admin protection: prevent demoting, disabling, or locking the last active administrator
+    if (user.role === 'admin') {
+      const activeAdmins = await User.countDocuments({ role: 'admin', isApproved: true });
+      if (activeAdmins <= 1) {
+        if (
+          (req.body.role && req.body.role !== 'admin') ||
+          req.body.isApproved === false ||
+          req.body.mustChangePassword === true
+        ) {
+          return res.status(403).json({
+            success: false,
+            message: 'Operation prohibited: Cannot demote, disable, or lock the last active administrator account.',
+          });
+        }
+      }
+    }
+
     // Mass-assignment protection: reject attempts to modify restricted administrative/system fields
     const restrictedKeys = [
       'role',
@@ -822,7 +839,7 @@ const adminResetUserPassword = async (req, res) => {
  */
 const getPendingEmailChangeRequests = async (_req, res) => {
   try {
-    const requests = await EmailChangeRequest.find({ status: 'pending' })
+    const requests = await EmailChangeRequest.find({ status: { $in: ['pending', 'processing'] } })
       .populate('userId', 'name email role stream branch')
       .sort({ createdAt: -1 })
       .lean();
@@ -860,9 +877,15 @@ const approveEmailChangeRequest = async (req, res) => {
   try {
     const { id } = req.params;
     const request = await EmailChangeRequest.findById(id);
-    if (!request || request.status !== 'pending') {
-      return res.status(404).json({ success: false, message: 'Pending email change request not found.' });
+    if (!request || !['pending', 'processing'].includes(request.status)) {
+      return res.status(404).json({ success: false, message: 'Pending or processing email change request not found.' });
     }
+
+    // Step 0: Mark request as 'processing' before starting the multi-step updates
+    request.status = 'processing';
+    request.reviewedBy = req.user._id;
+    request.reviewedByName = req.user.name || 'Administrator';
+    await request.save();
 
     const cleanEmail = request.requestedEmail.toLowerCase().trim();
 
@@ -967,7 +990,7 @@ const rejectEmailChangeRequest = async (req, res) => {
     const { reason } = req.body;
 
     const request = await EmailChangeRequest.findById(id);
-    if (!request || request.status !== 'pending') {
+    if (!request || !['pending', 'processing'].includes(request.status)) {
       return res.status(404).json({ success: false, message: 'Pending email change request not found.' });
     }
 
@@ -1002,7 +1025,73 @@ const rejectEmailChangeRequest = async (req, res) => {
   }
 };
 
+/**
+ * POST /api/account/admin/email-requests/:id/revert
+ * Administrative recovery path: reverts a 'processing' or 'pending' email request,
+ * restores User.email and active Doubts to currentEmail, bumps tokenVersion,
+ * and marks status as 'rejected'.
+ */
+const revertEmailChangeRequest = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { reason } = req.body;
+
+    const request = await EmailChangeRequest.findById(id);
+    if (!request || !['pending', 'processing'].includes(request.status)) {
+      return res.status(404).json({
+        success: false,
+        message: 'Pending or processing email change request not found.',
+      });
+    }
+
+    const user = await User.findById(request.userId);
+    if (user) {
+      user.email = request.currentEmail;
+      user.tokenVersion = (user.tokenVersion ?? 0) + 1;
+      await user.save();
+
+      await Doubt.updateMany(
+        { 'assignedTeacher.id': user._id },
+        { $set: { 'assignedTeacher.email': request.currentEmail } }
+      ).catch(() => {});
+
+      await Notification.updateMany(
+        { readBy: request.requestedEmail },
+        { $set: { 'readBy.$[elem]': request.currentEmail } },
+        { arrayFilters: [{ elem: request.requestedEmail }] }
+      ).catch(() => {});
+    }
+
+    request.status = 'rejected';
+    request.reviewedBy = req.user._id;
+    request.reviewedByName = req.user.name || 'Administrator';
+    request.reviewedAt = new Date();
+    request.rejectionReason = reason ? String(reason).trim() : 'Reverted by administrator via recovery path.';
+    await request.save();
+
+    const { maskedIp, userAgent } = getClientMeta(req);
+    await SecurityEvent.create({
+      userId: request.userId,
+      userEmail: request.currentEmail,
+      userRole: user ? user.role : 'teacher',
+      action: 'email_change_reverted',
+      details: { requestId: request._id, requestedEmail: request.requestedEmail },
+      ipAddress: maskedIp,
+      userAgent,
+    });
+
+    res.json({
+      success: true,
+      message: 'Email change request reverted successfully. Account restored to original email.',
+    });
+  } catch (err) {
+    console.error('revertEmailChangeRequest error:', err.message);
+    res.status(500).json({ success: false, message: 'Failed to revert email change request.' });
+  }
+};
+
 module.exports = {
+  revertEmailChangeRequest,
   getMyAccount,
   updateMyProfile,
   changePassword,

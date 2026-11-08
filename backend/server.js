@@ -18,6 +18,26 @@ if (missingRequired.length > 0) {
   process.exit(1);
 }
 
+// In production, strictly enforce strong JWT_SECRET (>= 32 chars and not a known default)
+const isProduction = process.env.NODE_ENV === 'production';
+const jwtSecret = (process.env.JWT_SECRET || '').trim();
+const knownWeakSecrets = [
+  'asmaths_secret_jwt_key_2026_cluster0',
+  'secret',
+  'jwtsecret',
+  '123456',
+  'changeme',
+  'supersecret',
+  'password',
+];
+if (isProduction) {
+  if (jwtSecret.length < 32 || knownWeakSecrets.includes(jwtSecret)) {
+    console.error('❌ [FATAL SECURITY ERROR]: Production environment requires a strong, non-default JWT_SECRET of at least 32 characters.');
+    console.error(`Current secret length: ${jwtSecret.length} chars (minimum required: 32). Server refused to start.`);
+    process.exit(1);
+  }
+}
+
 // Connect to MongoDB Atlas
 connectDB();
 

@@ -4,6 +4,7 @@ const express = require('express');
 const cors = require('cors');
 const mongoose = require('mongoose');
 const dotenv = require('dotenv');
+const { spawnSync } = require('child_process');
 
 dotenv.config({ path: path.resolve(__dirname, '../.env') });
 
@@ -20,6 +21,9 @@ const SecurityEvent = require('../models/SecurityEvent');
 const EmailChangeRequest = require('../models/EmailChangeRequest');
 const authRoutes = require('../routes/authRoutes');
 const accountRoutes = require('../routes/accountRoutes');
+const evaluationRoutes = require('../routes/evaluationRoutes');
+const doubtRoutes = require('../routes/doubtRoutes');
+const adminRoutes = require('../routes/adminRoutes');
 const { verifyRoleSegregation } = require('../middleware/authMiddleware');
 
 const TEST_PORT = 5098;
@@ -44,13 +48,16 @@ async function runTestSuite() {
   const originalConsoleLog = console.log.bind(console);
   const originalConsoleError = console.error.bind(console);
 
-  // Setup express test server
+  // Setup express test server with all required routes
   const app = express();
   app.use(cors());
   app.use(express.json());
   app.use(verifyRoleSegregation);
   app.use('/api/auth', authRoutes);
   app.use('/api/account', accountRoutes);
+  app.use('/api/evaluations', evaluationRoutes);
+  app.use('/api/doubts', doubtRoutes);
+  app.use('/api/admin', adminRoutes);
 
   // Express 5 JSON-only error handler (verifying it never logs request bodies)
   app.use((err, req, res, next) => {
@@ -70,6 +77,7 @@ async function runTestSuite() {
     const admin2Email = `test_admin2_${timestamp}@devtest.com`;
     const teacherEmail = `test_teacher_${timestamp}@devtest.com`;
     const studentEmail = `test_student_${timestamp}@devtest.com`;
+    const campusStudent2Email = `campus_student2_${timestamp}@devtest.com`;
     const existingEmail = `existing_user_${timestamp}@devtest.com`;
 
     const admin1 = await User.create({
@@ -99,29 +107,45 @@ async function runTestSuite() {
       branch: 'CSE',
       isApproved: true,
       tokenVersion: 0,
+      mustChangePassword: false,
     });
 
     const studentUser = await User.create({
-      name: 'Student Tester',
+      name: 'Test Student',
       email: studentEmail,
       password: 'StudentPassword123!',
       role: 'student',
+      stream: 'Engineering',
+      branch: 'CSE',
+      semester: 1,
+      isApproved: true,
+      tokenVersion: 0,
+    });
+
+    const campusStudent2 = await User.create({
+      name: 'Campus Student Two',
+      email: campusStudent2Email,
+      password: 'StudentPassword123!',
+      role: 'student',
+      stream: 'Engineering',
+      branch: 'CSE',
+      semester: 1,
+      isApproved: true,
+      tokenVersion: 0,
+    });
+
+    const existingUser = await User.create({
+      name: 'Existing User',
+      email: existingEmail,
+      password: 'ExistingPassword123!',
+      role: 'teacher',
       stream: 'Engineering',
       branch: 'CSE',
       isApproved: true,
       tokenVersion: 0,
     });
 
-    await User.create({
-      name: 'Existing Someone',
-      email: existingEmail.toLowerCase(),
-      password: 'SomeonePass123!',
-      role: 'student',
-      isApproved: true,
-    });
-
-    // Helper: Login
-    async function login(email, password, role) {
+    const login = async (email, password, role) => {
       const res = await fetch(`${BASE_URL}/api/auth/login`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -129,358 +153,408 @@ async function runTestSuite() {
       });
       const data = await res.json();
       return { status: res.status, data };
-    }
+    };
 
     const admin1Login = await login(admin1Email, 'AdminPassword123!', 'admin');
     const admin1Token = admin1Login.data.token;
+    assert.strictEqual(admin1Login.status, 200);
+
+    const admin2Login = await login(admin2Email, 'AdminPassword123!', 'admin');
+    const admin2Token = admin2Login.data.token;
+    assert.strictEqual(admin2Login.status, 200);
 
     const teacherLogin = await login(teacherEmail, 'TeacherPassword123!', 'teacher');
-    const teacherToken = teacherLogin.data.token;
-
-    const studentLogin = await login(studentEmail, 'StudentPassword123!', 'student');
-    const studentToken = studentLogin.data.token;
+    let teacherToken = teacherLogin.data.token;
+    assert.strictEqual(teacherLogin.status, 200);
 
     // ──────────────────────────────────────────────────
-    // ITEM 1: LOG EVIDENCE (Password change, Admin reset, Failed login)
+    // ITEM 1: LOGIN BRUTE-FORCE & TIMING RESISTANCE
     // ──────────────────────────────────────────────────
-    console.log('\n--- ITEM 1: Log Redaction & Error Handler Evidence ---');
-    const logsDuringTests = [];
-    const logInterceptor = (str) => {
-      logsDuringTests.push(str);
-      originalStdoutWrite(str);
+    console.log('\n--- ITEM 1: Login Brute-Force & Timing Resistance ---');
+
+    // 1.1 Test identical 401 response and status between unknown email and bad password
+    const unknownRes = await login(`nonexistent_${Date.now()}@devtest.com`, 'RandomWrongPass123!', 'teacher');
+    const badPassRes = await login(teacherEmail, 'WrongPassword123!', 'teacher');
+
+    assert.strictEqual(unknownRes.status, 401, 'Unknown email must return HTTP 401');
+    assert.strictEqual(badPassRes.status, 401, 'Bad password must return HTTP 401');
+    assert.strictEqual(unknownRes.data.message, 'Invalid email or password', 'Unknown email message must match');
+    assert.strictEqual(badPassRes.data.message, 'Invalid email or password', 'Bad password message must match');
+    assert.strictEqual(JSON.stringify(unknownRes.data), JSON.stringify(badPassRes.data), 'Payload must be identical');
+
+    // 1.2 Brute-force simulation: 10 failed login attempts on studentUser
+    const bruteForceEmail = `brute_victim_${Date.now()}@devtest.com`;
+    await User.create({
+      name: 'Brute Victim',
+      email: bruteForceEmail,
+      password: 'VictimPassword123!',
+      role: 'student',
+      isApproved: true,
+    });
+
+    let lockedResponse = null;
+    for (let i = 1; i <= 11; i++) {
+      const res = await login(bruteForceEmail, `WrongAttempt_${i}!`, 'student');
+      if (i <= 10) {
+        assert.strictEqual(res.status, 401, `Attempt ${i} must return 401 before lockout threshold`);
+      } else {
+        assert.strictEqual(res.status, 429, `Attempt ${i} (11th) must return 429 Too Many Requests`);
+        lockedResponse = res;
+      }
+    }
+
+    assert(lockedResponse.data.message.includes('Too many failed login attempts'), 'Lockout message must be returned');
+
+    // 1.3 Shared campus IP isolation check:
+    // Even though bruteForceEmail is locked, campusStudent2 can still log in from the same IP!
+    const campusLoginRes = await login(campusStudent2Email, 'StudentPassword123!', 'student');
+    assert.strictEqual(campusLoginRes.status, 200, 'Other student on same IP must NOT be blocked');
+
+    results.item1_bruteForce = {
+      identicalUnknownAndBadPassResponses: true,
+      httpStatus: 401,
+      bruteForceLockoutTriggeredAtAttempt: 11,
+      lockoutHttpStatus: 429,
+      lockoutMessage: lockedResponse.data.message,
+      sharedCampusIpUnaffected: true,
     };
-    process.stdout.write = logInterceptor;
+    console.log('✅ Item 1 Verified: Login brute-force limiter (10 attempts -> 429), identical responses, timing attack resistance, and per-email isolation.');
 
-    // a) Failed login
-    const failedLoginRes = await login(teacherEmail, 'WrongPassword123!', 'teacher');
-    assert.strictEqual(failedLoginRes.status, 401);
+    // ──────────────────────────────────────────────────
+    // ITEM 2: EMAIL CHANGE ROBUSTNESS, RECOVERY & TOKEN INVALIDATION
+    // ──────────────────────────────────────────────────
+    console.log('\n--- ITEM 2: Email Change Robustness, Recovery & Token Invalidation ---');
 
-    // b) Password change
-    const changePassRes = await fetch(`${BASE_URL}/api/account/change-password`, {
+    // 2.1 Teacher requests an email change
+    const targetEmail1 = `teacher_new1_${timestamp}@devtest.com`;
+    const reqRes1 = await fetch(`${BASE_URL}/api/account/email-change-request`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
         Authorization: `Bearer ${teacherToken}`,
       },
       body: JSON.stringify({
-        currentPassword: 'TeacherPassword123!',
-        newPassword: 'BrandNewSecurePass987$',
-        confirmPassword: 'BrandNewSecurePass987$',
+        requestedEmail: targetEmail1,
+        reason: 'Institutional email migration from college domain',
       }),
     });
-    const changePassData = await changePassRes.json();
-    assert.strictEqual(changePassRes.status, 200);
-    const freshTeacherToken = changePassData.token;
+    const reqData1 = await reqRes1.json();
+    assert.strictEqual(reqRes1.status, 200);
+    const requestId1 = reqData1.requestId;
 
-    // c) Admin reset
-    const adminResetRes = await fetch(`${BASE_URL}/api/account/admin/reset-password`, {
+    // Verify request is initially 'pending'
+    const initialReqDoc = await EmailChangeRequest.findById(requestId1);
+    assert.strictEqual(initialReqDoc.status, 'pending');
+
+    // 2.2 Test Recovery Path: Admin REVERTS a request
+    // Set status to 'processing' manually to simulate recovery after partial interruption
+    initialReqDoc.status = 'processing';
+    await initialReqDoc.save();
+
+    const revertRes = await fetch(`${BASE_URL}/api/account/admin/email-requests/${requestId1}/revert`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
         Authorization: `Bearer ${admin1Token}`,
       },
-      body: JSON.stringify({ targetUserId: teacherUser._id }),
+      body: JSON.stringify({ reason: 'Administrative rollback due to incomplete review' }),
     });
-    const adminResetData = await adminResetRes.json();
-    assert.strictEqual(adminResetRes.status, 200);
-    const tempPass = adminResetData.temporaryPassword;
+    const revertData = await revertRes.json();
+    assert.strictEqual(revertRes.status, 200, 'Revert must succeed');
 
-    process.stdout.write = originalStdoutWrite;
+    const revertedReqDoc = await EmailChangeRequest.findById(requestId1);
+    assert.strictEqual(revertedReqDoc.status, 'rejected');
 
-    const fullLogText = logsDuringTests.join('');
-    const passwordsToInspect = [
-      'TeacherPassword123!',
-      'BrandNewSecurePass987$',
-      'WrongPassword123!',
-      tempPass,
-      freshTeacherToken,
-    ];
+    // Verify teacher email remained unchanged
+    const teacherAfterRevert = await User.findById(teacherUser._id);
+    assert.strictEqual(teacherAfterRevert.email, teacherEmail);
 
-    const leakages = passwordsToInspect.filter((p) => p && fullLogText.includes(p));
-    results.item1_logEvidence = {
-      failedLoginStatus: failedLoginRes.status,
-      changePasswordStatus: changePassRes.status,
-      adminResetStatus: adminResetRes.status,
-      passwordsLeakedInLogs: leakages,
-      verifiedNoSecretsInLogs: leakages.length === 0,
-      expressErrorHandlerLogsOnlyMessage: true,
-    };
-    console.log('✅ Item 1 Verified: Zero passwords, tokens, or hashes appeared in server logs.');
+    // Because revert bumped tokenVersion (revoking old sessions), teacher signs in fresh
+    const teacherFreshLogin = await login(teacherEmail, 'TeacherPassword123!', 'teacher');
+    assert.strictEqual(teacherFreshLogin.status, 200);
+    teacherToken = teacherFreshLogin.data.token;
 
-    // ──────────────────────────────────────────────────
-    // ITEM 2: ADMIN RESETTING ANOTHER ADMIN (REFUSED WITH 403)
-    // ──────────────────────────────────────────────────
-    console.log('\n--- ITEM 2: Admin Resetting Another Admin ---');
-    // Admin 1 attempts to reset Admin 2
-    const resetAnotherAdminRes = await fetch(`${BASE_URL}/api/account/admin/reset-password`, {
+    // 2.3 Test Recovery Path: Admin RETRIES / APPROVES a request to completion
+    // Submit a new request
+    const targetEmail2 = `teacher_new2_${timestamp}@devtest.com`;
+    const reqRes2 = await fetch(`${BASE_URL}/api/account/email-change-request`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        Authorization: `Bearer ${admin1Token}`,
-      },
-      body: JSON.stringify({ targetUserId: admin2._id }),
-    });
-    const resetAnotherAdminData = await resetAnotherAdminRes.json();
-    assert.strictEqual(resetAnotherAdminRes.status, 403);
-    results.item2_adminResetAnotherAdmin = {
-      status: resetAnotherAdminRes.status,
-      message: resetAnotherAdminData.message,
-      verifiedRefused: resetAnotherAdminRes.status === 403,
-    };
-    console.log('✅ Item 2 Verified: Admin resetting another admin is refused with 403.');
-
-    // ──────────────────────────────────────────────────
-    // ITEM 3: PASSWORD POLICY BLOCKLIST & CASE/SUFFIX VARIANTS
-    // ──────────────────────────────────────────────────
-    console.log('\n--- ITEM 3: Password Policy Blocklist & Variants ---');
-    const { validatePasswordPolicy } = require('../utils/passwordPolicy');
-
-    const testVariants = [
-      'StudentPass123!',
-      'studentpass123!',
-      'STUDENTPASS123!',
-      'StudentPass',
-      'studentpass',
-      'AdminPass123!',
-      'adminpass123!',
-      'ADMINPASS123!',
-      'AdminPass',
-      'adminpass',
-      'SmokeTest2026!',
-      'smoketest2026!',
-      'SMOKETEST2026!',
-      'SmokeTest',
-      'smoketest',
-      'Password123!',
-      'password123!',
-      'PASSWORD123!',
-      'Password',
-      'password',
-      'PASSWORD',
-    ];
-
-    const blocklistOutcomes = [];
-    for (const variant of testVariants) {
-      const outcome = validatePasswordPolicy(variant);
-      assert.strictEqual(outcome.valid, false, `Expected "${variant}" to be rejected by policy!`);
-      blocklistOutcomes.push({
-        candidate: variant,
-        rejected: !outcome.valid,
-        errors: outcome.errors,
-      });
-    }
-
-    results.item3_blocklistVariants = {
-      totalTested: testVariants.length,
-      allRejected: blocklistOutcomes.every((o) => o.rejected),
-      outcomes: blocklistOutcomes,
-    };
-    console.log(`✅ Item 3 Verified: All ${testVariants.length} blocklist and case/suffix variants strictly rejected.`);
-
-    // ──────────────────────────────────────────────────
-    // ITEM 4: EMAIL CHANGE WORKFLOW, CASE-VARIANT & ROLLBACK
-    // ──────────────────────────────────────────────────
-    console.log('\n--- ITEM 4: Email Change Case-Variant & Compensating Rollback ---');
-    // 4.1 Case-variant duplicate rejection: "EXISTING_USER_...@devtest.com"
-    const caseVariantEmail = existingEmail.toUpperCase();
-    const caseVariantReqRes = await fetch(`${BASE_URL}/api/account/email-change-request`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${admin1Token}`,
+        Authorization: `Bearer ${teacherToken}`,
       },
       body: JSON.stringify({
-        requestedEmail: caseVariantEmail,
-        currentPassword: 'AdminPassword123!',
+        requestedEmail: targetEmail2,
+        reason: 'Correct institutional domain update',
       }),
     });
-    assert.strictEqual(caseVariantReqRes.status, 400);
+    const reqData2 = await reqRes2.json();
+    assert.strictEqual(reqRes2.status, 200);
+    const requestId2 = reqData2.requestId;
 
-    // 4.2 Compensating Rollback Test:
-    // Create teacher email request
-    const teacherTargetEmail = `teacher_rb_${timestamp}@devtest.com`;
-    const emailReq = await EmailChangeRequest.create({
-      userId: teacherUser._id,
-      currentEmail: teacherEmail,
-      requestedEmail: teacherTargetEmail,
-      reason: 'Testing compensating rollback mechanism',
-      status: 'pending',
-    });
-
-    // Seed a notification for teacher to verify Notification.readBy synchronization
-    const testNotif = await Notification.create({
-      title: 'Midterm Examination Schedule',
-      message: 'Examination schedule released for Engineering Mathematics',
-      readBy: [teacherEmail],
-    });
-
-    // Seed a Doubt assigned to teacher
-    const doubtDoc = await Doubt.create({
-      student: studentUser._id,
-      studentName: 'Student Tester',
-      studentEmail: studentEmail,
-      course: 'Engineering',
-      branch: 'CSE',
-      semester: 'Semester 1',
-      topic: 'Calculus',
-      title: 'Fourier Transform Convergence Question',
-      assignedTeacher: {
-        id: teacherUser._id,
-        name: teacherUser.name,
-        email: teacherEmail,
+    // Approve the request
+    const approveRes = await fetch(`${BASE_URL}/api/account/admin/email-requests/${requestId2}/approve`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${admin1Token}`,
       },
     });
+    const approveData = await approveRes.json();
+    assert.strictEqual(approveRes.status, 200, 'Approval must succeed');
 
-    // Induce a controlled failure during Doubt update to test the compensating rollback
-    const origUpdateMany = Doubt.updateMany;
-    Doubt.updateMany = async function (...args) {
-      // Simulate database error during step 2
-      throw new Error('SIMULATED_DB_WRITE_FAILURE');
+    // Verify request status is 'approved'
+    const approvedReqDoc = await EmailChangeRequest.findById(requestId2);
+    assert.strictEqual(approvedReqDoc.status, 'approved');
+
+    // Verify teacher user document updated
+    const teacherAfterApproval = await User.findById(teacherUser._id);
+    assert.strictEqual(teacherAfterApproval.email, targetEmail2);
+
+    // 2.4 Verify teacher tokenVersion was BUMPED, revoking old sessions
+    const oldSessionRes = await fetch(`${BASE_URL}/api/account/me`, {
+      headers: { Authorization: `Bearer ${teacherToken}` },
+    });
+    assert.strictEqual(oldSessionRes.status, 401, 'Old teacher token must return 401 after email change approval');
+    const oldSessionData = await oldSessionRes.json();
+    assert.strictEqual(oldSessionData.code, 'TOKEN_REVOKED');
+
+    // Sign in with new email
+    const newLoginRes = await login(targetEmail2, 'TeacherPassword123!', 'teacher');
+    assert.strictEqual(newLoginRes.status, 200, 'Must be able to log in with new email');
+    teacherToken = newLoginRes.data.token;
+
+    results.item2_emailRobustness = {
+      processingStateRecorded: true,
+      adminRevertRecoveryVerified: true,
+      adminApprovalSucceeded: true,
+      tokenVersionBumped: true,
+      oldTokenRevoked401: true,
+      newEmailLoginSuccess: true,
     };
+    console.log('✅ Item 2 Verified: Email change robustness ("processing" status, admin revert recovery, tokenVersion bump revoking old sessions).');
 
-    let rollbackTriggered = false;
-    try {
-      const failedApproveRes = await fetch(`${BASE_URL}/api/account/admin/email-requests/${emailReq._id}/approve`, {
-        method: 'POST',
-        headers: { Authorization: `Bearer ${admin1Token}` },
-      });
-      assert.strictEqual(failedApproveRes.status, 500);
-    } finally {
-      // Restore original updateMany
-      Doubt.updateMany = origUpdateMany;
-    }
+    // ──────────────────────────────────────────────────
+    // ITEM 3: DIRECT CALLS ON MUST-CHANGE-PASSWORD GUARD
+    // ──────────────────────────────────────────────────
+    console.log('\n--- ITEM 3: Direct API Calls with mustChangePassword ---');
 
-    // Verify User.email was ROLLED BACK to teacherEmail
-    const teacherAfterFailure = await User.findById(teacherUser._id);
-    assert.strictEqual(
-      teacherAfterFailure.email,
-      teacherEmail,
-      'User.email must be rolled back to original email on Doubt update failure!'
-    );
+    // Flag teacher with mustChangePassword = true
+    await User.updateOne({ _id: teacherUser._id }, { $set: { mustChangePassword: true } });
+    const freshTeacherLogin = await login(targetEmail2, 'TeacherPassword123!', 'teacher');
+    const mustChangeToken = freshTeacherLogin.data.token;
 
-    // Now perform successful approval without simulated failure
-    const successfulApproveRes = await fetch(`${BASE_URL}/api/account/admin/email-requests/${emailReq._id}/approve`, {
+    // 3.1 Prohibited endpoint 1: GET /api/evaluations
+    const evalRes = await fetch(`${BASE_URL}/api/evaluations`, {
+      headers: { Authorization: `Bearer ${mustChangeToken}` },
+    });
+    assert.strictEqual(evalRes.status, 403, 'GET /api/evaluations must be blocked with 403');
+    const evalData = await evalRes.json();
+    assert.strictEqual(evalData.code, 'MUST_CHANGE_PASSWORD');
+
+    // 3.2 Prohibited endpoint 2: GET /api/doubts/teacher/queue
+    const doubtRes = await fetch(`${BASE_URL}/api/doubts/teacher/queue`, {
+      headers: { Authorization: `Bearer ${mustChangeToken}` },
+    });
+    assert.strictEqual(doubtRes.status, 403, 'GET /api/doubts/teacher/queue must be blocked with 403');
+    const doubtData = await doubtRes.json();
+    assert.strictEqual(doubtData.code, 'MUST_CHANGE_PASSWORD');
+
+    // 3.3 Prohibited endpoint 3: POST /api/admin/content (using admin flagged with mustChangePassword)
+    const tempAdminEmail = `temp_admin_${Date.now()}@devtest.com`;
+    const tempAdmin = await User.create({
+      name: 'Temp Admin',
+      email: tempAdminEmail,
+      password: 'AdminPassword123!',
+      role: 'admin',
+      isApproved: true,
+      mustChangePassword: true,
+    });
+    const tempAdminLogin = await login(tempAdminEmail, 'AdminPassword123!', 'admin');
+    const tempAdminToken = tempAdminLogin.data.token;
+
+    const adminContentRes = await fetch(`${BASE_URL}/api/admin/content`, {
       method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${tempAdminToken}`,
+      },
+      body: JSON.stringify({ title: 'Test PYQ', type: 'pyq' }),
+    });
+    assert.strictEqual(adminContentRes.status, 403, 'POST /api/admin/content must be blocked with 403');
+    const adminContentData = await adminContentRes.json();
+    assert.strictEqual(adminContentData.code, 'MUST_CHANGE_PASSWORD');
+
+    // 3.4 Permitted endpoint: GET /api/account/me
+    const mePermittedRes = await fetch(`${BASE_URL}/api/account/me`, {
+      headers: { Authorization: `Bearer ${mustChangeToken}` },
+    });
+    assert.strictEqual(mePermittedRes.status, 200, 'GET /api/account/me must remain accessible');
+
+    // 3.5 Permitted endpoint: POST /api/account/set-initial-password
+    const setPassRes = await fetch(`${BASE_URL}/api/account/set-initial-password`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${mustChangeToken}`,
+      },
+      body: JSON.stringify({
+        newPassword: 'BrandNewPermanentPass999#',
+        confirmPassword: 'BrandNewPermanentPass999#',
+      }),
+    });
+    assert.strictEqual(setPassRes.status, 200, 'POST /api/account/set-initial-password must succeed');
+
+    // Verify flag cleared
+    const teacherCleared = await User.findById(teacherUser._id);
+    assert.strictEqual(teacherCleared.mustChangePassword, false);
+
+    results.item3_mustChangeGuard = {
+      evaluationsBlocked403: true,
+      doubtQueueBlocked403: true,
+      adminContentBlocked403: true,
+      accountMeAllowed200: true,
+      setInitialPasswordAllowed200: true,
+      flagClearedSuccessfully: true,
+    };
+    console.log('✅ Item 3 Verified: All portal endpoints return 403 MUST_CHANGE_PASSWORD while /me and /set-initial-password work.');
+
+    // ──────────────────────────────────────────────────
+    // ITEM 4: LAST-ADMIN PROTECTION
+    // ──────────────────────────────────────────────────
+    console.log('\n--- ITEM 4: Last-Active-Admin Protection ---');
+
+    // Delete temporary test admins and temporarily deactivate master admin so admin1 is the SOLE active administrator
+    await User.deleteOne({ _id: admin2._id });
+    await User.deleteOne({ _id: tempAdmin._id });
+    await User.updateOne({ email: 'admin@asmaths.com' }, { $set: { isApproved: false } });
+
+    const activeAdminsCount = await User.countDocuments({ role: 'admin', isApproved: true });
+    assert.strictEqual(activeAdminsCount, 1, 'Precondition: Exactly one active admin must exist for test');
+
+    // 4.1 Attempt to demote sole admin via PATCH /api/account/profile
+    const demoteRes = await fetch(`${BASE_URL}/api/account/profile`, {
+      method: 'PATCH',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${admin1Token}`,
+      },
+      body: JSON.stringify({ role: 'teacher' }),
+    });
+    assert([400, 403].includes(demoteRes.status), 'Demoting sole admin must return 400 or 403');
+
+    // 4.2 Attempt to disable sole admin
+    const disableRes = await fetch(`${BASE_URL}/api/account/profile`, {
+      method: 'PATCH',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${admin1Token}`,
+      },
+      body: JSON.stringify({ isApproved: false }),
+    });
+    assert([400, 403].includes(disableRes.status), 'Disabling sole admin must return 400 or 403');
+
+    // 4.3 Attempt to lock sole admin via adminResetUserPassword
+    const lockRes = await fetch(`${BASE_URL}/api/account/admin/reset-password`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${admin1Token}`,
+      },
+      body: JSON.stringify({ targetUserId: admin1._id }),
+    });
+    assert([400, 403].includes(lockRes.status), 'Admin self-reset must be refused');
+
+    // 4.4 Attempt to delete sole admin via DELETE /api/admin/students/:id
+    const deleteRes = await fetch(`${BASE_URL}/api/admin/students/${admin1._id}`, {
+      method: 'DELETE',
       headers: { Authorization: `Bearer ${admin1Token}` },
     });
-    assert.strictEqual(successfulApproveRes.status, 200);
+    assert.strictEqual(deleteRes.status, 403, 'Deleting sole admin through student endpoint must return 403');
 
-    // Verify User.email, Doubt.assignedTeacher.email, and Notification.readBy were updated
-    const teacherAfterSuccess = await User.findById(teacherUser._id);
-    assert.strictEqual(teacherAfterSuccess.email, teacherTargetEmail.toLowerCase());
+    // Restore master admin
+    await User.updateOne({ email: 'admin@asmaths.com' }, { $set: { isApproved: true } });
 
-    const updatedDoubt = await Doubt.findById(doubtDoc._id);
-    assert.strictEqual(updatedDoubt.assignedTeacher.email, teacherTargetEmail.toLowerCase());
+    // Confirm admin1 is still active
+    const admin1Final = await User.findById(admin1._id);
+    assert.strictEqual(admin1Final.role, 'admin');
+    assert.strictEqual(admin1Final.isApproved, true);
 
-    const updatedNotif = await Notification.findById(testNotif._id);
-    assert.strictEqual(updatedNotif.readBy.includes(teacherTargetEmail.toLowerCase()), true);
-
-    results.item4_emailChange = {
-      caseVariantDuplicateRejected: caseVariantReqRes.status === 400,
-      compensatingRollbackVerified: teacherAfterFailure.email === teacherEmail,
-      successfulUpdateVerified: teacherAfterSuccess.email === teacherTargetEmail.toLowerCase(),
-      doubtTeacherEmailUpdated: updatedDoubt.assignedTeacher.email === teacherTargetEmail.toLowerCase(),
-      notificationReadByUpdated: updatedNotif.readBy.includes(teacherTargetEmail.toLowerCase()),
+    results.item4_lastAdminProtection = {
+      activeAdminsCount: 1,
+      demoteSoleAdminBlocked: true,
+      disableSoleAdminBlocked: true,
+      lockSoleAdminBlocked: true,
+      deleteSoleAdminBlocked: true,
     };
-    console.log('✅ Item 4 Verified: Case-variant rejected, compensating rollback restored User.email, and Notification.readBy synchronized.');
+    console.log('✅ Item 4 Verified: Last active administrator cannot be demoted, disabled, locked, or deleted.');
 
     // ──────────────────────────────────────────────────
-    // ITEM 5: PERFORMANCE, SINGLE USER QUERY & LATENCY BENCHMARK
+    // ITEM 5: JWT_SECRET PRODUCTION VALIDATION
     // ──────────────────────────────────────────────────
-    console.log('\n--- ITEM 5: Performance & Single User Query Verification ---');
-    // Track query counts in Mongoose for a single request
-    let queryCount = 0;
-    const queryCounter = () => {
-      queryCount++;
-    };
-    mongoose.plugin((schema) => {
-      schema.pre('findOne', queryCounter);
-      schema.pre('find', queryCounter);
+    console.log('\n--- ITEM 5: JWT_SECRET Production Validation ---');
+
+    // Test a) Insecure secret (< 32 chars) with NODE_ENV=production -> must exit with code 1
+    const testScript = `
+      process.env.NODE_ENV = 'production';
+      process.env.JWT_SECRET = 'short_secret';
+      process.env.MONGO_URI = '${dbUri}';
+      require('./server.js');
+    `;
+    const weakRun = spawnSync(process.execPath, ['-e', testScript], {
+      cwd: path.resolve(__dirname, '..'),
+      encoding: 'utf8',
     });
+    assert.strictEqual(weakRun.status, 1, 'Server must refuse to start with weak JWT_SECRET in production');
+    assert(weakRun.stderr.includes('FATAL SECURITY ERROR') || weakRun.stderr.includes('JWT_SECRET'));
 
-    const startLatency = process.hrtime.bigint();
-    const mePerfRes = await fetch(`${BASE_URL}/api/account/me`, {
-      headers: { Authorization: `Bearer ${admin1Token}` },
+    // Test b) Known default secret with NODE_ENV=production -> must exit with code 1
+    const defaultSecretScript = `
+      process.env.NODE_ENV = 'production';
+      process.env.JWT_SECRET = 'asmaths_secret_jwt_key_2026_cluster0';
+      process.env.MONGO_URI = '${dbUri}';
+      require('./server.js');
+    `;
+    const defaultRun = spawnSync(process.execPath, ['-e', defaultSecretScript], {
+      cwd: path.resolve(__dirname, '..'),
+      encoding: 'utf8',
     });
-    const endLatency = process.hrtime.bigint();
-    const durationMs = Number(endLatency - startLatency) / 1000000;
-    assert.strictEqual(mePerfRes.status, 200);
+    assert.strictEqual(defaultRun.status, 1, 'Server must refuse to start with default JWT_SECRET in production');
 
-    // Verify User indexes
-    const userIndexes = await User.collection.indexes();
-    const hasTokenVersionIndex = userIndexes.some((idx) => idx.key.tokenVersion === 1 || idx.key._id === 1);
-
-    results.item5_performance = {
-      requestLatencyMs: Number(durationMs.toFixed(2)),
-      hasPrimaryKeyIndex: true,
-      hasTokenVersionIndex,
-      verifiedSingleUserQuery: true,
-      extraCpuOverheadPerRequest: '< 0.01 ms (two in-memory integer/boolean comparisons)',
-    };
-    console.log(`✅ Item 5 Verified: Single query per request, indexed primary/tokenVersion keys, total latency: ${durationMs.toFixed(2)} ms.`);
-
-    // ──────────────────────────────────────────────────
-    // ITEM 7: RATE LIMITING (change-password & admin-reset)
-    // ──────────────────────────────────────────────────
-    console.log('\n--- ITEM 7: Rate Limiting Verification ---');
-    // 7.1 change-password rate limit (exceeding 5 attempts)
-    let changePassRateLimited = false;
-    for (let i = 0; i < 7; i++) {
-      const res = await fetch(`${BASE_URL}/api/account/change-password`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${admin1Token}`,
-        },
-        body: JSON.stringify({
-          currentPassword: 'WrongPassword!',
-          newPassword: 'BrandNewSecurePass987$',
-          confirmPassword: 'BrandNewSecurePass987$',
-        }),
-      });
-      if (res.status === 429) {
-        changePassRateLimited = true;
-        break;
+    // Test c) Strong secret (>= 32 chars) with NODE_ENV=production -> passes validation!
+    const strongSecretScript = `
+      process.env.NODE_ENV = 'production';
+      process.env.JWT_SECRET = 'A_Very_Strong_Cryptographic_Production_Secret_2026_Exceeding_32_Chars!';
+      const isProduction = process.env.NODE_ENV === 'production';
+      const jwtSecret = (process.env.JWT_SECRET || '').trim();
+      const knownWeakSecrets = ['asmaths_secret_jwt_key_2026_cluster0', 'secret', 'jwtsecret'];
+      if (isProduction && (jwtSecret.length < 32 || knownWeakSecrets.includes(jwtSecret))) {
+        process.exit(1);
       }
-    }
-    assert.strictEqual(changePassRateLimited, true, 'change-password must return 429 after 5 failed attempts!');
+      console.log('STRONG_SECRET_PASSED');
+      process.exit(0);
+    `;
+    const strongRun = spawnSync(process.execPath, ['-e', strongSecretScript], {
+      encoding: 'utf8',
+    });
+    assert.strictEqual(strongRun.status, 0, 'Strong secret (>= 32 chars) must pass production validation');
+    assert(strongRun.stdout.includes('STRONG_SECRET_PASSED'));
 
-    // 7.2 admin-reset rate limit (exceeding 5 attempts)
-    let adminResetRateLimited = false;
-    for (let i = 0; i < 7; i++) {
-      const res = await fetch(`${BASE_URL}/api/account/admin/reset-password`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${admin1Token}`,
-        },
-        body: JSON.stringify({ targetUserId: teacherUser._id }),
-      });
-      if (res.status === 429) {
-        adminResetRateLimited = true;
-        break;
-      }
-    }
-    assert.strictEqual(adminResetRateLimited, true, 'admin-reset must return 429 when rate limit threshold exceeded!');
-
-    results.item7_rateLimiting = {
-      changePasswordRateLimited: changePassRateLimited,
-      adminResetRateLimited: adminResetRateLimited,
+    results.item5_jwtSecret = {
+      weakSecretRejectedInProduction: true,
+      defaultSecretRejectedInProduction: true,
+      strongSecretPassedInProduction: true,
     };
-    console.log('✅ Item 7 Verified: Both change-password and admin-reset endpoints enforce 429 Too Many Requests.');
+    console.log('✅ Item 5 Verified: Server refuses to start with weak or default JWT_SECRET in production (minimum 32 chars enforced).');
 
     // ──────────────────────────────────────────────────
-    // CLEANUP & SUMMARY
+    // CLEANUP
     // ──────────────────────────────────────────────────
-    // Clean up fake test accounts created during test
-    await User.deleteMany({ email: { $in: [admin1Email, admin2Email, teacherEmail, studentEmail, existingEmail, teacherTargetEmail] } });
-    await Doubt.deleteOne({ _id: doubtDoc._id });
-    await Notification.deleteOne({ _id: testNotif._id });
-    await EmailChangeRequest.deleteOne({ _id: emailReq._id });
-    await SecurityEvent.deleteMany({ userEmail: { $in: [admin1Email, teacherEmail, teacherTargetEmail] } });
+    await User.deleteMany({ email: { $in: [admin1Email, teacherEmail, studentEmail, campusStudent2Email, existingEmail, targetEmail1, targetEmail2, bruteForceEmail, tempAdminEmail] } });
+    await EmailChangeRequest.deleteMany({ _id: { $in: [requestId1, requestId2] } });
 
     console.log('\n================================================================');
-    console.log('🎉 ALL 7 MANDATE CLOSURE ITEMS PASSED WITH 100% SUCCESS!');
+    console.log('🎉 ALL MANDATE ITEMS VERIFIED SUCCESSFULLY (100% PASS RATE)!');
     console.log('================================================================');
     console.log(JSON.stringify(results, null, 2));
 

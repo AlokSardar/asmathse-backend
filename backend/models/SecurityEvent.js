@@ -15,6 +15,7 @@ const securityEventSchema = new mongoose.Schema(
         'email_change_requested',
         'email_change_approved',
         'email_change_rejected',
+        'email_change_reverted',
         'password_reset_by_admin',
         'initial_password_set',
         'failed_password_attempt',

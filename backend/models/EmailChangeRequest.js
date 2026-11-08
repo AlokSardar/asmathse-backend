@@ -8,7 +8,7 @@ const emailChangeRequestSchema = new mongoose.Schema(
     reason: { type: String, required: true, maxlength: 500 },
     status: {
       type: String,
-      enum: ['pending', 'approved', 'rejected'],
+      enum: ['pending', 'processing', 'approved', 'rejected'],
       default: 'pending',
       index: true,
     },

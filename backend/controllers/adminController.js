@@ -381,6 +381,12 @@ const deleteStudent = async (req, res) => {
     // Check User collection directly
     const user = await User.findOne({ $or: [{ _id: studentId }, { email: studentId }] });
     if (user) {
+      if (user.role === 'admin') {
+        return res.status(403).json({
+          success: false,
+          message: 'Operation prohibited: Cannot delete an administrator account through student management endpoints.',
+        });
+      }
       await User.deleteOne({ _id: user._id });
       await Student.deleteOne({ email: user.email });
       return res.json({ success: true, message: `Student ${user.name || studentId} deleted successfully` });

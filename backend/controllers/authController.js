@@ -71,6 +71,13 @@ const forceAdminUpsert = async () => {
 // In-memory OTP store (Key: 10-digit phone, Value: { otp, expiresAt, attempts })
 const otpStore = new Map();
 
+// In-memory brute force protection stores (Key: email or email::ip, Value: { count, firstAttempt, lockedUntil })
+const loginFailuresByEmail = new Map();
+const loginFailuresByEmailIp = new Map();
+const LOGIN_MAX_FAILURES = 10;
+const LOGIN_LOCK_WINDOW_MS = 15 * 60 * 1000; // 15 minutes
+const DUMMY_BCRYPT_HASH = '$2a$10$wN9P3XkH7O3uMhWvFz5u6e1v7Gq8yJ0l3n4b5c6d7e8f9a0b1c2d3'; // Pre-computed cost 10 hash for timing protection
+
 // @desc    Dispatch live SMS / WhatsApp OTP
 // @route   POST /api/auth/send-otp
 // @access  Public
@@ -426,8 +433,57 @@ const loginUser = async (req, res) => {
     }
 
     const cleanEmail = String(email).toLowerCase().trim();
+    const rawIp = (req.headers['x-forwarded-for'] ? req.headers['x-forwarded-for'].split(',')[0].trim() : req.socket?.remoteAddress || req.ip || '127.0.0.1');
+    const emailIpKey = `${cleanEmail}::${rawIp}`;
+
+    // 1. Check for Active Brute-Force Lockout (Per-Email & Per-Email+IP)
+    const emailLock = loginFailuresByEmail.get(cleanEmail);
+    if (emailLock && emailLock.lockedUntil && Date.now() < emailLock.lockedUntil) {
+      const remainingMins = Math.ceil((emailLock.lockedUntil - Date.now()) / 60000);
+      return res.status(429).json({
+        success: false,
+        message: `Too many failed login attempts for this account. Please try again after ${remainingMins} minutes.`,
+      });
+    }
+
+    const emailIpLock = loginFailuresByEmailIp.get(emailIpKey);
+    if (emailIpLock && emailIpLock.lockedUntil && Date.now() < emailIpLock.lockedUntil) {
+      const remainingMins = Math.ceil((emailIpLock.lockedUntil - Date.now()) / 60000);
+      return res.status(429).json({
+        success: false,
+        message: `Too many failed login attempts for this account from your IP. Please try again after ${remainingMins} minutes.`,
+      });
+    }
+
+    const recordFailedLogin = () => {
+      const now = Date.now();
+      // Record for email
+      let recE = loginFailuresByEmail.get(cleanEmail);
+      if (!recE || now - recE.firstAttempt > LOGIN_LOCK_WINDOW_MS) {
+        recE = { count: 1, firstAttempt: now, lockedUntil: null };
+      } else {
+        recE.count++;
+        if (recE.count >= LOGIN_MAX_FAILURES) {
+          recE.lockedUntil = now + LOGIN_LOCK_WINDOW_MS;
+        }
+      }
+      loginFailuresByEmail.set(cleanEmail, recE);
+
+      // Record for email+ip
+      let recEI = loginFailuresByEmailIp.get(emailIpKey);
+      if (!recEI || now - recEI.firstAttempt > LOGIN_LOCK_WINDOW_MS) {
+        recEI = { count: 1, firstAttempt: now, lockedUntil: null };
+      } else {
+        recEI.count++;
+        if (recEI.count >= LOGIN_MAX_FAILURES) {
+          recEI.lockedUntil = now + LOGIN_LOCK_WINDOW_MS;
+        }
+      }
+      loginFailuresByEmailIp.set(emailIpKey, recEI);
+    };
+
     console.log(`\n========================================`);
-    console.log(`[AUTH LOGIN] Received login request for: "${cleanEmail}" (Requested Portal: "${requestedRole || 'unspecified'}")`);
+    console.log(`[AUTH LOGIN] Received login request for: "${cleanEmail}" from IP "${rawIp}" (Requested Portal: "${requestedRole || 'unspecified'}")`);
 
     // Strict Authentication: Query MongoDB for user by normalized email
     let user = null;
@@ -462,6 +518,9 @@ const loginUser = async (req, res) => {
     }
 
     if (!user) {
+      // Timing-attack prevention: perform dummy bcrypt compare so execution time matches real user check
+      await bcrypt.compare(password, DUMMY_BCRYPT_HASH).catch(() => {});
+      recordFailedLogin();
       console.log(`[AUTH LOGIN] ❌ User is found: FALSE (No user with email "${cleanEmail}" in MongoDB)`);
       console.log(`========================================\n`);
       return res.status(401).json({ message: 'Invalid email or password' });
@@ -488,8 +547,13 @@ const loginUser = async (req, res) => {
     console.log(`========================================\n`);
 
     if (!isMatch) {
+      recordFailedLogin();
       return res.status(401).json({ message: 'Invalid email or password' });
     }
+
+    // Successful password match: clear failed attempts
+    loginFailuresByEmail.delete(cleanEmail);
+    loginFailuresByEmailIp.delete(emailIpKey);
 
     const roleLower = String(user.role || '').toLowerCase();
     const isAdmin = roleLower === 'admin';
@@ -961,6 +1025,13 @@ const rejectStudent = async (req, res) => {
     }
 
     const targetEmail = (user?.email || student?.email || (id && id.includes('@') ? id : '') || bodyEmail || queryEmail || '').toLowerCase().trim();
+
+    if (user && user.role === 'admin') {
+      return res.status(403).json({
+        success: false,
+        message: 'Operation prohibited: Cannot reject or delete an administrator account.',
+      });
+    }
 
     if (!user && targetEmail) {
       user = await User.findOne({ email: targetEmail });
