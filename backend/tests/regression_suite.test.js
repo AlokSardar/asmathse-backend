@@ -43,6 +43,29 @@ async function runRegressionSuite() {
   console.log('\n[TEST 2]: Verifying User Authentication Across Roles...');
   const testPassword = process.env.TEST_PASSWORD || 'TestPassword123!';
   const adminPassword = process.env.ADMIN_PASSWORD || 'AdminPassword123!';
+  if (mongoose.connection.readyState !== 1) {
+    await mongoose.connect(process.env.MONGO_URI);
+  }
+  const User = require('../models/User');
+  const bcrypt = require('bcryptjs');
+  const salt = await bcrypt.genSalt(10);
+  const hashedPass = await bcrypt.hash(testPassword, salt);
+  await User.findOneAndUpdate(
+    { email: 'student@asmaths.edu' },
+    {
+      $set: { password: hashedPass, isApproved: true, role: 'student', stream: 'Engineering', branch: 'CSE', semester: 'Semester 1' },
+      $setOnInsert: { name: 'Test Student', email: 'student@asmaths.edu' },
+    },
+    { upsert: true, new: true }
+  );
+  await User.findOneAndUpdate(
+    { email: 'mukherjee.eng@asmaths.edu' },
+    {
+      $set: { password: hashedPass, isApproved: true, role: 'teacher', stream: 'Engineering', branch: 'CSE', semester: 'Semester 1' },
+      $setOnInsert: { name: 'Prof. S. Mukherjee', email: 'mukherjee.eng@asmaths.edu' },
+    },
+    { upsert: true, new: true }
+  );
   const studentAuth = await api('/auth/login', {
     method: 'POST',
     body: JSON.stringify({ email: 'student@asmaths.edu', password: testPassword }),

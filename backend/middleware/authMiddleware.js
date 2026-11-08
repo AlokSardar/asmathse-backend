@@ -12,9 +12,17 @@ const protect = async (req, res, next) => {
       token = req.headers.authorization.split(' ')[1];
       const secret = process.env.JWT_SECRET || 'asmaths_secret_jwt_key_2026_cluster0';
       const decoded = jwt.verify(token, secret);
-      
+
       if (decoded.id === 'master_admin_id') {
-        req.user = { _id: 'master_admin_id', id: 'master_admin_id', role: 'admin', name: 'Dr. A. Sardar', email: 'admin@asmaths.com' };
+        req.user = {
+          _id: 'master_admin_id',
+          id: 'master_admin_id',
+          role: 'admin',
+          name: 'Dr. A. Sardar',
+          email: 'admin@asmaths.com',
+          tokenVersion: 0,
+          mustChangePassword: false,
+        };
       } else {
         req.user = await User.findById(decoded.id).select('-password');
       }
@@ -23,10 +31,41 @@ const protect = async (req, res, next) => {
         return res.status(401).json({ message: 'Not authorized: User account not found' });
       }
 
+      // 1. Critical Token Version Verification (Amendment 1)
+      if (req.user._id !== 'master_admin_id') {
+        const tokenV = decoded.tokenVersion ?? 0;
+        const currentV = req.user.tokenVersion ?? 0;
+        if (tokenV < currentV) {
+          return res.status(401).json({
+            success: false,
+            code: 'TOKEN_REVOKED',
+            message: 'Session has expired or was revoked. Please sign in again.',
+          });
+        }
+      }
+
+      // 2. Server-Side Forced Password Change Guard (Amendment 2)
+      if (req.user.mustChangePassword) {
+        const path = (req.originalUrl || req.url || '').split('?')[0];
+        const method = req.method.toUpperCase();
+
+        const isAllowedMe = method === 'GET' && path.endsWith('/account/me');
+        const isAllowedSetPassword = method === 'POST' && path.endsWith('/account/set-initial-password');
+        const isAllowedLogout = path.includes('/logout');
+
+        if (!isAllowedMe && !isAllowedSetPassword && !isAllowedLogout) {
+          return res.status(403).json({
+            success: false,
+            code: 'MUST_CHANGE_PASSWORD',
+            message: 'Temporary password must be replaced before accessing portal features.',
+          });
+        }
+      }
+
       next();
-      return; // ← IMPORTANT: stop here on success
+      return;
     } catch (error) {
-      console.error(error);
+      console.error('Auth error in protect middleware:', error.message);
       return res.status(401).json({ message: 'Not authorized, token failed' });
     }
   }
@@ -39,10 +78,10 @@ const protect = async (req, res, next) => {
 const authorize = (...roles) => {
   return (req, res, next) => {
     const userRole = String(req.user?.role || '').toLowerCase();
-    const normalizedRoles = roles.map(r => String(r).toLowerCase());
+    const normalizedRoles = roles.map((r) => String(r).toLowerCase());
     if (!normalizedRoles.includes(userRole)) {
       return res.status(403).json({
-        message: `Forbidden: Account with role "${userRole}" is not authorized to access this route.`
+        message: `Forbidden: Account with role "${userRole}" is not authorized to access this route.`,
       });
     }
     next();
@@ -74,7 +113,11 @@ const verifyRoleSegregation = (req, res, next) => {
       const path = req.originalUrl || req.url || '';
       if (
         role === 'student' &&
-        (path.includes('/api/admin') || path.includes('/api/approvals') || path.includes('/approve/') || path.includes('/reject/'))
+        (path.includes('/api/admin') ||
+          path.includes('/api/approvals') ||
+          path.includes('/approve/') ||
+          path.includes('/reject/') ||
+          path.includes('/api/account/admin'))
       ) {
         return res.status(403).json({
           success: false,

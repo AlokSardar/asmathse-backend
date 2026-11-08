@@ -33,6 +33,25 @@ const userSchema = new mongoose.Schema({
   // Password Recovery / Reset
   resetPasswordToken: { type: String },
   resetPasswordExpire: { type: Date },
+
+  // Professional Faculty & Admin Account Management Additions
+  designation: { type: String, default: '' },
+  bio: { type: String, default: '' },
+  avatar: { type: String, default: '' },
+  lastLogin: { type: Date },
+  tokenVersion: { type: Number, default: 0, index: true },
+  mustChangePassword: { type: Boolean, default: false },
+  preferences: {
+    type: mongoose.Schema.Types.Mixed,
+    default: () => ({
+      language: 'en',
+      theme: 'light',
+      defaultCourse: 'Engineering',
+      defaultBranch: 'CSE',
+      defaultSemester: 'Semester 1',
+      notifications: { doubts: true, reEvaluations: true, slaBreaches: true },
+    }),
+  },
 }, { timestamps: true });
 
 // Match user entered password to hashed password in database

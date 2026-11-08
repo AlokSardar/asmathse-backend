@@ -7,8 +7,8 @@ const nodemailer = require('nodemailer');
 const bcrypt = require('bcryptjs');
 
 // Generate JWT
-const generateToken = (id) => {
-  return jwt.sign({ id }, process.env.JWT_SECRET || 'asmaths_secret_jwt_key_2026_cluster0', {
+const generateToken = (id, extra = {}) => {
+  return jwt.sign({ id, ...extra }, process.env.JWT_SECRET || 'asmaths_secret_jwt_key_2026_cluster0', {
     expiresIn: '30d',
   });
 };
@@ -557,7 +557,7 @@ const loginUser = async (req, res) => {
     }
 
     // Enforce JWT token generation
-    const token = generateToken(user._id);
+    user.lastLogin = new Date(); await user.save().catch(() => {}); const token = generateToken(user._id, { tokenVersion: user.tokenVersion ?? 0 });
 
     res.json({
       _id: user._id,
@@ -580,6 +580,11 @@ const loginUser = async (req, res) => {
       isProfileComplete: profileCompleted,
       registrationDate: user.registrationDate || (studentDoc && studentDoc.registrationDate) || user.createdAt,
       token,
+      mustChangePassword: Boolean(user.mustChangePassword),
+      designation: user.designation || '',
+      bio: user.bio || '',
+      lastLogin: user.lastLogin,
+      preferences: user.preferences,
     });
   } catch (error) {
     console.error('Login error:', error);
