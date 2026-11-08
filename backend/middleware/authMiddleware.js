@@ -55,6 +55,8 @@ const authorize = (...roles) => {
  */
 const requireAdmin = [protect, authorize('admin', 'teacher')];
 const requireStudent = [protect, authorize('student')];
+const requireAdminOnly = [protect, authorize('admin')];
+const requireTeacherOrAdmin = [protect, authorize('teacher', 'admin')];
 
 /**
  * Non-destructive Role-Segregation Inspector:
@@ -91,6 +93,8 @@ module.exports = {
   authorize,
   requireAdmin,
   requireStudent,
+  requireAdminOnly,
+  requireTeacherOrAdmin,
   requireRole: authorize,
   verifyRoleSegregation,
 };

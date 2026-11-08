@@ -44,31 +44,63 @@ const escapeRegex = (str) => {
 // @access  Public / Protected
 const getAllEvaluations = async (req, res) => {
   try {
-    const { studentEmail, testId } = req.query;
+    const { studentEmail, testId, course, branch } = req.query;
     const query = {};
+    const user = req.user || getRequestUser(req);
+    if (!user) {
+      return res.status(401).json({ message: 'Authentication required to access evaluations' });
+    }
+    const userRole = String(user?.role || '').toLowerCase();
 
-    const user = getRequestUser(req);
-    const isAdmin = isAuthorizedAdmin(req);
+    if (userRole === 'student') {
+      // Students can ONLY view their OWN PUBLISHED evaluations
+      query.published = true;
+      const sEmail = String(user.email || '').toLowerCase().trim();
+      const sId = String(user._id || user.id || '');
+      query.$or = [
+        { studentEmail: sEmail },
+        { studentId: sId }
+      ];
+      if (testId) query.testId = testId;
 
-    if (!isAdmin) {
-      // Non-admin student requester: restrict to their own email or studentId
-      const studentEmailCandidate = user?.email || studentEmail;
-      const studentIdCandidate = user?.id || user?._id;
-      if (!studentEmailCandidate && !studentIdCandidate) {
-        return res.status(401).json({ message: 'Authentication required to view student evaluations' });
-      }
-      const studentClauses = [];
-      if (studentEmailCandidate) {
-        studentClauses.push({ studentEmail: String(studentEmailCandidate).toLowerCase().trim() });
-      }
-      if (studentIdCandidate) {
-        studentClauses.push({ studentId: String(studentIdCandidate) });
-      }
-      query.$or = studentClauses;
-    } else {
-      if (studentEmail) query.studentEmail = String(studentEmail).toLowerCase().trim();
+      // Project trimmed student-safe fields (strictly omitting model answers, rubrics, audit trails, and internal locks)
+      const rawEvals = await Evaluation.find(query)
+        .select('-answerKeySnapshot -auditTrail -lockedBy')
+        .sort({ submittedAt: -1, createdAt: -1 });
+
+      const safeEvals = rawEvals.map(doc => {
+        const obj = doc.toObject ? doc.toObject() : { ...doc };
+        delete obj.answerKeySnapshot;
+        delete obj.auditTrail;
+        delete obj.lockedBy;
+        if (Array.isArray(obj.questionBlocks)) {
+          obj.questionBlocks = obj.questionBlocks.map(q => {
+            const { standardAnswer, rubric, ...trimmedQ } = q;
+            return trimmedQ;
+          });
+        }
+        return obj;
+      });
+
+      return res.json(safeEvals);
     }
 
+    // Faculty scope isolation: Teachers are strictly restricted to their assigned course & branch
+    if (userRole === 'teacher' && user?.id !== 'master_admin_id') {
+      const teacherCourse = user?.targetCourse || user?.course;
+      if (teacherCourse) {
+        query.course = new RegExp(`^${escapeRegex(teacherCourse)}$`, 'i');
+      }
+      const teacherBranch = user?.branch || user?.stream;
+      if (teacherBranch) {
+        query.branch = new RegExp(`^${escapeRegex(teacherBranch)}$`, 'i');
+      }
+    } else {
+      if (course && course !== 'all') query.course = new RegExp(`^${escapeRegex(course)}$`, 'i');
+      if (branch && branch !== 'all') query.branch = new RegExp(`^${escapeRegex(branch)}$`, 'i');
+    }
+
+    if (studentEmail) query.studentEmail = String(studentEmail).toLowerCase().trim();
     if (testId) query.testId = testId;
 
     const evals = await Evaluation.find(query).sort({ submittedAt: -1, createdAt: -1 });
@@ -85,20 +117,62 @@ const getAllEvaluations = async (req, res) => {
 const getEvaluationById = async (req, res) => {
   try {
     const { id } = req.params;
-    const ev = await Evaluation.findOne({ id });
+    const user = req.user || getRequestUser(req);
+    if (!user) {
+      return res.status(401).json({ message: 'Authentication required' });
+    }
+    const userRole = String(user?.role || '').toLowerCase();
+
+    const isObjId = mongoose.Types.ObjectId.isValid(id);
+    const ev = await Evaluation.findOne({
+      $or: [
+        { id },
+        ...(isObjId ? [{ _id: id }] : [])
+      ]
+    });
+
     if (!ev) {
       return res.status(404).json({ message: 'Evaluation record not found' });
     }
 
-    const user = getRequestUser(req);
-    const isAdmin = isAuthorizedAdmin(req);
-    if (!isAdmin) {
-      const isOwner = user && (
+    if (userRole === 'student') {
+      const isOwner = (
         (user.email && String(user.email).toLowerCase().trim() === String(ev.studentEmail || '').toLowerCase().trim()) ||
         (user.id && String(user.id) === String(ev.studentId || ''))
       );
       if (!isOwner) {
         return res.status(403).json({ message: 'Access denied: You can only view your own evaluation records.' });
+      }
+      if (!ev.published) {
+        return res.status(403).json({ message: 'Access denied: Evaluation results have not been published yet.' });
+      }
+
+      // Trim internal model answers, rubrics, and audit records for student
+      const evObj = ev.toObject ? ev.toObject() : { ...ev };
+      delete evObj.answerKeySnapshot;
+      delete evObj.auditTrail;
+      delete evObj.lockedBy;
+      if (Array.isArray(evObj.questionBlocks)) {
+        evObj.questionBlocks = evObj.questionBlocks.map(q => {
+          const { standardAnswer, rubric, ...trimmedQ } = q;
+          return trimmedQ;
+        });
+      }
+      return res.json(evObj);
+    }
+
+    // Teacher isolation check: cannot view script belonging to another course/branch
+    if (userRole === 'teacher' && user?.id !== 'master_admin_id') {
+      const teacherCourse = String(user?.targetCourse || user?.course || '').toLowerCase().trim();
+      const teacherBranch = String(user?.branch || user?.stream || '').toLowerCase().trim();
+      const evCourse = String(ev.course || '').toLowerCase().trim();
+      const evBranch = String(ev.branch || '').toLowerCase().trim();
+
+      if (teacherCourse && evCourse && teacherCourse !== evCourse) {
+        return res.status(403).json({ message: 'Forbidden: You cannot access evaluations from another course.' });
+      }
+      if (teacherBranch && evBranch && teacherBranch !== evBranch) {
+        return res.status(403).json({ message: 'Forbidden: You cannot access evaluations from another branch.' });
       }
     }
 
@@ -114,7 +188,27 @@ const getEvaluationById = async (req, res) => {
 // @access  Public
 const saveEvaluation = async (req, res) => {
   try {
+    const user = req.user || getRequestUser(req);
+    const userRole = String(user?.role || '').toLowerCase();
+    if (userRole !== 'teacher' && userRole !== 'admin') {
+      return res.status(403).json({ message: 'Forbidden: Only teachers and administrators can save evaluations.' });
+    }
+
     const data = req.body;
+    if (userRole === 'teacher' && user?.id !== 'master_admin_id') {
+      const teacherCourse = String(user?.targetCourse || user?.course || '').toLowerCase().trim();
+      const teacherBranch = String(user?.branch || user?.stream || '').toLowerCase().trim();
+      const evCourse = String(data.course || '').toLowerCase().trim();
+      const evBranch = String(data.branch || '').toLowerCase().trim();
+
+      if (teacherCourse && evCourse && teacherCourse !== evCourse) {
+        return res.status(403).json({ message: 'Forbidden: You cannot evaluate submissions from another course.' });
+      }
+      if (teacherBranch && evBranch && teacherBranch !== evBranch) {
+        return res.status(403).json({ message: 'Forbidden: You cannot evaluate submissions from another branch.' });
+      }
+    }
+
     const id = data.id || `eval_${Date.now()}_${Math.random().toString(36).substr(2, 6)}`;
     const payload = {
       ...data,
@@ -698,145 +792,14 @@ Respond ONLY with valid JSON strictly matching:
     }
 
 
-    // Heuristic Mathematical OCR & Vision Segmentation Pipeline (Intelligent Fallback)
+    // If multimodal OCR was unable to extract structured derivations, fail honestly and require genuine faculty evaluation
     if (!parsingResult) {
-      console.log('🔍 [VISION OCR PIPELINE] Running high-precision mathematical OCR & line separation pipeline on uploaded answer sheet...');
-      const targetMax = Number(maxMarks) || 50;
-
-      // Realistic question distribution proportional to maxMarks
-      const q1Max = Math.round(targetMax * 0.25);
-      const q2Max = Math.round(targetMax * 0.25);
-      const q3Max = Math.round(targetMax * 0.25);
-      const q4Max = targetMax - (q1Max + q2Max + q3Max);
-
-      const q1Marks = q1Max; // Full marks
-      const q2Marks = Math.max(1, q2Max - 2); // Minor mistake
-      const q3Marks = q3Max; // Full marks
-      const q4Marks = Math.max(1, q4Max - 1); // Minor slip
-
-      let fallbackBlocks = [];
-
-      // Check if pre-computed LaTeX answer key exists (new schema: questions[])
-      if (resolvedAnswerKey && Array.isArray(resolvedAnswerKey.questions) && resolvedAnswerKey.questions.length > 0) {
-        fallbackBlocks = resolvedAnswerKey.questions.map((q, idx) => {
-          const qNum = q.q_no || `Q${idx + 1}`;
-          const qMax = Number(q.max_marks || q.marks) || Math.max(1, Math.floor(targetMax / resolvedAnswerKey.questions.length));
-          const isPartial = idx === 1; // minor deduction on one question for realistic evaluation
-          let awarded = qMax;
-          if (isPartial) {
-            if (qMax <= 1) awarded = 0.5;
-            else if (qMax <= 2) awarded = 1;
-            else awarded = Math.max(1, qMax - 2);
-          }
-          awarded = Math.min(qMax, Math.max(0, awarded));
-          return {
-            questionNumber: qNum,
-            questionText: q.problem_statement_latex || `Question ${idx + 1}`,
-            standardAnswer: q.solution_latex || q.final_answer_latex || `Standard solution for ${qNum}`,
-            extractedAnswer: `Student handwritten solution corresponding to ${qNum} with ANS boundary demarcations.`,
-            marksAwarded: awarded,
-            maxMarks: qMax,
-            status: isPartial ? 'partial' : 'correct',
-            workingSteps: [
-              `Examined student derivation for ${qNum} against pre-computed LaTeX answer key`,
-              ...(isPartial ? ['Minor notation or intermediate arithmetic transcription observed'] : ['Full method, working steps, and final LaTeX answer verified correct'])
-            ],
-            feedback: isPartial
-              ? `Solid reasoning for ${qNum}. Deducted minor mark for intermediate transcription/sign precision.`
-              : `Flawless presentation and accurate step-by-step derivation for ${qNum}. Full marks awarded.`,
-            correctBoundingBox: { top: 12 + (idx * 20), left: 15, width: 70, height: 14 },
-            mistakes: isPartial ? [
-              {
-                description: `Minor notation or sign transcription slip during intermediate steps in ${qNum}.`,
-                correction: `Ensure consistent signs and complete notation throughout intermediate steps.`,
-                severity: 'minor',
-                location: { top: 32, left: 24, width: 48, height: 12 }
-              }
-            ] : []
-          };
-        });
-        console.log(`\u2705 [USED PRE-COMPUTED LATEX ANSWER KEY]: ${fallbackBlocks.length} questions loaded from teacher's answer key`);
-      }
-
-      // Check if teacher's question paper details contain explicit question text
-      if (fallbackBlocks.length === 0 && resolvedQuestionText && resolvedQuestionText.trim().length > 15) {
-        const qLines = resolvedQuestionText.split(/\n(?=(?:Q\d+[:.]?|\d+[\.)]|\bQuestion\s+\d+[:.]?))/i)
-          .map(s => s.trim())
-          .filter(s => s.length > 5);
-
-        if (qLines.length > 1) {
-          const count = Math.min(qLines.length, 6);
-          const perQMarks = Math.max(1, Math.floor(targetMax / count));
-          fallbackBlocks = qLines.slice(0, count).map((qStr, idx) => {
-            const qNum = `Q${idx + 1}`;
-            const cleanQText = qStr.replace(/^(?:Q\d+[:.]?|\d+[\.)]|\bQuestion\s+\d+[:.]?)\s*/i, '').trim();
-            const allocatedMarks = idx === count - 1 ? targetMax - (perQMarks * (count - 1)) : perQMarks;
-            const isPartial = idx % 2 === 1;
-            const awarded = isPartial ? Math.max(1, allocatedMarks - 1) : allocatedMarks;
-
-            return {
-              questionNumber: qNum,
-              questionText: cleanQText || qStr,
-              standardAnswer: `Standard step-by-step mathematical solution derived for ${qNum}: Methodical expansion, derivation, and standard mathematical evaluation.`,
-              extractedAnswer: `Student handwritten solution corresponding to ${qNum} with ANS boundary demarcations.`,
-              marksAwarded: awarded,
-              maxMarks: allocatedMarks,
-              status: isPartial ? 'partial' : 'correct',
-              workingSteps: [
-                `Parsed question statement and identified mathematical domain for ${qNum}`,
-                'Applied relevant mathematical theorems and step-by-step operations',
-                'Demonstrated algebraic manipulations and method reasoning',
-                ...(isPartial ? ['Minor notation or intermediate arithmetic transcription observed'] : ['Full method and final answer verified correct'])
-              ],
-              feedback: isPartial
-                ? `Well-structured approach for ${qNum}. Deducted 1 mark for intermediate notation/sign precision.`
-                : `Flawless presentation and accurate step-by-step derivation for ${qNum}. Full marks awarded.`,
-              mistakes: isPartial ? [
-                {
-                  description: `Minor notation or sign transcription slip during intermediate steps in ${qNum}.`,
-                  correction: `Ensure consistent signs and complete notation throughout intermediate steps.`,
-                  severity: 'minor',
-                  location: { top: 30 + (idx * 15), left: 20, width: 50, height: 12 }
-                }
-              ] : []
-            };
-          });
-          console.log(`✅ [PARSED TEACHER'S QUESTIONS DIRECTLY]: ${fallbackBlocks.length} questions extracted from teacher's paper`);
-        }
-      }
-
-      if (fallbackBlocks.length === 0) {
-        console.warn('⚠️ [AI EVALUATION] No questions available from Gemini OCR, answer key, or question paper. Requiring faculty grading in studio.');
-        return res.status(422).json({
-          success: false,
-          error: 'AI_OCR_PARSE_FAILED',
-          message: 'Gemini Multimodal OCR could not transcribe handwritten answer sheet. Please review and grade this submission directly in the Faculty Evaluation Studio.',
-        });
-      }
-
-    const totalCalculated = fallbackBlocks.length > 0
-      ? fallbackBlocks.reduce((sum, b) => sum + (Number(b.marksAwarded) || 0), 0)
-      : (q1Marks + q2Marks + q3Marks + q4Marks);
-
-    const allMistakes = fallbackBlocks.flatMap(b => (b.mistakes || []).map(m => ({
-      questionNumber: b.questionNumber,
-      ...m
-    })));
-
-    parsingResult = {
-      totalMarks: totalCalculated,
-      maxMarks: targetMax,
-      lineSeparatorsDetected: Math.max(1, fallbackBlocks.length - 1),
-        overallFeedback: 'Impressive mathematical rigor and organized layout. The handwritten presentation clearly uses drawn boundary lines to separate distinct solutions. Step-by-step mathematical formulations are strongly grounded, with method marks earned across major theorems.',
-        questionBlocks: fallbackBlocks,
-        allMistakes,
-        hints: 'Always double-check intermediate algebraic signs when factoring quadratics or cross-multiplying vectors. In limit and integration problems, writing standard series expansions in a dedicated separate line guarantees full method marks.',
-        metrics: [
-          { label: 'Step Precision', val: '92%' },
-          { label: 'Conceptual Clarity', val: '95%' },
-          { label: 'Line Separation & Layout', val: '96%' },
-        ]
-      };
+      console.warn("⚠️ [EVALUATION] Genuine AI OCR transcription unavailable. Zero synthetic fallback marks will be generated.");
+      return res.status(422).json({
+        success: false,
+        error: "AI_OCR_PARSE_FAILED",
+        message: "Multimodal OCR could not transcribe handwritten answer sheet. Please evaluate this submission directly in the Faculty Evaluation Studio.",
+      });
     }
 
     // STRICT AI EVALUATION & GRADING BOUNDS (Max Marks Enforcement)
@@ -983,6 +946,11 @@ const batchSyncEvaluations = async (req, res) => {
 // @access  Public
 const clearAllEvaluations = async (req, res) => {
   try {
+    const user = req.user || getRequestUser(req);
+    const userRole = String(user?.role || '').toLowerCase();
+    if (userRole !== 'admin') {
+      return res.status(403).json({ message: 'Forbidden: Only administrators can clear evaluations.' });
+    }
     await Evaluation.deleteMany({});
     res.json({ success: true, message: 'All evaluations cleared from MongoDB Atlas' });
   } catch (error) {
@@ -995,6 +963,11 @@ const clearAllEvaluations = async (req, res) => {
 // @access  Public
 const deleteEvaluationById = async (req, res) => {
   try {
+    const user = req.user || getRequestUser(req);
+    const userRole = String(user?.role || '').toLowerCase();
+    if (userRole !== 'admin') {
+      return res.status(403).json({ message: 'Forbidden: Only administrators can delete evaluation records.' });
+    }
     const { id } = req.params;
     const isObjId = mongoose.Types.ObjectId.isValid(id);
     const result = await Evaluation.deleteOne({
@@ -1014,6 +987,11 @@ const deleteEvaluationById = async (req, res) => {
 // @access  Public
 const deleteEvaluationsBatch = async (req, res) => {
   try {
+    const user = req.user || getRequestUser(req);
+    const userRole = String(user?.role || '').toLowerCase();
+    if (userRole !== 'admin') {
+      return res.status(403).json({ message: 'Forbidden: Only administrators can delete evaluation records in bulk.' });
+    }
     const { ids } = req.body;
     if (!Array.isArray(ids) || ids.length === 0) {
       return res.status(400).json({ success: false, message: 'ids array is required' });
@@ -1036,10 +1014,19 @@ const deleteEvaluationsBatch = async (req, res) => {
 // @access  Public
 const publishEvaluationResults = async (req, res) => {
   try {
+    const user = req.user || getRequestUser(req);
+    const userRole = String(user?.role || '').toLowerCase();
+    if (userRole !== 'teacher' && userRole !== 'admin') {
+      return res.status(403).json({ message: 'Forbidden: Only teachers and administrators can publish evaluation results.' });
+    }
+
     const { testId, testTitle } = req.body;
     if (!testId && !testTitle) {
       return res.status(400).json({ success: false, message: 'testId or testTitle required' });
     }
+
+    const teacherCourse = userRole === 'teacher' && user?.id !== 'master_admin_id' ? (user?.targetCourse || user?.course) : null;
+    const teacherBranch = userRole === 'teacher' && user?.id !== 'master_admin_id' ? (user?.branch || user?.stream) : null;
 
     const orConditions = [];
     if (testId && testId !== 'all') {
