@@ -32,7 +32,8 @@ router.post('/proctoring-video', requireTeacherOrAdmin, saveProctoringVideo);
 router.get('/:id', getEvaluationById);
 
 // Faculty & Admin Grading & Publishing Routes (strictly forbidden to students)
-router.post('/', requireTeacherOrAdmin, saveEvaluation);
+// Students can submit exams with strict field whitelisting & ownership; Faculty/Admin grade submissions
+router.post('/', saveEvaluation);
 router.post('/evaluate-handwritten', requireTeacherOrAdmin, evaluateHandwrittenAnswerSheet);
 router.post('/publish-results', requireTeacherOrAdmin, publishEvaluationResults);
 router.post('/batch', requireTeacherOrAdmin, batchSyncEvaluations);

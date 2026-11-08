@@ -53,14 +53,21 @@ const getAllEvaluations = async (req, res) => {
     const userRole = String(user?.role || '').toLowerCase();
 
     if (userRole === 'student') {
-      // Students can ONLY view their OWN PUBLISHED evaluations
-      query.published = true;
       const sEmail = String(user.email || '').toLowerCase().trim();
       const sId = String(user._id || user.id || '');
-      query.$or = [
-        { studentEmail: sEmail },
-        { studentId: sId }
-      ];
+      const identityClause = {
+        $or: [
+          { studentEmail: sEmail },
+          { studentId: sId }
+        ]
+      };
+      const visibilityClause = {
+        $or: [
+          { published: true },
+          { examType: 'Automated MCQ', status: 'Evaluated' }
+        ]
+      };
+      query.$and = [identityClause, visibilityClause];
       if (testId) query.testId = testId;
 
       // Project trimmed student-safe fields (strictly omitting model answers, rubrics, audit trails, and internal locks)
@@ -143,7 +150,8 @@ const getEvaluationById = async (req, res) => {
       if (!isOwner) {
         return res.status(403).json({ message: 'Access denied: You can only view your own evaluation records.' });
       }
-      if (!ev.published) {
+      const isVisible = ev.published === true || (ev.examType === 'Automated MCQ' && ev.status === 'Evaluated');
+      if (!isVisible) {
         return res.status(403).json({ message: 'Access denied: Evaluation results have not been published yet.' });
       }
 
@@ -183,18 +191,162 @@ const getEvaluationById = async (req, res) => {
   }
 };
 
-// @desc    Save student evaluation
+// @desc    Save student evaluation or student exam submission
 // @route   POST /api/evaluations
-// @access  Public
+// @access  Protected (Student submit own attempt / Faculty & Admin evaluate)
 const saveEvaluation = async (req, res) => {
   try {
     const user = req.user || getRequestUser(req);
     const userRole = String(user?.role || '').toLowerCase();
-    if (userRole !== 'teacher' && userRole !== 'admin') {
-      return res.status(403).json({ message: 'Forbidden: Only teachers and administrators can save evaluations.' });
+    if (userRole !== 'teacher' && userRole !== 'admin' && userRole !== 'student') {
+      return res.status(403).json({ message: 'Forbidden: Unauthorized to save evaluations.' });
     }
 
-    const data = req.body;
+    const data = req.body || {};
+
+    // -------------------------------------------------------------
+    // STUDENT EXAM / ASSIGNMENT SUBMISSION WORKFLOW
+    // -------------------------------------------------------------
+    if (userRole === 'student') {
+      // 1. Strictly lock identity to authenticated student
+      const studentId = String(user._id || user.id || '');
+      const studentEmail = String(user.email || '').toLowerCase().trim();
+      const studentName = String(user.name || data.studentName || 'Student');
+      const studentRoll = String(user.rollNumber || data.rollNumber || data.studentRoll || '');
+      const course = user.course || user.targetCourse || data.course || 'engineering';
+      const branch = user.branch || user.stream || data.branch || 'CSE';
+      const semester = user.semester || user.sem || data.semester || data.sem || 1;
+
+      const examType = data.examType || (data.testMode === 'MCQ' ? 'Automated MCQ' : 'Written / Upload');
+      const testId = String(data.testId || data.examId || '1');
+      const testTitle = String(data.testTitle || data.examTitle || 'Class Examination');
+      const id = data.id || `sub_${Date.now()}_${Math.random().toString(36).substr(2, 6)}`;
+
+      let marksObtained = null;
+      let totalMarks = Number(data.totalMarks || 50);
+      let percentage = null;
+      let grade = 'Pending';
+      let status = 'Pending Evaluation';
+      let published = false;
+      let feedback = '';
+
+      const strikesRecorded = Number(data.strikesRecorded || data.strikes || 0);
+      const cheated = strikesRecorded >= 3 || String(data.submissionReason || '').includes('Proctoring Strikes');
+
+      if (examType === 'Automated MCQ') {
+        // Objective auto-graded exam: sanitize score and auto-publish so student sees results
+        totalMarks = Number(data.totalMarks || 20);
+        const rawScore = Number(data.marksObtained !== undefined && data.marksObtained !== null ? data.marksObtained : (data.score ?? 0));
+        marksObtained = Math.max(0, Math.min(totalMarks, isNaN(rawScore) ? 0 : rawScore));
+        percentage = totalMarks > 0 ? Math.round((marksObtained / totalMarks) * 100) : 0;
+        grade = percentage >= 90 ? 'A+' : percentage >= 80 ? 'A' : percentage >= 70 ? 'B+' : percentage >= 60 ? 'B' : percentage >= 40 ? 'C' : 'F';
+        status = 'Evaluated';
+        published = true;
+        feedback = data.feedback || `Instant Auto-Graded MCQ Result: ${marksObtained}/${totalMarks} (${percentage}%).`;
+      } else {
+        // Written answer script or assignment: student CANNOT self-grade or self-publish
+        marksObtained = null;
+        percentage = null;
+        grade = 'Pending';
+        status = 'Pending Evaluation';
+        published = false;
+        feedback = typeof data.feedback === 'string' ? data.feedback.slice(0, 500) : '';
+      }
+
+      const studentPayload = {
+        id,
+        studentId,
+        studentName,
+        studentEmail,
+        studentRoll,
+        rollNumber: studentRoll,
+        testId,
+        testTitle,
+        examId: testId,
+        examTitle: testTitle,
+        examType,
+        course,
+        branch,
+        sem: semester,
+        semester,
+        marksObtained,
+        marks: marksObtained,
+        score: marksObtained,
+        totalMarks,
+        maxMarks: totalMarks,
+        percentage,
+        grade,
+        status,
+        published,
+        publishedAt: published ? new Date() : undefined,
+        feedback,
+        answerSheetUrl: data.answerSheetUrl || data.answerFileUrl || '',
+        answerPages: Array.isArray(data.answerPages) ? data.answerPages : [],
+        totalPages: Array.isArray(data.answerPages) ? data.answerPages.length : (Number(data.totalPages) || 1),
+        fileName: data.fileName || 'submission.pdf',
+        fileType: data.fileType || 'application/pdf',
+        breakdown: Array.isArray(data.breakdown) ? data.breakdown : [],
+        correctCount: Number(data.correctCount || 0),
+        attemptedCount: Number(data.attemptedCount || 0),
+        totalQuestions: Number(data.totalQuestions || 0),
+        submissionReason: data.submissionReason || (cheated ? 'Auto-Submitted on 3 Proctoring Strikes' : 'Manual Submit'),
+        strikesRecorded,
+        cheated,
+        submittedAt: data.submittedAt ? new Date(data.submittedAt) : new Date(),
+      };
+
+      const saved = await Evaluation.findOneAndUpdate(
+        { $or: [{ id }, { testId, studentEmail }] },
+        { $set: studentPayload },
+        { new: true, upsert: true, runValidators: false }
+      );
+
+      // Two-way synchronization with Submission model
+      try {
+        const Submission = require('../models/Submission');
+        await Submission.findOneAndUpdate(
+          {
+            $or: [
+              { id },
+              { assignmentId: testId, studentId: studentEmail },
+              { assignment: testId, student: studentEmail },
+              { examId: testId, studentId: studentEmail }
+            ]
+          },
+          {
+            $set: {
+              id,
+              assignment: testId,
+              assignmentId: testId,
+              assignmentTitle: testTitle,
+              examId: testId,
+              examTitle: testTitle,
+              student: studentId,
+              studentId,
+              studentName,
+              studentEmail,
+              studentRoll,
+              rollNumber: studentRoll,
+              status: published ? 'graded' : 'pending',
+              marksObtained,
+              totalMarks,
+              percentage,
+              grade,
+              submittedAt: studentPayload.submittedAt,
+            }
+          },
+          { new: true, upsert: true, runValidators: false }
+        );
+      } catch (subSyncErr) {
+        console.warn('[Sync to Submission] Notice:', subSyncErr.message);
+      }
+
+      return res.status(201).json(saved);
+    }
+
+    // -------------------------------------------------------------
+    // TEACHER & ADMIN EVALUATION WORKFLOW
+    // -------------------------------------------------------------
     if (userRole === 'teacher' && user?.id !== 'master_admin_id') {
       const teacherCourse = String(user?.targetCourse || user?.course || '').toLowerCase().trim();
       const teacherBranch = String(user?.branch || user?.stream || '').toLowerCase().trim();

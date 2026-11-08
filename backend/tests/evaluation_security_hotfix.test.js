@@ -206,9 +206,11 @@ async function runTest() {
   console.log('✅ POST /api/evaluations/batch-delete -> 401 Unauthorized');
 
   console.log('\n[TEST GROUP 2]: Student Role Isolation & Mutation Rejections');
-  const stuPost = await api('POST', '/api/evaluations', aliceToken, { id: 'exploit_eval', marks: 100 });
-  assert.strictEqual(stuPost.status, 403, 'Student cannot create/update evaluation');
-  console.log('✅ Student POST /api/evaluations -> 403 Forbidden');
+  const stuPost = await api('POST', '/api/evaluations', aliceToken, { id: 'exploit_eval', marks: 100, published: true });
+  assert.strictEqual(stuPost.status, 201, 'Student exam submission returns 201');
+  assert.strictEqual(stuPost.data.marksObtained, null, 'Student cannot self-award marks');
+  assert.strictEqual(stuPost.data.published, false, 'Student cannot self-publish written script');
+  console.log('✅ Student POST /api/evaluations -> 201 (Self-awarded marks & publish flag neutralized to null/false)');
 
   const stuPublish = await api('POST', '/api/evaluations/publish-results', aliceToken, { testId: 'test_eng_101' });
   assert.strictEqual(stuPublish.status, 403, 'Student cannot publish results');
@@ -273,8 +275,8 @@ async function runTest() {
   console.log('\n[TEST GROUP 5]: Administrator Oversight & Deletion Capability');
   const adminGet = await api('GET', '/api/evaluations', adminToken);
   assert.strictEqual(adminGet.status, 200);
-  assert.strictEqual(adminGet.data.length, 3, 'Admin must see all evaluations across courses');
-  console.log('✅ Administrator sees all 3 evaluations across all courses');
+  assert.strictEqual(adminGet.data.length, 4, 'Admin must see all evaluations across courses');
+  console.log('✅ Administrator sees all 4 evaluations across all courses');
 
   const adminDel = await api('POST', '/api/evaluations/batch-delete', adminToken, { ids: [aliceUnpublishedEval.id] });
   assert.strictEqual(adminDel.status, 200);
