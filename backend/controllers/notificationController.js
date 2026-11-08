@@ -5,21 +5,61 @@ const Notification = require('../models/Notification');
 // @access  Public
 const getNotifications = async (req, res) => {
   try {
-    const { course, branch, semester, classLevel, studentId, studentEmail } = req.query;
-    const query = {};
+    const { course, branch, semester, classLevel, studentId, studentEmail, limit } = req.query;
+    const userKeys = [studentEmail, studentId].filter(Boolean);
+    const maxLimit = Math.min(100, Math.max(1, parseInt(limit, 10) || 50));
+
+    // 1. Broadcast notifications: no specific userId assigned (course/cohort announcements, materials, syllabus)
+    const broadcastFilter = {
+      $or: [
+        { userId: null },
+        { userId: { $exists: false } },
+        { userId: '' },
+      ],
+    };
 
     if (course) {
-      query.$or = [
-        { course: new RegExp(`^${course}$`, 'i') },
-        { course: 'all' },
-        { course: null },
-        { course: '' }
+      broadcastFilter.$and = [
+        {
+          $or: [
+            { course: new RegExp(`^${course}$`, 'i') },
+            { course: 'all' },
+            { course: null },
+            { course: '' },
+            { course: { $exists: false } },
+          ],
+        },
       ];
+      if (branch && branch !== 'all') {
+        broadcastFilter.$and.push({
+          $or: [
+            { branch: new RegExp(`^${branch}$`, 'i') },
+            { branch: 'all' },
+            { branch: null },
+            { branch: '' },
+            { branch: { $exists: false } },
+          ],
+        });
+      }
     }
+
+    const orClauses = [broadcastFilter];
+
+    // 2. Personal notifications: targeted strictly to this specific student (results published, dispute resolved)
+    if (userKeys.length > 0) {
+      orClauses.push({
+        $or: [
+          { userId: { $in: userKeys } },
+          { studentEmail: { $in: userKeys.map((k) => new RegExp(`^${k}$`, 'i')) } },
+        ],
+      });
+    }
+
+    const query = { $or: orClauses };
 
     const notifications = await Notification.find(query)
       .sort({ createdAt: -1 })
-      .limit(50);
+      .limit(maxLimit);
 
     const userKey = studentEmail || studentId;
 

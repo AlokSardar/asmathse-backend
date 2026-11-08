@@ -609,20 +609,78 @@ const submitAssignment = async (req, res) => {
     const examOrAssignmentTitle = data.examTitle || data.assignmentTitle || data.title || 'Mathematics Examination';
     const id = data.id || `sub_${Date.now()}_${Math.random().toString(36).substr(2, 6)}`;
 
-    let answerFileUrl = data.answerFileUrl || data.answerSheetUrl || data.fileUrl || '';
-    if (answerFileUrl && answerFileUrl.startsWith('data:')) {
-      try {
-        const cloudRes = await uploadBase64ToCloudinary(answerFileUrl, {
-          fileName: `submission_${examOrAssignmentId}_${studentId}.pdf`,
-          folder: 'as_maths/submissions',
-        });
-        if (cloudRes?.secure_url) {
-          answerFileUrl = cloudRes.secure_url;
+    const { uploadPrivateScriptToCloudinary } = require('../services/cloudinaryService');
+    let privateScriptUrl = `/api/evaluations/${id}/script-file`;
+    let privatePublicId = null;
+    let safeAnswerPages = [];
+
+    // Process multi-page uploads privately
+    if (Array.isArray(data.answerPages) && data.answerPages.length > 0) {
+      for (let i = 0; i < data.answerPages.length; i++) {
+        const pItem = data.answerPages[i];
+        const pageData = typeof pItem === 'string' ? pItem : (pItem.dataUrl || pItem.url || pItem.base64);
+        const pNum = i + 1;
+        const pName = `script_${examOrAssignmentId}_${studentId}_page_${pNum}.pdf`;
+
+        if (pageData && pageData.startsWith('data:')) {
+          try {
+            const upRes = await uploadPrivateScriptToCloudinary(pageData, { fileName: pName });
+            const pageWidth = pItem.width || upRes.width || null;
+            const pageHeight = pItem.height || upRes.height || null;
+            safeAnswerPages.push({
+              pageNumber: pNum,
+              fileType: upRes.resource_type === 'image' ? 'image/png' : 'application/pdf',
+              storageKey: upRes.public_id,
+              fileName: upRes.fileName || pName,
+              storage: upRes.storage,
+              width: pageWidth,
+              height: pageHeight,
+              aspectRatio: pItem.aspectRatio || (pageWidth && pageHeight ? +(pageWidth / pageHeight).toFixed(4) : null),
+            });
+            if (i === 0) privatePublicId = upRes.public_id;
+          } catch (_) {}
+        } else {
+          const pW = pItem.width || null;
+          const pH = pItem.height || null;
+          safeAnswerPages.push({
+            pageNumber: pNum,
+            fileType: 'application/pdf',
+            storageKey: `page_${pNum}`,
+            fileName: pName,
+            width: pW,
+            height: pH,
+            aspectRatio: pItem.aspectRatio || (pW && pH ? +(pW / pH).toFixed(4) : null),
+          });
         }
-      } catch (upErr) {
-        console.warn('Cloudinary assignment submission upload fallback:', upErr.message);
       }
     }
+
+    let rawUploadFile = data.answerFileUrl || data.answerSheetUrl || data.fileUrl || '';
+    if (rawUploadFile && rawUploadFile.startsWith('data:')) {
+      try {
+        const upRes = await uploadPrivateScriptToCloudinary(rawUploadFile, {
+          fileName: `script_${examOrAssignmentId}_${studentId}.pdf`
+        });
+        privatePublicId = upRes.public_id;
+        if (safeAnswerPages.length === 0) {
+          const pW = data.width || upRes.width || null;
+          const pH = data.height || upRes.height || null;
+          safeAnswerPages.push({
+            pageNumber: 1,
+            fileType: upRes.resource_type === 'image' ? 'image/png' : 'application/pdf',
+            storageKey: upRes.public_id,
+            fileName: upRes.fileName || `script_${examOrAssignmentId}_${studentId}.pdf`,
+            storage: upRes.storage,
+            width: pW,
+            height: pH,
+            aspectRatio: data.aspectRatio || (pW && pH ? +(pW / pH).toFixed(4) : null),
+          });
+        }
+      } catch (upErr) {
+        console.warn('Private script upload notice:', upErr.message);
+      }
+    }
+    let answerFileUrl = privateScriptUrl;
 
     const rawAnswerPages = Array.isArray(data.answerPages) ? data.answerPages : [];
     const totalPages = rawAnswerPages.length > 0 ? rawAnswerPages.length : (Number(data.totalPages) || 1);
@@ -649,8 +707,10 @@ const submitAssignment = async (req, res) => {
       studentRoll,
       rollNumber: studentRoll,
       answerFileUrl,
-      answerSheetUrl: answerFileUrl,
-      answerPages: rawAnswerPages,
+      answerSheetUrl: privateScriptUrl,
+      privateScriptUrl,
+      privatePublicId,
+      answerPages: safeAnswerPages.length > 0 ? safeAnswerPages : rawAnswerPages,
       totalPages,
       fileName: data.fileName || (rawAnswerPages[0]?.name) || 'AnswerScript_Submission.pdf',
       fileSize: data.fileSize || '2.4 MB',
@@ -697,8 +757,11 @@ const submitAssignment = async (req, res) => {
         percentage: null,
         grade: 'Pending',
         status: 'Pending Evaluation',
-        answerSheetUrl: answerFileUrl,
-        answerPages: rawAnswerPages,
+        evaluationStatus: 'pending',
+        answerSheetUrl: privateScriptUrl || answerFileUrl,
+        privateScriptUrl,
+        privatePublicId,
+        answerPages: safeAnswerPages.length > 0 ? safeAnswerPages : rawAnswerPages,
         totalPages,
         fileName: submissionPayload.fileName,
         fileType: data.fileType || 'application/pdf',

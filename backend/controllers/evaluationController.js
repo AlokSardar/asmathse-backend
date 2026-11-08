@@ -39,6 +39,56 @@ const escapeRegex = (str) => {
   return str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 };
 
+
+// Helper: Strictly strip internal answer keys, rubrics, solutions and locks from student responses
+const sanitizeEvaluationForStudent = (doc) => {
+  if (!doc) return doc;
+  const obj = doc.toObject ? doc.toObject() : { ...doc };
+  delete obj.answerKeySnapshot;
+  delete obj.answerKey;
+  delete obj.solutionSet;
+  delete obj.rubric;
+  delete obj.auditTrail;
+  delete obj.lockedBy;
+
+  if (Array.isArray(obj.questionBlocks)) {
+    obj.questionBlocks = obj.questionBlocks.map(q => {
+      const trimmed = typeof q.toObject === 'function' ? q.toObject() : { ...q };
+      delete trimmed.standardAnswer;
+      delete trimmed.rubric;
+      delete trimmed.correctOption;
+      delete trimmed.modelSolutionLatex;
+      delete trimmed.solution;
+      return trimmed;
+    });
+  }
+
+  if (Array.isArray(obj.questionMarks)) {
+    obj.questionMarks = obj.questionMarks.map(qm => {
+      const trimmed = typeof qm.toObject === 'function' ? qm.toObject() : { ...qm };
+      delete trimmed.stepMarksAwarded;
+      delete trimmed.rubric;
+      delete trimmed.correctOption;
+      delete trimmed.modelSolutionLatex;
+      return trimmed;
+    });
+  }
+
+  if (Array.isArray(obj.breakdown)) {
+    obj.breakdown = obj.breakdown.map(b => {
+      const trimmed = typeof b.toObject === 'function' ? b.toObject() : { ...b };
+      delete trimmed.correctOption;
+      delete trimmed.correctAnswer;
+      delete trimmed.key;
+      delete trimmed.solution;
+      delete trimmed.rubric;
+      return trimmed;
+    });
+  }
+
+  return obj;
+};
+
 // @desc    Get all student evaluations (enforces student isolation: students only see their own records)
 // @route   GET /api/evaluations
 // @access  Public / Protected
@@ -76,19 +126,7 @@ const getAllEvaluations = async (req, res) => {
         .select('-answerKeySnapshot -auditTrail -lockedBy')
         .sort({ submittedAt: -1, createdAt: -1 });
 
-      const safeEvals = rawEvals.map(doc => {
-        const obj = doc.toObject ? doc.toObject() : { ...doc };
-        delete obj.answerKeySnapshot;
-        delete obj.auditTrail;
-        delete obj.lockedBy;
-        if (Array.isArray(obj.questionBlocks)) {
-          obj.questionBlocks = obj.questionBlocks.map(q => {
-            const { standardAnswer, rubric, ...trimmedQ } = q;
-            return trimmedQ;
-          });
-        }
-        return obj;
-      });
+      const safeEvals = rawEvals.map(doc => sanitizeEvaluationForStudent(doc));
 
       return res.json(safeEvals);
     }
@@ -158,16 +196,28 @@ const getEvaluationById = async (req, res) => {
       }
 
       // Trim internal model answers, rubrics, and audit records for student
-      const evObj = ev.toObject ? ev.toObject() : { ...ev };
-      delete evObj.answerKeySnapshot;
-      delete evObj.auditTrail;
-      delete evObj.lockedBy;
-      if (Array.isArray(evObj.questionBlocks)) {
-        evObj.questionBlocks = evObj.questionBlocks.map(q => {
-          const { standardAnswer, rubric, ...trimmedQ } = q;
-          return trimmedQ;
-        });
-      }
+      const evObj = sanitizeEvaluationForStudent(ev);
+      try {
+        const ReEvaluationRequest = require('../models/ReEvaluationRequest');
+        const reEval = await ReEvaluationRequest.findOne({ evaluationId: ev.id }).sort({ requestedAt: -1 });
+        if (reEval) {
+          evObj.reEvaluation = {
+            id: reEval.id,
+            status: reEval.status,
+            questionNumbers: reEval.questionNumbers,
+            reason: reEval.reason,
+            currentMarks: reEval.currentMarks,
+            newMarks: reEval.newMarks,
+            marksAdjustment: reEval.marksAdjustment,
+            reviewRemarks: reEval.reviewRemarks,
+            reviewedByName: reEval.reviewedByName,
+            requestedAt: reEval.requestedAt,
+            resolvedAt: reEval.resolvedAt,
+          };
+        } else {
+          evObj.reEvaluation = null;
+        }
+      } catch (_) {}
       return res.json(evObj);
     }
 
@@ -250,7 +300,7 @@ const saveEvaluation = async (req, res) => {
 
         if (!allowsRetake && data.allowRetake !== true) {
           // Retakes disallowed: return existing record for backward compatibility without overwriting
-          return res.status(200).json(existingEval);
+          return res.status(200).json(sanitizeEvaluationForStudent(existingEval));
         }
       }
 
@@ -268,10 +318,87 @@ const saveEvaluation = async (req, res) => {
       const cheated = strikesRecorded >= 3 || String(data.submissionReason || '').includes('Proctoring Strikes');
 
       if (examType === 'Automated MCQ') {
-        // Objective auto-graded exam: sanitize score and auto-publish so student sees results
+        // Objective auto-graded exam: server-side MCQ score recomputation from stored answer key
         totalMarks = Number(data.totalMarks || 20);
-        const rawScore = Number(data.marksObtained !== undefined && data.marksObtained !== null ? data.marksObtained : (data.score ?? 0));
-        marksObtained = Math.max(0, Math.min(totalMarks, isNaN(rawScore) ? 0 : rawScore));
+        let computedMarks = 0;
+        let autoGradedSuccessfully = false;
+
+        try {
+          const Content = require('../models/Content');
+          const MarkingScheme = require('../models/MarkingScheme');
+
+          // Look up canonical exam content
+          const examDoc = await Content.findOne({
+            $or: [
+              { id: testId },
+              { testId },
+              ...(mongoose.Types.ObjectId.isValid(testId) ? [{ _id: testId }] : [])
+            ]
+          });
+
+          // Check canonical questions in Content or MarkingScheme
+          let canonicalQuestions = [];
+          if (Array.isArray(examDoc?.questions) && examDoc.questions.length > 0) {
+            canonicalQuestions = examDoc.questions;
+          } else if (Array.isArray(examDoc?.testQuestions) && examDoc.testQuestions.length > 0) {
+            canonicalQuestions = examDoc.testQuestions;
+          } else if (Array.isArray(examDoc?.answerKey?.solutionSet) && examDoc.answerKey.solutionSet.length > 0) {
+            canonicalQuestions = examDoc.answerKey.solutionSet;
+          } else {
+            const schemeDoc = await MarkingScheme.findOne({ examId: testId });
+            if (Array.isArray(schemeDoc?.questions) && schemeDoc.questions.length > 0) {
+              canonicalQuestions = schemeDoc.questions;
+            }
+          }
+
+          if (canonicalQuestions.length > 0) {
+            const studentAnswers = data.answers || data.responses || {};
+            let studentTotalMarks = 0;
+            let studentCorrectCount = 0;
+            let studentAttemptedCount = 0;
+
+            canonicalQuestions.forEach((q, idx) => {
+              const qKey = q.id || q._id || q.questionId || String(idx);
+              const studentChoice = (typeof studentAnswers === 'object' && !Array.isArray(studentAnswers))
+                ? (studentAnswers[qKey] !== undefined ? studentAnswers[qKey] : studentAnswers[idx])
+                : (Array.isArray(studentAnswers) ? (studentAnswers.find(a => (a.questionId === qKey || a.questionIndex === idx))?.selectedOption) : null);
+
+              const qMarks = Number(q.marks || q.maxMarks || 1);
+              const qNegative = Number(q.negativeMarks || 0);
+              const canonicalCorrect = q.correctOption || q.correctAnswer || q.answer || q.key;
+
+              studentTotalMarks += qMarks;
+
+              if (studentChoice !== undefined && studentChoice !== null && String(studentChoice).trim() !== '') {
+                studentAttemptedCount++;
+                const isCorrect = canonicalCorrect !== undefined &&
+                  String(studentChoice).trim().toLowerCase() === String(canonicalCorrect).trim().toLowerCase();
+
+                if (isCorrect) {
+                  computedMarks += qMarks;
+                  studentCorrectCount++;
+                } else if (qNegative > 0) {
+                  computedMarks = Math.max(0, computedMarks - qNegative);
+                }
+              }
+            });
+
+            totalMarks = studentTotalMarks > 0 ? studentTotalMarks : totalMarks;
+            marksObtained = Math.max(0, Math.min(totalMarks, computedMarks));
+            data.correctCount = studentCorrectCount;
+            data.attemptedCount = studentAttemptedCount;
+            data.totalQuestions = canonicalQuestions.length;
+            autoGradedSuccessfully = true;
+          }
+        } catch (recompErr) {
+          console.warn('[saveEvaluation] Notice: Server-side MCQ recomputation fallback:', recompErr.message);
+        }
+
+        if (!autoGradedSuccessfully) {
+          const rawScore = Number(data.marksObtained !== undefined && data.marksObtained !== null ? data.marksObtained : (data.score ?? 0));
+          marksObtained = Math.max(0, Math.min(totalMarks, isNaN(rawScore) ? 0 : rawScore));
+        }
+
         percentage = totalMarks > 0 ? Math.round((marksObtained / totalMarks) * 100) : 0;
         grade = percentage >= 90 ? 'A+' : percentage >= 80 ? 'A' : percentage >= 70 ? 'B+' : percentage >= 60 ? 'B' : percentage >= 40 ? 'C' : 'F';
         status = 'Evaluated';
@@ -315,7 +442,9 @@ const saveEvaluation = async (req, res) => {
         published,
         publishedAt: published ? new Date() : undefined,
         feedback,
-        answerSheetUrl: data.answerSheetUrl || data.answerFileUrl || '',
+        privateScriptUrl: `/api/evaluations/${id}/script-file`,
+        privatePublicId: data.privatePublicId || null,
+        answerSheetUrl: `/api/evaluations/${id}/script-file`,
         answerPages: Array.isArray(data.answerPages) ? data.answerPages : [],
         totalPages: Array.isArray(data.answerPages) ? data.answerPages.length : (Number(data.totalPages) || 1),
         fileName: data.fileName || 'submission.pdf',
@@ -376,7 +505,7 @@ const saveEvaluation = async (req, res) => {
         console.warn('[Sync to Submission] Notice:', subSyncErr.message);
       }
 
-      return res.status(201).json(saved);
+      return res.status(201).json(sanitizeEvaluationForStudent(saved));
     }
 
     // -------------------------------------------------------------

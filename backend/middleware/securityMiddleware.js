@@ -216,12 +216,55 @@ const corsOptions = {
 
 const strictCors = cors(corsOptions);
 
+/**
+ * 4. Evaluation Workspace & Marking Rate Limiter
+ * Keyed by authenticated User ID (falls back to IP).
+ * Generously accommodates rapid on-screen marking & draft autosaves (180 actions / min per user).
+ */
+const evaluationWorkspaceLimiter = rateLimit({
+  windowMs: 1 * 60 * 1000, // 1 minute
+  max: 180, // 180 actions/min per user
+  keyGenerator: getAuthUserOrIpKey,
+  validate: { keyGeneratorIpFallback: false, xForwardedForHeader: false },
+  standardHeaders: true,
+  legacyHeaders: false,
+  skip: () => process.env.DISABLE_RATE_LIMITING === 'true' || process.env.NODE_ENV === 'test',
+  message: {
+    success: false,
+    status: 429,
+    error: 'Too Many Requests',
+    message: 'Too many evaluation marking requests in a short period. Please slow down.',
+  },
+});
+
+/**
+ * 4b. Student Exam Submission Rate Limiter
+ * Keyed by authenticated User ID (prevents automated bot flooding while never blocking NAT/campus peers).
+ */
+const evaluationSubmissionLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  max: 30, // 30 exam submissions per 15 minutes window per user
+  keyGenerator: getAuthUserOrIpKey,
+  validate: { keyGeneratorIpFallback: false, xForwardedForHeader: false },
+  standardHeaders: true,
+  legacyHeaders: false,
+  skip: () => process.env.DISABLE_RATE_LIMITING === 'true' || process.env.NODE_ENV === 'test',
+  message: {
+    success: false,
+    status: 429,
+    error: 'Too Many Requests',
+    message: 'Too many exam submissions submitted in a short period. Please wait before submitting again.',
+  },
+});
+
 module.exports = {
   apiLimiter,
   authLimiter,
   doubtLimiter,
   doubtGeneralLimiter,
   analyticsLimiter,
+  evaluationWorkspaceLimiter,
+  evaluationSubmissionLimiter,
   securityHeaders,
   strictCors,
   corsOptions,

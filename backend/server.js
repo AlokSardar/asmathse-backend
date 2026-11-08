@@ -64,9 +64,24 @@ const uploadsDir = path.join(__dirname, 'uploads');
 if (!fs.existsSync(uploadsDir)) {
   fs.mkdirSync(uploadsDir, { recursive: true });
 }
+const privateUploadsDir = path.join(uploadsDir, 'private_scripts');
+if (!fs.existsSync(privateUploadsDir)) {
+  fs.mkdirSync(privateUploadsDir, { recursive: true });
+}
 
-// Serve uploaded files statically with cross-origin headers (both /uploads and /api/uploads paths supported)
+// Block unauthenticated direct access to private student answer scripts and legacy submissions
 app.use(['/uploads', '/api/uploads'], (req, res, next) => {
+  const cleanPath = (req.path || '').toLowerCase();
+  if (
+    cleanPath.includes('/private_scripts') ||
+    cleanPath.includes('submission_') ||
+    cleanPath.includes('script_') ||
+    cleanPath.includes('answersheet_')
+  ) {
+    return res.status(403).json({
+      message: 'Forbidden: Direct static access to student answer scripts is prohibited. Access via authenticated endpoint /api/evaluations/:id/script-file.'
+    });
+  }
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET, HEAD, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', '*');
@@ -231,9 +246,10 @@ mongoose.connection.once('open', () => {
     .catch(() => {});
 
   // Recurring sweeper: periodically cleans stuck jobs (>5m) and deletes abandoned drafts (>7d)
-  setInterval(() => {
+  const doubtSweepTimer = setInterval(() => {
     sweepStuckDoubtJobs().catch(() => {});
   }, 10 * 60 * 1000);
+  if (doubtSweepTimer && doubtSweepTimer.unref) doubtSweepTimer.unref();
 });
 
 // Startup verification for Gemini API Key

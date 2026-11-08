@@ -219,12 +219,106 @@ const resolveMediaUrl = (fileRef) => {
   return trimmed;
 };
 
+/**
+ * Upload a private/sensitive student answer script to Cloudinary with authenticated delivery
+ * Requires signed URL for downloading or viewing
+ */
+const uploadPrivateScriptToCloudinary = async (fileInput, options = {}) => {
+  const privateUploadsDir = path.join(uploadsDir, 'private_scripts');
+  if (!fs.existsSync(privateUploadsDir)) {
+    fs.mkdirSync(privateUploadsDir, { recursive: true });
+  }
+
+  const safeFileName = (options.fileName || `script_${Date.now()}.pdf`).replace(/[^a-zA-Z0-9_.-]/g, '_');
+  
+  if (!isCloudinaryConfigured()) {
+    // Local fallback: write strictly to private_scripts directory
+    const targetPath = path.join(privateUploadsDir, safeFileName);
+    if (typeof fileInput === 'string' && fileInput.startsWith('data:')) {
+      const base64Data = fileInput.replace(/^data:[^;]+;base64,/, '');
+      fs.writeFileSync(targetPath, Buffer.from(base64Data, 'base64'));
+    } else if (Buffer.isBuffer(fileInput)) {
+      fs.writeFileSync(targetPath, fileInput);
+    }
+    return {
+      secure_url: `/api/evaluations/scripts/${safeFileName}`,
+      public_id: `local_private_${safeFileName}`,
+      storage: 'local_private',
+      fileName: safeFileName,
+    };
+  }
+
+  // Cloudinary Authenticated Mode
+  try {
+    let uploadRes;
+    const uploadOpts = {
+      folder: 'as_maths/evaluations/scripts',
+      type: 'authenticated',
+      access_mode: 'authenticated',
+      resource_type: 'auto',
+      public_id: path.basename(safeFileName, path.extname(safeFileName)),
+    };
+
+    if (typeof fileInput === 'string') {
+      uploadRes = await cloudinary.uploader.upload(fileInput, uploadOpts);
+    } else if (Buffer.isBuffer(fileInput)) {
+      uploadRes = await new Promise((resolve, reject) => {
+        const upStream = cloudinary.uploader.upload_stream(uploadOpts, (err, res) => {
+          if (err) return reject(err);
+          resolve(res);
+        });
+        const bufferStream = new stream.PassThrough();
+        bufferStream.end(fileInput);
+        bufferStream.pipe(upStream);
+      });
+    }
+
+    return {
+      ...uploadRes,
+      storage: 'cloudinary_authenticated',
+      fileName: safeFileName,
+    };
+  } catch (cloudErr) {
+    console.warn('[CLOUDINARY] Authenticated script upload failed, falling back to local private disk:', cloudErr.message);
+    const targetPath = path.join(privateUploadsDir, safeFileName);
+    if (typeof fileInput === 'string' && fileInput.startsWith('data:')) {
+      const base64Data = fileInput.replace(/^data:[^;]+;base64,/, '');
+      fs.writeFileSync(targetPath, Buffer.from(base64Data, 'base64'));
+    } else if (Buffer.isBuffer(fileInput)) {
+      fs.writeFileSync(targetPath, fileInput);
+    }
+    return {
+      secure_url: `/api/evaluations/scripts/${safeFileName}`,
+      public_id: `local_private_${safeFileName}`,
+      storage: 'local_private',
+      fileName: safeFileName,
+    };
+  }
+};
+
+/**
+ * Generate time-limited signed URL for authenticated Cloudinary scripts (valid for 1 hour)
+ */
+const generateAuthenticatedScriptUrl = (publicId, format = 'pdf', expiresInSeconds = 3600) => {
+  if (!isCloudinaryConfigured() || !publicId || publicId.startsWith('local_private_')) {
+    return null;
+  }
+  const expiresAt = Math.floor(Date.now() / 1000) + expiresInSeconds;
+  return cloudinary.utils.private_download_url(publicId, format, {
+    expires_at: expiresAt,
+    resource_type: 'image',
+    type: 'authenticated',
+  });
+};
+
 module.exports = {
   cloudinary,
   isCloudinaryConfigured,
   uploadBufferToCloudinary,
   uploadBase64ToCloudinary,
   uploadDiskFileToCloudinary,
+  uploadPrivateScriptToCloudinary,
+  generateAuthenticatedScriptUrl,
   deleteFromCloudinary,
   resolveMediaUrl,
   getResourceType,
