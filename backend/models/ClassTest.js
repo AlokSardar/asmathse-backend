@@ -20,6 +20,12 @@ const classTestSchema = new mongoose.Schema({
   targetAudience: { type: String, index: true },
   durationMinutes: { type: Number },
   examDate: { type: Date },
+  fullMarks: { type: Number },
+  totalMarks: { type: Number },
+  passingMarks: { type: Number },
+  status: { type: String, index: true },
+  isDraft: { type: Boolean, default: false, index: true },
+  questions: { type: Array, default: [] },
   questionPaperUrl: { type: String }, // PDF or image url
 
   // ── Tests & Schedule Module Additive Schema Fields ──
@@ -28,11 +34,19 @@ const classTestSchema = new mongoose.Schema({
   scheduledTime: { type: String },
   scheduleEstimated: { type: Boolean, default: false },
   attemptsAllowed: { type: Number, default: 1 },
+  instructions: { type: String },
   isArchived: { type: Boolean, default: false, index: true },
   archivedAt: { type: Date },
   isCancelled: { type: Boolean, default: false, index: true },
   cancelledAt: { type: Date },
   cancellationReason: { type: String },
+  isDeleted: { type: Boolean, default: false, index: true },
+  deletedAt: { type: Date, default: null, index: true },
+  deletedBy: {
+    id: { type: String },
+    email: { type: String },
+    role: { type: String },
+  },
   rescheduleHistory: [{
     previousStart: { type: Date },
     previousEnd: { type: Date },
@@ -50,6 +64,7 @@ const classTestSchema = new mongoose.Schema({
 });
 
 // Optimized Compound Index for Tests & Schedule filtering and ordering
-classTestSchema.index({ course: 1, branch: 1, semester: 1, startAt: 1, isArchived: 1 });
+classTestSchema.index({ course: 1, branch: 1, semester: 1, startAt: 1, isArchived: 1, isDeleted: 1 });
+classTestSchema.index({ isDeleted: 1, deletedAt: 1 });
 
 module.exports = mongoose.model('ClassTest', classTestSchema);

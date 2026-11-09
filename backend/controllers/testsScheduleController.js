@@ -77,14 +77,47 @@ function checkTeacherAccess(user, test) {
   return true;
 }
 
+// Helper: Count attempts, evaluations, and submissions for a test
+async function countTestAttempts(test) {
+  if (!test) return 0;
+  const testMatchIds = [String(test._id)];
+  if (test.id) testMatchIds.push(String(test.id));
+  if (test.testId) testMatchIds.push(String(test.testId));
+
+  const [evalCount, subCount] = await Promise.all([
+    Evaluation.countDocuments({
+      $or: [
+        { testId: { $in: testMatchIds } },
+        { examId: { $in: testMatchIds } },
+      ],
+    }).catch(() => 0),
+    TestSubmission.countDocuments({
+      test: { $in: testMatchIds },
+    }).catch(() => 0),
+  ]);
+
+  return Math.max(evalCount, subCount);
+}
+
 // Helper: Build teacher/admin role-scoped query
-function buildScopedQuery(req, isArchivedOnly = false) {
+function buildScopedQuery(req, options = {}) {
   const user = req.user;
   const role = String(user?.role || '').toLowerCase();
 
-  const andClauses = isArchivedOnly
-    ? [{ isArchived: true }]
-    : [{ isArchived: { $ne: true } }];
+  const isArchivedOnly = typeof options === 'boolean' ? options : Boolean(options?.isArchivedOnly);
+  const isTrashOnly = typeof options === 'object' ? Boolean(options?.isTrashOnly) : false;
+
+  const andClauses = [];
+
+  if (isTrashOnly) {
+    andClauses.push({ isDeleted: true });
+  } else if (isArchivedOnly) {
+    andClauses.push({ isDeleted: { $ne: true } });
+    andClauses.push({ isArchived: true });
+  } else {
+    andClauses.push({ isDeleted: { $ne: true } });
+    andClauses.push({ isArchived: { $ne: true } });
+  }
 
   if (role === 'teacher' && user?.id !== 'master_admin_id') {
     const teacherCourse = user?.targetCourse || user?.course;
@@ -375,8 +408,12 @@ exports.getTestsList = async (req, res) => {
       sortOrder = 'desc',
     } = req.query;
 
+    const isTrashRequested = requestedStatus === 'trash' || req.query.isTrash === 'true';
     const isArchiveRequested = requestedStatus === 'archived';
-    const baseScoped = buildScopedQuery(req, isArchiveRequested);
+    const baseScoped = buildScopedQuery(req, {
+      isArchivedOnly: isArchiveRequested,
+      isTrashOnly: isTrashRequested,
+    });
     const scopedQuery = applyCohortFilter(baseScoped, req.query);
 
     if (search && search.trim()) {
@@ -397,7 +434,29 @@ exports.getTestsList = async (req, res) => {
       upcoming: 0,
       completed: 0,
       draft: 0,
+      archived: 0,
+      trash: 0,
     };
+
+    const [activeTestsForCounters, archivedCount, trashCount] = await Promise.all([
+      ClassTest.find(applyCohortFilter(buildScopedQuery(req, { isArchivedOnly: false, isTrashOnly: false }), req.query))
+        .select('startAt endAt examDate durationMinutes isDraft isOnlineTest testMode status')
+        .lean(),
+      ClassTest.countDocuments(applyCohortFilter(buildScopedQuery(req, { isArchivedOnly: true }), req.query)).catch(() => 0),
+      ClassTest.countDocuments(applyCohortFilter(buildScopedQuery(req, { isTrashOnly: true }), req.query)).catch(() => 0),
+    ]);
+
+    statusCounts.archived = archivedCount;
+    statusCounts.trash = trashCount;
+
+    for (const at of activeTestsForCounters) {
+      statusCounts.all++;
+      const cStatus = computeTestStatus(at, serverNow);
+      if (cStatus === 'ongoing') statusCounts.ongoing++;
+      else if (cStatus === 'upcoming') statusCounts.upcoming++;
+      else if (cStatus === 'completed') statusCounts.completed++;
+      else if (cStatus === 'draft') statusCounts.draft++;
+    }
 
     const enrichedTests = [];
 
@@ -405,14 +464,8 @@ exports.getTestsList = async (req, res) => {
       const computedStatus = computeTestStatus(t, serverNow);
       const timestamps = resolveTestTimestamps(t);
 
-      statusCounts.all++;
-      if (computedStatus === 'ongoing') statusCounts.ongoing++;
-      else if (computedStatus === 'upcoming') statusCounts.upcoming++;
-      else if (computedStatus === 'completed') statusCounts.completed++;
-      else if (computedStatus === 'draft') statusCounts.draft++;
-
       // Filter by requested status chip if provided
-      if (requestedStatus && requestedStatus !== 'all' && computedStatus !== requestedStatus) {
+      if (requestedStatus && requestedStatus !== 'all' && !isTrashRequested && !isArchiveRequested && computedStatus !== requestedStatus) {
         continue;
       }
 
@@ -442,6 +495,11 @@ exports.getTestsList = async (req, res) => {
         scheduleEstimated: timestamps.scheduleEstimated,
         formattedStartIST: timestamps.startAt ? formatInIST(timestamps.startAt) : 'Date not set',
         durationMinutes: timestamps.durationMinutes,
+        isDeleted: Boolean(t.isDeleted),
+        deletedAt: t.deletedAt || null,
+        deletedBy: t.deletedBy || null,
+        version: t.__v !== undefined ? t.__v : 0,
+        daysRemainingInTrash: t.deletedAt ? Math.max(0, 30 - Math.floor((serverNow.getTime() - new Date(t.deletedAt).getTime()) / (1000 * 60 * 60 * 24))) : null,
       });
     }
 
@@ -527,6 +585,7 @@ exports.getTestsList = async (req, res) => {
       pt.eligibleCount = eligible;
       pt.attemptsRatio = `${st.submittedCount} / ${eligible}`;
       pt.averageScore = st.avgScore;
+      pt.hasAttempts = st.submittedCount > 0;
     }
 
     return res.status(200).json({
@@ -679,6 +738,12 @@ exports.getTestDetails = async (req, res) => {
         attemptsRatio: `${totalSubmissions} / ${eligibleCount}`,
         averageScore: avgScore,
         topScore,
+        hasAttempts: totalSubmissions > 0,
+        version: test.__v !== undefined ? test.__v : 0,
+        isDeleted: Boolean(test.isDeleted),
+        deletedAt: test.deletedAt || null,
+        deletedBy: test.deletedBy || null,
+        instructions: test.instructions || '',
         rescheduleHistory: test.rescheduleHistory || [],
       },
     });
@@ -993,6 +1058,576 @@ exports.duplicateTest = async (req, res) => {
       success: true,
       message: 'Test duplicated as a draft',
       data: sanitizeTestPayload(created.toObject()),
+    });
+  } catch (err) {
+    return res.status(500).json({ success: false, error: err.message });
+  }
+};
+
+// ============================================================================
+// 8. UPDATE / EDIT TEST ENDPOINT (Optimistic Concurrency & Edit Locks)
+// ============================================================================
+exports.updateTest = async (req, res) => {
+  try {
+    assertDevOrTestDatabase();
+    const { id } = req.params;
+    const user = req.user;
+    const role = String(user?.role || '').toLowerCase();
+    const body = req.body || {};
+
+    const test = await ClassTest.findOne({
+      $or: [
+        { _id: mongoose.Types.ObjectId.isValid(id) ? id : null },
+        { id },
+        { testId: id },
+      ],
+    });
+
+    if (!test) {
+      return res.status(404).json({ success: false, message: 'Test not found' });
+    }
+
+    if (!checkTeacherAccess(user, test)) {
+      return res.status(403).json({ success: false, message: 'Access denied: test outside assigned course/branch' });
+    }
+
+    // 1. Optimistic Concurrency Check
+    if (body.version !== undefined && body.version !== null) {
+      const clientVersion = Number(body.version);
+      const serverVersion = Number(test.__v || 0);
+      if (!isNaN(clientVersion) && clientVersion !== serverVersion) {
+        return res.status(409).json({
+          success: false,
+          code: 'CONCURRENCY_CONFLICT',
+          message: 'This test has been modified by another faculty member or session. Please reload to review the latest changes.',
+          serverVersion,
+          clientVersion,
+        });
+      }
+    }
+
+    const serverNow = new Date();
+    const currentStatus = computeTestStatus(test, serverNow);
+    const attemptsCount = await countTestAttempts(test);
+    const hasAttemptsOrActive = currentStatus === 'ongoing' || currentStatus === 'completed' || attemptsCount > 0;
+
+    // 2. Granular Edit Locks
+    if (hasAttemptsOrActive) {
+      const lockedFields = ['questions', 'fullMarks', 'passingMarks', 'course', 'branch', 'semester'];
+      const attemptedLockedModifications = [];
+
+      for (const f of lockedFields) {
+        if (body[f] !== undefined) {
+          const currentVal = JSON.stringify(test[f] ?? null);
+          const newVal = JSON.stringify(body[f] ?? null);
+          if (currentVal !== newVal) {
+            attemptedLockedModifications.push(f);
+          }
+        }
+      }
+
+      if (attemptedLockedModifications.length > 0) {
+        return res.status(400).json({
+          success: false,
+          code: 'LOCKED_FIELDS_MODIFIED',
+          message: `Cannot modify locked field(s) [${attemptedLockedModifications.join(', ')}]: student attempts or active sessions already exist. Title, instructions, and schedule can still be updated.`,
+          lockedFields: attemptedLockedModifications,
+        });
+      }
+    }
+
+    // 3. Reschedule / Timing updates
+    if (body.startAt !== undefined) {
+      const parsedStart = new Date(body.startAt);
+      if (isNaN(parsedStart.getTime())) {
+        return res.status(400).json({ success: false, message: 'Invalid startAt date' });
+      }
+
+      if (parsedStart < serverNow && role !== 'admin' && user?.id !== 'master_admin_id') {
+        return res.status(400).json({ success: false, message: 'Cannot reschedule a test to the past.' });
+      }
+
+      if (currentStatus === 'ongoing' || currentStatus === 'completed') {
+        if (role !== 'admin' && user?.id !== 'master_admin_id') {
+          return res.status(403).json({ success: false, message: 'Only administrators can reschedule an ongoing or completed test.' });
+        }
+        if (!body.reason || !body.reason.trim()) {
+          return res.status(400).json({ success: false, message: 'A mandatory justification reason is required to reschedule an ongoing or completed test.' });
+        }
+      }
+
+      const duration = Number(body.durationMinutes || test.durationMinutes || 45);
+      const parsedEnd = new Date(parsedStart.getTime() + duration * 60000);
+
+      test.rescheduleHistory = test.rescheduleHistory || [];
+      test.rescheduleHistory.push({
+        previousStart: test.startAt,
+        previousEnd: test.endAt,
+        newStart: parsedStart,
+        newEnd: parsedEnd,
+        reason: body.reason || 'Edit update',
+        rescheduledBy: user?.name || user?.email || 'Faculty',
+        rescheduledAt: new Date(),
+      });
+
+      test.startAt = parsedStart;
+      test.endAt = parsedEnd;
+      test.examDate = parsedStart; // Dual-write sync
+      test.durationMinutes = duration; // Dual-write sync
+      test.scheduledTime = body.scheduledTime || formatInIST(parsedStart);
+      test.scheduleEstimated = false;
+    } else if (body.durationMinutes !== undefined) {
+      const duration = Number(body.durationMinutes);
+      test.durationMinutes = duration;
+      if (test.startAt) {
+        test.endAt = new Date(test.startAt.getTime() + duration * 60000);
+      }
+    }
+
+    // 4. Update unlocked fields
+    if (body.title && body.title.trim()) test.title = body.title.trim();
+    if (body.instructions !== undefined) test.instructions = body.instructions;
+    if (body.subject !== undefined) test.subject = body.subject;
+
+    if (!hasAttemptsOrActive) {
+      if (body.course) test.course = body.course;
+      if (body.branch) test.branch = body.branch;
+      if (body.semester !== undefined) test.semester = body.semester;
+      if (body.fullMarks !== undefined) test.fullMarks = Number(body.fullMarks);
+      if (body.passingMarks !== undefined) test.passingMarks = Number(body.passingMarks);
+      if (Array.isArray(body.questions)) test.questions = body.questions;
+    }
+
+    await test.save();
+
+    try {
+      await AuditLog.create({
+        action: 'test_updated',
+        actor: { id: user?.id, email: user?.email, role: user?.role },
+        target: { id: test._id, title: test.title },
+        details: { version: test.__v },
+      });
+    } catch (_) {}
+
+    return res.status(200).json({
+      success: true,
+      message: 'Test updated successfully',
+      data: sanitizeTestPayload(test.toObject()),
+      version: test.__v,
+    });
+  } catch (err) {
+    return res.status(500).json({ success: false, error: err.message });
+  }
+};
+
+// ============================================================================
+// 9. DELETE (SOFT DELETE / TRASH & PERMANENT)
+// ============================================================================
+exports.deleteTest = async (req, res) => {
+  try {
+    assertDevOrTestDatabase();
+    const { id } = req.params;
+    const { confirmStudentDataLoss, reason, permanent } = req.body || {};
+    const user = req.user;
+    const role = String(user?.role || '').toLowerCase();
+
+    const test = await ClassTest.findOne({
+      $or: [
+        { _id: mongoose.Types.ObjectId.isValid(id) ? id : null },
+        { id },
+        { testId: id },
+      ],
+    });
+
+    if (!test) {
+      return res.status(404).json({ success: false, message: 'Test not found' });
+    }
+
+    if (!checkTeacherAccess(user, test)) {
+      return res.status(403).json({ success: false, message: 'Access denied: test outside assigned course/branch' });
+    }
+
+    const serverNow = new Date();
+    const currentStatus = computeTestStatus(test, serverNow);
+
+    if (currentStatus === 'ongoing') {
+      return res.status(400).json({
+        success: false,
+        message: 'Cannot delete an ongoing test in progress.',
+      });
+    }
+
+    const attemptsCount = await countTestAttempts(test);
+
+    if (attemptsCount > 0) {
+      if (role === 'teacher' && user?.id !== 'master_admin_id') {
+        return res.status(403).json({
+          success: false,
+          code: 'TEACHER_CANNOT_DELETE_WITH_ATTEMPTS',
+          message: 'Tests with student attempts cannot be deleted by faculty members. Please archive the test instead.',
+        });
+      }
+
+      if (!confirmStudentDataLoss) {
+        return res.status(400).json({
+          success: false,
+          code: 'CONFIRMATION_REQUIRED',
+          message: 'Explicit confirmation of student data removal is required to delete a test with existing attempts.',
+        });
+      }
+
+      if (!reason || !reason.trim()) {
+        return res.status(400).json({
+          success: false,
+          code: 'REASON_REQUIRED',
+          message: 'A mandatory justification reason is required to delete a test with existing student attempts.',
+        });
+      }
+    }
+
+    if (permanent) {
+      await ClassTest.deleteOne({ _id: test._id });
+      try {
+        await AuditLog.create({
+          action: 'test_permanently_deleted',
+          actor: { id: user?.id, email: user?.email, role: user?.role },
+          target: { id: test._id, title: test.title },
+          details: { reason: reason || 'Permanent removal', attemptsCount },
+        });
+      } catch (_) {}
+
+      return res.status(200).json({
+        success: true,
+        message: 'Test permanently deleted.',
+        deletedId: String(test._id),
+      });
+    } else {
+      test.isDeleted = true;
+      test.deletedAt = new Date();
+      test.deletedBy = { id: user?.id, email: user?.email, role: user?.role };
+      if (reason) test.cancellationReason = reason;
+      await test.save();
+
+      try {
+        await AuditLog.create({
+          action: 'test_soft_deleted',
+          actor: { id: user?.id, email: user?.email, role: user?.role },
+          target: { id: test._id, title: test.title },
+          details: { reason, attemptsCount, movedToTrash: true },
+        });
+      } catch (_) {}
+
+      return res.status(200).json({
+        success: true,
+        message: 'Test moved to Trash.',
+        deletedId: String(test._id),
+      });
+    }
+  } catch (err) {
+    return res.status(500).json({ success: false, error: err.message });
+  }
+};
+
+// ============================================================================
+// 10. RESTORE TEST FROM TRASH
+// ============================================================================
+exports.restoreTest = async (req, res) => {
+  try {
+    assertDevOrTestDatabase();
+    const { id } = req.params;
+    const user = req.user;
+
+    const test = await ClassTest.findOne({
+      $or: [
+        { _id: mongoose.Types.ObjectId.isValid(id) ? id : null },
+        { id },
+        { testId: id },
+      ],
+    });
+
+    if (!test) {
+      return res.status(404).json({ success: false, message: 'Test not found' });
+    }
+
+    if (!checkTeacherAccess(user, test)) {
+      return res.status(403).json({ success: false, message: 'Access denied: test outside assigned course/branch' });
+    }
+
+    test.isDeleted = false;
+    test.deletedAt = null;
+    test.deletedBy = null;
+    await test.save();
+
+    try {
+      await AuditLog.create({
+        action: 'test_restored',
+        actor: { id: user?.id, email: user?.email, role: user?.role },
+        target: { id: test._id, title: test.title },
+      });
+    } catch (_) {}
+
+    return res.status(200).json({
+      success: true,
+      message: 'Test restored from Trash successfully.',
+      data: sanitizeTestPayload(test.toObject()),
+    });
+  } catch (err) {
+    return res.status(500).json({ success: false, error: err.message });
+  }
+};
+
+// ============================================================================
+// 11. BULK DELETE TESTS
+// ============================================================================
+exports.bulkDeleteTests = async (req, res) => {
+  try {
+    assertDevOrTestDatabase();
+    const { ids, confirmStudentDataLoss, reason, confirmationPhrase, permanent } = req.body || {};
+    const user = req.user;
+    const role = String(user?.role || '').toLowerCase();
+
+    if (!Array.isArray(ids) || ids.length === 0) {
+      return res.status(400).json({ success: false, message: 'Array of test IDs is required' });
+    }
+
+    if (ids.length > 10 && confirmationPhrase !== 'DELETE') {
+      return res.status(400).json({
+        success: false,
+        code: 'PHRASE_CONFIRMATION_REQUIRED',
+        message: 'Bulk deletion exceeding 10 items requires typing "DELETE" to confirm.',
+      });
+    }
+
+    const serverNow = new Date();
+    const deletedIds = [];
+    const skipped = [];
+
+    for (const id of ids) {
+      const test = await ClassTest.findOne({
+        $or: [
+          { _id: mongoose.Types.ObjectId.isValid(id) ? id : null },
+          { id },
+          { testId: id },
+        ],
+      });
+
+      if (!test) {
+        skipped.push({ id, title: 'Unknown', reason: 'Test record not found' });
+        continue;
+      }
+
+      if (!checkTeacherAccess(user, test)) {
+        skipped.push({ id: String(test._id), title: test.title, reason: 'Access denied: outside assigned course/branch' });
+        continue;
+      }
+
+      const currentStatus = computeTestStatus(test, serverNow);
+      if (currentStatus === 'ongoing') {
+        skipped.push({ id: String(test._id), title: test.title, reason: 'Ongoing tests cannot be deleted' });
+        continue;
+      }
+
+      const attemptsCount = await countTestAttempts(test);
+      if (attemptsCount > 0) {
+        if (role === 'teacher' && user?.id !== 'master_admin_id') {
+          skipped.push({
+            id: String(test._id),
+            title: test.title,
+            reason: 'Tests with student attempts cannot be deleted by faculty. Please archive instead.',
+          });
+          continue;
+        }
+
+        if (!confirmStudentDataLoss) {
+          skipped.push({
+            id: String(test._id),
+            title: test.title,
+            reason: 'Confirmation of student data loss required',
+          });
+          continue;
+        }
+
+        if (!reason || !reason.trim()) {
+          skipped.push({
+            id: String(test._id),
+            title: test.title,
+            reason: 'Mandatory justification reason required',
+          });
+          continue;
+        }
+      }
+
+      if (permanent) {
+        await ClassTest.deleteOne({ _id: test._id });
+        deletedIds.push(String(test._id));
+      } else {
+        test.isDeleted = true;
+        test.deletedAt = new Date();
+        test.deletedBy = { id: user?.id, email: user?.email, role: user?.role };
+        if (reason) test.cancellationReason = reason;
+        await test.save();
+        deletedIds.push(String(test._id));
+      }
+    }
+
+    try {
+      await AuditLog.create({
+        action: permanent ? 'tests_bulk_permanently_deleted' : 'tests_bulk_soft_deleted',
+        actor: { id: user?.id, email: user?.email, role: user?.role },
+        details: {
+          requestedCount: ids.length,
+          deletedCount: deletedIds.length,
+          skippedCount: skipped.length,
+          deletedIds,
+          skipped,
+          reason,
+        },
+      });
+    } catch (_) {}
+
+    return res.status(200).json({
+      success: true,
+      processedCount: deletedIds.length,
+      deletedIds,
+      skipped,
+      message: `${deletedIds.length} test(s) ${permanent ? 'permanently deleted' : 'moved to Trash'}${skipped.length > 0 ? `, ${skipped.length} skipped` : ''}.`,
+    });
+  } catch (err) {
+    return res.status(500).json({ success: false, error: err.message });
+  }
+};
+
+// ============================================================================
+// 12. BULK ARCHIVE TESTS
+// ============================================================================
+exports.bulkArchiveTests = async (req, res) => {
+  try {
+    assertDevOrTestDatabase();
+    const { ids } = req.body || {};
+    const user = req.user;
+
+    if (!Array.isArray(ids) || ids.length === 0) {
+      return res.status(400).json({ success: false, message: 'Array of test IDs is required' });
+    }
+
+    const archivedIds = [];
+    const skipped = [];
+
+    for (const id of ids) {
+      const test = await ClassTest.findOne({
+        $or: [
+          { _id: mongoose.Types.ObjectId.isValid(id) ? id : null },
+          { id },
+          { testId: id },
+        ],
+      });
+
+      if (!test) {
+        skipped.push({ id, title: 'Unknown', reason: 'Test not found' });
+        continue;
+      }
+
+      if (!checkTeacherAccess(user, test)) {
+        skipped.push({ id: String(test._id), title: test.title, reason: 'Access denied: outside assigned course/branch' });
+        continue;
+      }
+
+      const activeSubmissions = await TestSubmission.countDocuments({
+        test: { $in: [String(test._id), test.id, test.testId] },
+        status: { $in: ['evaluating', 'in_progress', 'attempting'] },
+      });
+
+      if (activeSubmissions > 0) {
+        skipped.push({
+          id: String(test._id),
+          title: test.title,
+          reason: `${activeSubmissions} active session(s) in progress`,
+        });
+        continue;
+      }
+
+      test.isArchived = true;
+      test.archivedAt = new Date();
+      await test.save();
+      archivedIds.push(String(test._id));
+    }
+
+    try {
+      await AuditLog.create({
+        action: 'tests_bulk_archived',
+        actor: { id: user?.id, email: user?.email, role: user?.role },
+        details: { archivedCount: archivedIds.length, skippedCount: skipped.length, archivedIds, skipped },
+      });
+    } catch (_) {}
+
+    return res.status(200).json({
+      success: true,
+      processedCount: archivedIds.length,
+      archivedIds,
+      skipped,
+      message: `${archivedIds.length} test(s) archived successfully${skipped.length > 0 ? `, ${skipped.length} skipped` : ''}.`,
+    });
+  } catch (err) {
+    return res.status(500).json({ success: false, error: err.message });
+  }
+};
+
+// ============================================================================
+// 13. BULK RESTORE TESTS FROM TRASH
+// ============================================================================
+exports.bulkRestoreTests = async (req, res) => {
+  try {
+    assertDevOrTestDatabase();
+    const { ids } = req.body || {};
+    const user = req.user;
+
+    if (!Array.isArray(ids) || ids.length === 0) {
+      return res.status(400).json({ success: false, message: 'Array of test IDs is required' });
+    }
+
+    const restoredIds = [];
+    const skipped = [];
+
+    for (const id of ids) {
+      const test = await ClassTest.findOne({
+        $or: [
+          { _id: mongoose.Types.ObjectId.isValid(id) ? id : null },
+          { id },
+          { testId: id },
+        ],
+      });
+
+      if (!test) {
+        skipped.push({ id, title: 'Unknown', reason: 'Test not found' });
+        continue;
+      }
+
+      if (!checkTeacherAccess(user, test)) {
+        skipped.push({ id: String(test._id), title: test.title, reason: 'Access denied: outside assigned course/branch' });
+        continue;
+      }
+
+      test.isDeleted = false;
+      test.deletedAt = null;
+      test.deletedBy = null;
+      await test.save();
+      restoredIds.push(String(test._id));
+    }
+
+    try {
+      await AuditLog.create({
+        action: 'tests_bulk_restored',
+        actor: { id: user?.id, email: user?.email, role: user?.role },
+        details: { restoredCount: restoredIds.length, skippedCount: skipped.length, restoredIds, skipped },
+      });
+    } catch (_) {}
+
+    return res.status(200).json({
+      success: true,
+      processedCount: restoredIds.length,
+      restoredIds,
+      skipped,
+      message: `${restoredIds.length} test(s) restored from Trash${skipped.length > 0 ? `, ${skipped.length} skipped` : ''}.`,
     });
   } catch (err) {
     return res.status(500).json({ success: false, error: err.message });
