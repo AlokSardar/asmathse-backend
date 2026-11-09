@@ -16,9 +16,17 @@ const {
   bulkDeleteContent,
 } = require('../controllers/contentController');
 
+const {
+  getQuestionBank,
+  getQuestionBankMeta,
+} = require('../controllers/questionBankController');
+
+const { requireTeacherOrAdmin } = require('../middleware/authMiddleware');
 const { upload } = require('../middleware/uploadMiddleware');
 
 router.get('/academic-structure', getAcademicStructure);
+router.get('/question-bank/meta', requireTeacherOrAdmin, getQuestionBankMeta);
+router.get('/question-bank', requireTeacherOrAdmin, getQuestionBank);
 router.get('/', getAllContent);
 router.post('/', upload.single('file'), saveContent);
 router.post('/batch', batchSyncContent);
