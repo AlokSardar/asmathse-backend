@@ -5,6 +5,7 @@ const ClassTest = require('../models/ClassTest');
 const Content = require('../models/Content');
 const TestSubmission = require('../models/TestSubmission');
 const Notification = require('../models/Notification');
+const { resolveTestTimestamps } = require('../utils/scheduleTime');
 
 // Helper: Inspect request credentials for administrator authorization
 const isAuthorizedAdmin = (req) => {
@@ -81,6 +82,18 @@ exports.createTest = async (req, res) => {
         body.branch = branch || body.stream || 'CSE';
         body.stream = body.branch;
         body.targetBranches = [body.branch];
+      }
+    }
+
+    // Dual-write schedule fields: startAt/endAt <-> examDate/durationMinutes
+    const scheduleTimestamps = resolveTestTimestamps(body);
+    if (scheduleTimestamps.startAt) {
+      body.startAt = scheduleTimestamps.startAt;
+      body.endAt = scheduleTimestamps.endAt;
+      body.durationMinutes = scheduleTimestamps.durationMinutes;
+      body.scheduleEstimated = scheduleTimestamps.scheduleEstimated;
+      if (!body.examDate) {
+        body.examDate = scheduleTimestamps.startAt;
       }
     }
 

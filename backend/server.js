@@ -129,6 +129,7 @@ const uploadRoutes = require('./routes/uploadRoutes');
 const aiRoutes = require('./routes/aiRoutes');
 const doubtRoutes = require('./routes/doubtRoutes');
 const accountRoutes = require('./routes/accountRoutes');
+const testsScheduleRoutes = require('./routes/testsScheduleRoutes');
 
 // Mount routers with sensitive route protection
 app.use('/api/upload', uploadRoutes);
@@ -149,6 +150,7 @@ app.use(['/api/student', '/student'], studentRoutes);
 app.use('/api/tests', testRoutes);
 app.use('/api/fees', feeRoutes);
 app.use('/api/account', accountRoutes);
+app.use('/api/tests-schedule', testsScheduleRoutes);
 
 
 // ── Lightweight Health Routes for External Uptime Pingers ────────────────────────
