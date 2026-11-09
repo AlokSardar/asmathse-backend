@@ -35,18 +35,46 @@ function sanitizeTestPayload(testObj) {
   delete sanitized.answerKey;
   delete sanitized.solutionSet;
   delete sanitized.correctAnswers;
+  delete sanitized.solution;
+  delete sanitized.solutions;
+  delete sanitized.explanation;
 
   if (Array.isArray(sanitized.questions)) {
     sanitized.questions = sanitized.questions.map((q) => {
       const qCopy = { ...q };
+      delete qCopy.answerKey;
+      delete qCopy.solution;
+      delete qCopy.solutions;
+      delete qCopy.explanation;
       delete qCopy.correctOption;
       delete qCopy.correctAnswer;
-      delete qCopy.explanation;
+      delete qCopy.correctAnswers;
       return qCopy;
     });
   }
 
   return sanitized;
+}
+
+// Helper: Verify teacher course/branch scope access
+function checkTeacherAccess(user, test) {
+  if (!user || !test) return true;
+  const role = String(user.role || '').toLowerCase();
+  if (role !== 'teacher' || user.id === 'master_admin_id') {
+    return true; // Admin / master admin has full access across all cohorts
+  }
+  const teacherCourse = user.targetCourse || user.course;
+  const teacherBranch = user.branch || user.stream;
+  if (teacherCourse && test.course && test.course.toLowerCase() !== teacherCourse.toLowerCase()) {
+    return false;
+  }
+  if (teacherBranch && !teacherBranch.toLowerCase().includes('all') && !test.isCommon && !test.isCommonFirstYear) {
+    const testBranch = test.branch || test.stream;
+    if (testBranch && !/all|common/i.test(testBranch) && testBranch.toLowerCase() !== teacherBranch.toLowerCase()) {
+      return false;
+    }
+  }
+  return true;
 }
 
 // Helper: Build teacher/admin role-scoped query
@@ -598,16 +626,30 @@ exports.getTestDetails = async (req, res) => {
       return res.status(404).json({ success: false, message: 'Test not found' });
     }
 
+    if (!checkTeacherAccess(req.user, test)) {
+      return res.status(403).json({ success: false, message: 'Access denied: test outside assigned course/branch' });
+    }
+
     const serverNow = new Date();
     const computedStatus = computeTestStatus(test, serverNow);
     const timestamps = resolveTestTimestamps(test);
     const eligibleCount = await countEligibleStudents(test);
 
     // Attempts and results summary
-    const tid = String(test.testId || test.id || test._id);
+    const testMatchIds = [String(test._id)];
+    if (test.id) testMatchIds.push(String(test.id));
+    if (test.testId) testMatchIds.push(String(test.testId));
+
     const evaluations = await Evaluation.find({
-      testId: tid,
-      $or: [{ published: true }, { autoGraded: true }],
+      $and: [
+        {
+          $or: [
+            { testId: { $in: testMatchIds } },
+            { examId: { $in: testMatchIds } },
+          ],
+        },
+        { $or: [{ published: true }, { autoGraded: true }] },
+      ],
     }).lean();
 
     const totalSubmissions = evaluations.length;
@@ -670,6 +712,10 @@ exports.rescheduleTest = async (req, res) => {
 
     if (!test) {
       return res.status(404).json({ success: false, message: 'Test not found' });
+    }
+
+    if (!checkTeacherAccess(user, test)) {
+      return res.status(403).json({ success: false, message: 'Access denied: test outside assigned course/branch' });
     }
 
     const serverNow = new Date();
@@ -804,6 +850,10 @@ exports.archiveTest = async (req, res) => {
       return res.status(404).json({ success: false, message: 'Test not found' });
     }
 
+    if (!checkTeacherAccess(user, test)) {
+      return res.status(403).json({ success: false, message: 'Access denied: test outside assigned course/branch' });
+    }
+
     // Safety guard: active student sessions in progress cannot be archived
     const activeSubmissions = await TestSubmission.countDocuments({
       test: { $in: [String(test._id), test.id, test.testId] },
@@ -854,6 +904,10 @@ exports.unarchiveTest = async (req, res) => {
       return res.status(404).json({ success: false, message: 'Test not found' });
     }
 
+    if (!checkTeacherAccess(user, test)) {
+      return res.status(403).json({ success: false, message: 'Access denied: test outside assigned course/branch' });
+    }
+
     test.isArchived = false;
     test.archivedAt = null;
     await test.save();
@@ -891,6 +945,10 @@ exports.duplicateTest = async (req, res) => {
 
     if (!original) {
       return res.status(404).json({ success: false, message: 'Original test not found' });
+    }
+
+    if (!checkTeacherAccess(user, original)) {
+      return res.status(403).json({ success: false, message: 'Access denied: test outside assigned course/branch' });
     }
 
     // Clone configuration and questions exclusively (zero attempts, zero results, unscheduled draft)
@@ -942,12 +1000,14 @@ exports.duplicateTest = async (req, res) => {
 };
 
 // ============================================================================
-// 8. COHORT ANALYTICS ENDPOINT
+// 8. TEST ANALYTICS ENDPOINT
 // ============================================================================
 exports.getAnalytics = async (req, res) => {
   try {
     assertDevOrTestDatabase();
     const { id } = req.params;
+    const user = req.user;
+    const role = String(user?.role || '').toLowerCase();
 
     const test = await ClassTest.findOne({
       $or: [
@@ -961,10 +1021,24 @@ exports.getAnalytics = async (req, res) => {
       return res.status(404).json({ success: false, message: 'Test not found' });
     }
 
-    const tid = String(test.testId || test.id || test._id);
+    if (!checkTeacherAccess(user, test)) {
+      return res.status(403).json({ success: false, message: 'Access denied: test outside assigned course/branch' });
+    }
+
+    const testMatchIds = [String(test._id)];
+    if (test.id) testMatchIds.push(String(test.id));
+    if (test.testId) testMatchIds.push(String(test.testId));
+
     const evals = await Evaluation.find({
-      testId: tid,
-      $or: [{ published: true }, { autoGraded: true }],
+      $and: [
+        {
+          $or: [
+            { testId: { $in: testMatchIds } },
+            { examId: { $in: testMatchIds } },
+          ],
+        },
+        { $or: [{ published: true }, { autoGraded: true }] },
+      ],
     }).lean();
 
     if (evals.length === 0) {
@@ -1084,10 +1158,24 @@ exports.exportResultsCSV = async (req, res) => {
       return res.status(404).json({ success: false, message: 'Test not found' });
     }
 
-    const tid = String(test.testId || test.id || test._id);
+    if (!checkTeacherAccess(user, test)) {
+      return res.status(403).json({ success: false, message: 'Access denied: test outside assigned course/branch' });
+    }
+
+    const testMatchIds = [String(test._id)];
+    if (test.id) testMatchIds.push(String(test.id));
+    if (test.testId) testMatchIds.push(String(test.testId));
+
     const evals = await Evaluation.find({
-      testId: tid,
-      $or: [{ published: true }, { autoGraded: true }],
+      $and: [
+        {
+          $or: [
+            { testId: { $in: testMatchIds } },
+            { examId: { $in: testMatchIds } },
+          ],
+        },
+        { $or: [{ published: true }, { autoGraded: true }] },
+      ],
     })
       .select('studentRoll rollNumber studentName marksObtained totalMarks percentage grade submittedAt')
       .limit(1000) // Strict row capping
@@ -1097,7 +1185,7 @@ exports.exportResultsCSV = async (req, res) => {
     const sanitizeCsvCell = (val) => {
       if (val === null || val === undefined) return '';
       let s = String(val).trim();
-      if (/^[=+\-@]/.test(s)) {
+      if (/^[=+\-@\t\r]/.test(s)) {
         s = `'${s}`;
       }
       return `"${s.replace(/"/g, '""')}"`;
@@ -1141,6 +1229,151 @@ exports.exportResultsCSV = async (req, res) => {
     res.setHeader('Content-Type', 'text/csv; charset=utf-8');
     res.setHeader('Content-Disposition', `attachment; filename="Test_Results_${test._id}.csv"`);
     return res.status(200).send(csvContent);
+  } catch (err) {
+    return res.status(500).json({ success: false, error: err.message });
+  }
+};
+
+// ============================================================================
+// 10. COHORT ANALYTICS ENDPOINT (Aggregated Overview for Cohort)
+// ============================================================================
+exports.getCohortAnalytics = async (req, res) => {
+  try {
+    assertDevOrTestDatabase();
+    const baseScoped = buildScopedQuery(req);
+    const scopedQuery = applyCohortFilter(baseScoped, req.query);
+
+    const tests = await ClassTest.find(scopedQuery).lean();
+    if (!tests || tests.length === 0) {
+      return res.status(200).json({
+        success: true,
+        hasSufficientData: false,
+        totalTests: 0,
+        totalEvaluations: 0,
+        tests: [],
+      });
+    }
+
+    const testMatchIds = [];
+    for (const t of tests) {
+      testMatchIds.push(String(t._id));
+      if (t.id) testMatchIds.push(String(t.id));
+      if (t.testId) testMatchIds.push(String(t.testId));
+    }
+
+    const evals = await Evaluation.find({
+      $and: [
+        {
+          $or: [
+            { testId: { $in: testMatchIds } },
+            { examId: { $in: testMatchIds } },
+          ],
+        },
+        { $or: [{ published: true }, { autoGraded: true }] },
+      ],
+    }).lean();
+
+    const serverNow = new Date();
+
+    if (evals.length === 0) {
+      return res.status(200).json({
+        success: true,
+        hasSufficientData: false,
+        totalTests: tests.length,
+        totalEvaluations: 0,
+        tests: tests.map((t) => ({
+          id: String(t.testId || t.id || t._id),
+          _id: t._id,
+          title: t.title,
+          course: t.course,
+          branch: t.branch,
+          semester: t.semester,
+          status: computeTestStatus(t, serverNow),
+          totalSubmissions: 0,
+          averageScore: null,
+        })),
+      });
+    }
+
+    const scores = evals.map((e) =>
+      typeof e.percentage === 'number'
+        ? e.percentage
+        : e.marksObtained != null && e.totalMarks ? (e.marksObtained / e.totalMarks) * 100 : 0
+    );
+
+    scores.sort((a, b) => a - b);
+    const totalEvals = scores.length;
+    const mean = parseFloat((scores.reduce((a, b) => a + b, 0) / totalEvals).toFixed(1));
+    const mid = Math.floor(totalEvals / 2);
+    const median = totalEvals % 2 !== 0 ? scores[mid] : parseFloat(((scores[mid - 1] + scores[mid]) / 2).toFixed(1));
+    const highest = scores[totalEvals - 1];
+    const lowest = scores[0];
+
+    const passedCount = scores.filter((s) => s >= 40).length;
+    const passRate = parseFloat(((passedCount / totalEvals) * 100).toFixed(1));
+
+    const bins = [
+      { range: '0-20%', count: 0 },
+      { range: '21-40%', count: 0 },
+      { range: '41-60%', count: 0 },
+      { range: '61-80%', count: 0 },
+      { range: '81-100%', count: 0 },
+    ];
+
+    scores.forEach((s) => {
+      if (s <= 20) bins[0].count++;
+      else if (s <= 40) bins[1].count++;
+      else if (s <= 60) bins[2].count++;
+      else if (s <= 80) bins[3].count++;
+      else bins[4].count++;
+    });
+
+    // Per-test stats
+    const perTestMap = {};
+    for (const ev of evals) {
+      const matchKey = String(ev.testId || ev.examId);
+      if (!perTestMap[matchKey]) perTestMap[matchKey] = [];
+      const pct = typeof ev.percentage === 'number'
+        ? ev.percentage
+        : ev.marksObtained != null && ev.totalMarks ? (ev.marksObtained / ev.totalMarks) * 100 : 0;
+      perTestMap[matchKey].push(pct);
+    }
+
+    const testSummaries = tests.map((t) => {
+      const id1 = String(t._id);
+      const id2 = t.id ? String(t.id) : null;
+      const id3 = t.testId ? String(t.testId) : null;
+      const tScores = perTestMap[id1] || (id2 && perTestMap[id2]) || (id3 && perTestMap[id3]) || [];
+      const tAvg = tScores.length > 0 ? parseFloat((tScores.reduce((a, b) => a + b, 0) / tScores.length).toFixed(1)) : null;
+      return {
+        id: String(t.testId || t.id || t._id),
+        _id: t._id,
+        title: t.title,
+        course: t.course,
+        branch: t.branch,
+        semester: t.semester,
+        status: computeTestStatus(t, serverNow),
+        totalSubmissions: tScores.length,
+        averageScore: tAvg,
+      };
+    });
+
+    return res.status(200).json({
+      success: true,
+      hasSufficientData: true,
+      totalTests: tests.length,
+      totalEvaluations: totalEvals,
+      metrics: {
+        mean,
+        median,
+        highest,
+        lowest,
+        passRate,
+        passThreshold: 40,
+      },
+      distribution: bins,
+      tests: testSummaries,
+    });
   } catch (err) {
     return res.status(500).json({ success: false, error: err.message });
   }

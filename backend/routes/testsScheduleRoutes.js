@@ -21,6 +21,7 @@ const {
   duplicateTest,
   getAnalytics,
   exportResultsCSV,
+  getCohortAnalytics,
 } = require('../controllers/testsScheduleController');
 
 // All tests-schedule routes strictly require authenticated teacher or admin access
@@ -33,6 +34,7 @@ router.use(testsScheduleLimiter);
 router.get('/overview', getOverview);
 router.get('/list', getTestsList);
 router.get('/calendar', getCalendarEvents);
+router.get('/cohort-analytics', getCohortAnalytics);
 
 // ── Parametric Routes ──
 router.get('/:id/details', getTestDetails);
