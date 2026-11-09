@@ -257,7 +257,28 @@ const evaluationSubmissionLimiter = rateLimit({
   },
 });
 
+/**
+ * 5. Tests and Schedule Workspace Rate Limiter
+ * Per-user rate limiter keyed by authenticated faculty/admin ID (200 requests/min).
+ */
+const testsScheduleLimiter = rateLimit({
+  windowMs: 1 * 60 * 1000,
+  max: 200,
+  keyGenerator: getAuthUserOrIpKey,
+  validate: { keyGeneratorIpFallback: false, xForwardedForHeader: false },
+  standardHeaders: true,
+  legacyHeaders: false,
+  skip: () => process.env.DISABLE_RATE_LIMITING === 'true' || process.env.NODE_ENV === 'test',
+  message: {
+    success: false,
+    status: 429,
+    error: 'Too Many Requests',
+    message: 'Too many requests on Tests and Schedule workspace. Please slow down.',
+  },
+});
+
 module.exports = {
+  testsScheduleLimiter,
   apiLimiter,
   authLimiter,
   doubtLimiter,

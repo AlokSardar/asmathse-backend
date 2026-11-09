@@ -6,6 +6,7 @@ const path = require('path');
 const jwt = require('jsonwebtoken');
 const Content = require('../models/Content');
 const ClassTest = require('../models/ClassTest');
+const { resolveTestTimestamps } = require('../utils/scheduleTime');
 const Notification = require('../models/Notification');
 const { generateAnswerKeyForQuestionPaper, streamAnswerKeyForQuestionPaper } = require('../services/geminiService');
 const { uploadBufferToCloudinary } = require('../services/cloudinaryService');
@@ -1009,7 +1010,12 @@ const saveContent = async (req, res) => {
     // Bidirectional sync: if this is a class test, also synchronize to ClassTest collection
     if (isClassTest) {
       try {
+        const scheduleTimestamps = resolveTestTimestamps(saved);
         const ctDoc = {
+          startAt: scheduleTimestamps.startAt || (saved.examDate ? new Date(saved.examDate) : new Date()),
+          endAt: scheduleTimestamps.endAt || new Date(Date.now() + (Number(saved.duration) || 45) * 60000),
+          scheduledTime: saved.scheduledTime || '',
+          scheduleEstimated: scheduleTimestamps.scheduleEstimated,
           id: saved.id,
           testId: saved.testId || saved.id,
           title: saved.title,
