@@ -17,6 +17,7 @@ const userSchema = new mongoose.Schema({
 
   // Academic classification
   stream: { type: String },
+  course: { type: String },
   targetCourse: { type: String },
   branch: { type: String },
   semester: { type: mongoose.Schema.Types.Mixed },
