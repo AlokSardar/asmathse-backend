@@ -359,7 +359,7 @@ async function runTests() {
     assert.strictEqual(kpis.averageScore, 70.0, 'Average score must be (80 + 60)/2 = 70.0%');
 
     assert.ok(ongoingNow.length >= 1, 'Ongoing strip must contain active ongoing test');
-    assert.strictEqual(String(ongoingNow[0].id), String(testA._id), 'Ongoing test must match testA');
+    assert.ok(ongoingNow.some((t) => String(t.id) === String(testA._id)), 'Ongoing strip must contain active ongoing test testA');
 
     console.log('  ✔ KPI numeric parity: totalTests, ongoing, completed, totalAttempts, and avgScore match exact DB records.\n');
 

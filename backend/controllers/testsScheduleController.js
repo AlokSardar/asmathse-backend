@@ -50,29 +50,86 @@ function sanitizeTestPayload(testObj) {
 }
 
 // Helper: Build teacher/admin role-scoped query
-function buildScopedQuery(req) {
+function buildScopedQuery(req, isArchivedOnly = false) {
   const user = req.user;
   const role = String(user?.role || '').toLowerCase();
 
-  const query = { isArchived: { $ne: true } };
+  const andClauses = isArchivedOnly
+    ? [{ isArchived: true }]
+    : [{ isArchived: { $ne: true } }];
 
   if (role === 'teacher' && user?.id !== 'master_admin_id') {
     const teacherCourse = user?.targetCourse || user?.course;
     const teacherBranch = user?.branch || user?.stream;
     if (teacherCourse) {
-      query.course = new RegExp(`^${escapeRegex(teacherCourse)}$`, 'i');
+      andClauses.push({ course: new RegExp(`^${escapeRegex(teacherCourse)}$`, 'i') });
     }
     if (teacherBranch && !teacherBranch.toLowerCase().includes('all')) {
-      query.$or = [
-        { branch: new RegExp(`^${escapeRegex(teacherBranch)}$`, 'i') },
-        { stream: new RegExp(`^${escapeRegex(teacherBranch)}$`, 'i') },
-        { isCommon: true },
-        { isCommonFirstYear: true },
-      ];
+      andClauses.push({
+        $or: [
+          { branch: new RegExp(`^${escapeRegex(teacherBranch)}$`, 'i') },
+          { stream: new RegExp(`^${escapeRegex(teacherBranch)}$`, 'i') },
+          { isCommon: true },
+          { isCommonFirstYear: true },
+        ],
+      });
     }
   }
 
-  return query;
+  return { $and: andClauses };
+}
+
+// Helper: Apply flexible cohort filtering (handles semester as "Semester 1", "Sem 1", "1", or numeric 1, and tests with isCommon / all branches)
+function applyCohortFilter(baseQuery, { course, branch, semester } = {}) {
+  const andClauses = [];
+
+  if (baseQuery && typeof baseQuery === 'object') {
+    if (Array.isArray(baseQuery.$and)) {
+      andClauses.push(...baseQuery.$and);
+    } else {
+      for (const [k, v] of Object.entries(baseQuery)) {
+        if (k !== '$and') andClauses.push({ [k]: v });
+      }
+    }
+  }
+
+  // 1. Course Filter
+  if (course && course !== 'All') {
+    andClauses.push({ course: new RegExp(`^${escapeRegex(course)}$`, 'i') });
+  }
+
+  // 2. Branch Filter: handle specific branch, 'All', or common tests
+  if (branch && branch !== 'All') {
+    const branchRegex = new RegExp(`^${escapeRegex(branch)}$`, 'i');
+    andClauses.push({
+      $or: [
+        { branch: branchRegex },
+        { stream: branchRegex },
+        { isCommon: true },
+        { isCommonFirstYear: true },
+        { branch: /^(all|common)$/i },
+        { stream: /^(all|common)$/i },
+      ],
+    });
+  }
+
+  // 3. Semester Filter: handle "Semester 1", "Sem 1", "1", or numeric 1
+  if (semester && semester !== 'All') {
+    const semStr = String(semester).trim();
+    const semNum = parseInt(semStr.replace(/[^0-9]/g, ''), 10);
+    const semesterOrConditions = [
+      { semester: new RegExp(`^${escapeRegex(semStr)}$`, 'i') },
+    ];
+    if (!isNaN(semNum)) {
+      semesterOrConditions.push({ semester: semNum });
+      semesterOrConditions.push({ semester: String(semNum) });
+      semesterOrConditions.push({ semester: new RegExp(`(^|\\b)Semester\\s*${semNum}(\\b|$)`, 'i') });
+      semesterOrConditions.push({ semester: new RegExp(`(^|\\b)Sem\\s*${semNum}(\\b|$)`, 'i') });
+    }
+    andClauses.push({ $or: semesterOrConditions });
+  }
+
+  return andClauses.length > 0 ? { $and: andClauses } : {};
 }
 
 // Helper: Count eligible students in cohort
@@ -117,18 +174,8 @@ exports.getOverview = async (req, res) => {
   try {
     assertDevOrTestDatabase();
 
-    const scopedQuery = buildScopedQuery(req);
-    const { course, branch, semester } = req.query;
-
-    if (course && course !== 'All') {
-      scopedQuery.course = new RegExp(`^${escapeRegex(course)}$`, 'i');
-    }
-    if (branch && branch !== 'All') {
-      scopedQuery.branch = new RegExp(`^${escapeRegex(branch)}$`, 'i');
-    }
-    if (semester && semester !== 'All') {
-      scopedQuery.semester = new RegExp(`^${escapeRegex(semester)}$`, 'i');
-    }
+    const baseScoped = buildScopedQuery(req);
+    const scopedQuery = applyCohortFilter(baseScoped, req.query);
 
     const tests = await ClassTest.find(scopedQuery).lean();
     const serverNow = new Date();
@@ -147,7 +194,9 @@ exports.getOverview = async (req, res) => {
       const status = computeTestStatus(t, serverNow);
       const timestamps = resolveTestTimestamps(t);
       const testId = String(t.testId || t.id || t._id);
-      testIds.push(testId);
+      if (t._id) testIds.push(String(t._id));
+      if (t.id) testIds.push(String(t.id));
+      if (t.testId) testIds.push(String(t.testId));
 
       if (status === 'completed') completedCount++;
       else if (status === 'ongoing') {
@@ -194,7 +243,14 @@ exports.getOverview = async (req, res) => {
     // Query published/autoGraded evaluations for genuine metrics
     const evalQuery = {
       $or: [{ published: true }, { autoGraded: true }],
-      testId: { $in: testIds },
+      $and: [
+        {
+          $or: [
+            { testId: { $in: testIds } },
+            { examId: { $in: testIds } },
+          ],
+        },
+      ],
     };
 
     const evals = await Evaluation.find(evalQuery)
@@ -229,15 +285,22 @@ exports.getOverview = async (req, res) => {
     }
 
     const recentResults = tests
-      .filter((t) => resultsByTest[String(t.testId || t.id || t._id)])
+      .filter((t) => {
+        const id1 = String(t._id);
+        const id2 = t.id ? String(t.id) : null;
+        const id3 = t.testId ? String(t.testId) : null;
+        return resultsByTest[id1] || (id2 && resultsByTest[id2]) || (id3 && resultsByTest[id3]);
+      })
       .slice(0, 5)
       .map((t) => {
-        const tid = String(t.testId || t.id || t._id);
-        const stats = resultsByTest[tid];
+        const id1 = String(t._id);
+        const id2 = t.id ? String(t.id) : null;
+        const id3 = t.testId ? String(t.testId) : null;
+        const stats = resultsByTest[id1] || (id2 && resultsByTest[id2]) || (id3 && resultsByTest[id3]);
         const avg = stats.scores.reduce((a, b) => a + b, 0) / stats.scores.length;
         const top = Math.max(...stats.scores);
         return {
-          id: tid,
+          id: id2 || id3 || id1,
           title: t.title,
           attempts: stats.attempts,
           averageScore: parseFloat(avg.toFixed(1)),
@@ -272,11 +335,7 @@ exports.getTestsList = async (req, res) => {
   try {
     assertDevOrTestDatabase();
 
-    const scopedQuery = buildScopedQuery(req);
     const {
-      course,
-      branch,
-      semester,
       status: requestedStatus,
       type,
       search,
@@ -288,18 +347,16 @@ exports.getTestsList = async (req, res) => {
       sortOrder = 'desc',
     } = req.query;
 
-    if (course && course !== 'All') {
-      scopedQuery.course = new RegExp(`^${escapeRegex(course)}$`, 'i');
-    }
-    if (branch && branch !== 'All') {
-      scopedQuery.branch = new RegExp(`^${escapeRegex(branch)}$`, 'i');
-    }
-    if (semester && semester !== 'All') {
-      scopedQuery.semester = new RegExp(`^${escapeRegex(semester)}$`, 'i');
-    }
+    const isArchiveRequested = requestedStatus === 'archived';
+    const baseScoped = buildScopedQuery(req, isArchiveRequested);
+    const scopedQuery = applyCohortFilter(baseScoped, req.query);
+
     if (search && search.trim()) {
       const sReg = new RegExp(escapeRegex(search.trim()), 'i');
-      scopedQuery.$or = [{ title: sReg }, { subject: sReg }, { topic: sReg }];
+      scopedQuery.$and = scopedQuery.$and || [];
+      scopedQuery.$and.push({
+        $or: [{ title: sReg }, { subject: sReg }, { topic: sReg }],
+      });
     }
 
     const allScopedTests = await ClassTest.find(scopedQuery).lean();
@@ -349,6 +406,8 @@ exports.getTestsList = async (req, res) => {
 
       enrichedTests.push({
         ...sanitizeTestPayload(t),
+        id: String(t._id),
+        _id: t._id,
         status: computedStatus,
         startAt: timestamps.startAt,
         endAt: timestamps.endAt,
@@ -378,13 +437,25 @@ exports.getTestsList = async (req, res) => {
     const paginatedTests = enrichedTests.slice((pageNum - 1) * pageSize, pageNum * pageSize);
 
     // Fetch attempts ratio and average score for paginated tests
-    const pTestIds = paginatedTests.map((t) => String(t.testId || t.id || t._id));
+    const pTestIds = [];
+    for (const pt of paginatedTests) {
+      if (pt._id) pTestIds.push(String(pt._id));
+      if (pt.id) pTestIds.push(String(pt.id));
+      if (pt.testId) pTestIds.push(String(pt.testId));
+    }
 
     const evalStats = await Evaluation.aggregate([
       {
         $match: {
-          testId: { $in: pTestIds },
           $or: [{ published: true }, { autoGraded: true }],
+          $and: [
+            {
+              $or: [
+                { testId: { $in: pTestIds } },
+                { examId: { $in: pTestIds } },
+              ],
+            },
+          ],
         },
       },
       {
@@ -453,18 +524,9 @@ exports.getCalendarEvents = async (req, res) => {
   try {
     assertDevOrTestDatabase();
 
-    const scopedQuery = buildScopedQuery(req);
-    const { course, branch, semester, start, end } = req.query;
-
-    if (course && course !== 'All') {
-      scopedQuery.course = new RegExp(`^${escapeRegex(course)}$`, 'i');
-    }
-    if (branch && branch !== 'All') {
-      scopedQuery.branch = new RegExp(`^${escapeRegex(branch)}$`, 'i');
-    }
-    if (semester && semester !== 'All') {
-      scopedQuery.semester = new RegExp(`^${escapeRegex(semester)}$`, 'i');
-    }
+    const baseScoped = buildScopedQuery(req);
+    const scopedQuery = applyCohortFilter(baseScoped, req.query);
+    const { start, end } = req.query;
 
     const tests = await ClassTest.find(scopedQuery).lean();
     const serverNow = new Date();

@@ -1,6 +1,8 @@
 const mongoose = require('mongoose');
 
 const classTestSchema = new mongoose.Schema({
+  id: { type: String, index: true },
+  testId: { type: String, index: true },
   title: { type: String, required: true },
   stream: { type: String },
   course: { type: String, index: true },
