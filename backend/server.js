@@ -272,6 +272,24 @@ mongoose.connection.once('open', () => {
     sweepStuckDoubtJobs().catch(() => {});
   }, 10 * 60 * 1000);
   if (doubtSweepTimer && doubtSweepTimer.unref) doubtSweepTimer.unref();
+
+  // Automated Tests & Schedule Legacy Migration Hook (Active when ALLOW_PROD_MIGRATION=true or AUTO_MIGRATE_SCHEDULE=true)
+  if (process.env.ALLOW_PROD_MIGRATION === 'true' || process.env.AUTO_MIGRATE_SCHEDULE === 'true') {
+    const { runLegacyScheduleMigration } = require('./scripts/migrateLegacyTestsSchedule');
+    runLegacyScheduleMigration({
+      confirm: true,
+      allowProd: process.env.ALLOW_PROD_MIGRATION === 'true',
+      isExistingConnection: true,
+    })
+      .then((res) => {
+        if (res && res.updatedCount > 0) {
+          console.log(`🚀 [SCHEDULE MIGRATION HOOK]: Successfully migrated ${res.updatedCount} legacy tests on startup.`);
+        }
+      })
+      .catch((err) => {
+        console.warn(`⚠️ [SCHEDULE MIGRATION HOOK]: Startup migration note: ${err.message}`);
+      });
+  }
 });
 
 // Startup verification for Gemini API Key
