@@ -21,12 +21,21 @@ const {
   getQuestionBankMeta,
 } = require('../controllers/questionBankController');
 
+const {
+  bulkImportQuestions,
+  checkDuplicates,
+  getImportHistory,
+} = require('../controllers/contentImportController');
+
 const { requireTeacherOrAdmin } = require('../middleware/authMiddleware');
 const { upload } = require('../middleware/uploadMiddleware');
 
 router.get('/academic-structure', getAcademicStructure);
 router.get('/question-bank/meta', requireTeacherOrAdmin, getQuestionBankMeta);
 router.get('/question-bank', requireTeacherOrAdmin, getQuestionBank);
+router.post('/bulk-import', requireTeacherOrAdmin, bulkImportQuestions);
+router.post('/check-duplicates', requireTeacherOrAdmin, checkDuplicates);
+router.get('/import-history', requireTeacherOrAdmin, getImportHistory);
 router.get('/', getAllContent);
 router.post('/', upload.single('file'), saveContent);
 router.post('/batch', batchSyncContent);

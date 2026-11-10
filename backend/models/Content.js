@@ -76,12 +76,18 @@ const contentSchema = new mongoose.Schema({
   },
   publishedResults: { type: Boolean, default: false },
 
-  // Upload metadata
+  // Upload & Ingestion metadata
   uploadedBy: { type: mongoose.Schema.Types.Mixed },
   uploadedAt: { type: Date, default: Date.now, index: true },
+  importSessionId: { type: String, index: true },
+  importSource: { type: String, enum: ['AI Import', 'Manual', 'Seed'], default: 'Manual', index: true },
+  contentHash: { type: String, index: true },
+  duplicate_of: { type: String, default: null, index: true },
 }, { 
   timestamps: true,
   strict: false 
 });
+
+contentSchema.index({ questionText: 'text', title: 'text' });
 
 module.exports = mongoose.model('Content', contentSchema);
