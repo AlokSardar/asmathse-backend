@@ -34,7 +34,10 @@ const getStudentContent = async (req, res) => {
     const isJee = !isSchool && (rawCourse.includes('jee') || rawCourse.includes('iit'));
     const isBsc = !isSchool && !isJee && (rawCourse.includes('bsc') || rawCourse.includes('b.sc') || rawCourse.includes('science'));
 
-    const query = {};
+    const query = {
+      isDeleted: { $ne: true },
+      visibility: { $nin: ['draft', 'Draft', 'archived', 'Archived'] },
+    };
 
     // 1. Content Type Filter (e.g. syllabus, materials, pyq, assignments)
     const targetType = q.type;

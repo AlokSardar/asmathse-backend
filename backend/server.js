@@ -130,6 +130,9 @@ const aiRoutes = require('./routes/aiRoutes');
 const doubtRoutes = require('./routes/doubtRoutes');
 const accountRoutes = require('./routes/accountRoutes');
 const testsScheduleRoutes = require('./routes/testsScheduleRoutes');
+const materialRoutes = require('./routes/materialRoutes');
+const assignmentRoutes = require('./routes/assignmentRoutes');
+const syllabusRoutes = require('./routes/syllabusRoutes');
 
 // Mount routers with sensitive route protection
 app.use('/api/upload', uploadRoutes);
@@ -138,6 +141,9 @@ app.use('/api/doubts', doubtRoutes);
 app.use('/api/auth', authLimiter, authRoutes);
 app.use('/api/approvals', approvalRoutes);
 app.use('/api/content', contentRoutes);
+app.use('/api/materials', materialRoutes);
+app.use('/api/assignments', assignmentRoutes);
+app.use('/api/syllabus', syllabusRoutes);
 app.use('/api/evaluations', evaluationRoutes);
 app.use('/api/analytics', activityRoutes);
 app.use('/api/notifications', notificationRoutes);
@@ -248,6 +254,12 @@ const ExtractionCache = require('./models/ExtractionCache');
 
 mongoose.connection.on('connected', () => {
   bootstrapAdminIfEmpty();
+  const { seedInitialMaterials } = require('./controllers/materialController');
+  seedInitialMaterials().catch((err) => console.warn('[SEED_MATERIALS] Warning:', err.message));
+  const { seedInitialAssignments } = require('./controllers/assignmentController');
+  seedInitialAssignments().catch((err) => console.warn('[SEED_ASSIGNMENTS] Warning:', err.message));
+  const { seedInitialSyllabi } = require('./controllers/syllabusController');
+  seedInitialSyllabi().catch((err) => console.warn('[SEED_SYLLABI] Warning:', err.message));
   // Clear legacy extraction cache once
   ExtractionCache.deleteMany({ promptVersion: { $ne: 'v2-ocr-pure-transcription' } })
     .then((res) => {
@@ -261,6 +273,12 @@ const { sweepStuckDoubtJobs } = require('./controllers/doubtController');
 
 mongoose.connection.once('open', () => {
   bootstrapAdminIfEmpty();
+  const { seedInitialMaterials } = require('./controllers/materialController');
+  seedInitialMaterials().catch((err) => console.warn('[SEED_MATERIALS] Warning:', err.message));
+  const { seedInitialAssignments } = require('./controllers/assignmentController');
+  seedInitialAssignments().catch((err) => console.warn('[SEED_ASSIGNMENTS] Warning:', err.message));
+  const { seedInitialSyllabi } = require('./controllers/syllabusController');
+  seedInitialSyllabi().catch((err) => console.warn('[SEED_SYLLABI] Warning:', err.message));
   sweepStuckDoubtJobs()
     .then((count) => {
       if (count > 0) console.log(`🧹 [DOUBT SWEEPER]: Swept ${count} stuck doubt jobs from previous server run.`);

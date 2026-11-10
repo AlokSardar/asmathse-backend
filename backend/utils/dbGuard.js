@@ -74,7 +74,13 @@ function isDevOrTestDatabase(explicitDbName) {
   }
 }
 
+function dbGuard(opName, options = {}) {
+  // If opName was provided as a string description of the operation, check active connection
+  return assertDevOrTestDatabase(null, options);
+}
+
 module.exports = {
   assertDevOrTestDatabase,
   isDevOrTestDatabase,
+  dbGuard,
 };

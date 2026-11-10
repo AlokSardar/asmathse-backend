@@ -83,11 +83,39 @@ const contentSchema = new mongoose.Schema({
   importSource: { type: String, enum: ['AI Import', 'Manual', 'Seed'], default: 'Manual', index: true },
   contentHash: { type: String, index: true },
   duplicate_of: { type: String, default: null, index: true },
+
+  // Study Materials Workspace Fields
+  materialType: {
+    type: String,
+    enum: ['lecture_notes', 'formula_sheet', 'video_lecture', 'pyq_booklet', 'assignment', 'syllabus', 'other'],
+    default: 'lecture_notes',
+    index: true,
+  },
+  visibility: {
+    type: String,
+    enum: ['draft', 'published', 'archived'],
+    default: 'draft',
+    index: true,
+  },
+  isDeleted: { type: Boolean, default: false, index: true },
+  downloadCount: { type: Number, default: 0 },
+  pageCount: { type: Number },
+  duration: { type: String },
+  topicTags: [{ type: String }],
+  publishedAt: { type: Date },
 }, { 
   timestamps: true,
   strict: false 
 });
 
 contentSchema.index({ questionText: 'text', title: 'text' });
+contentSchema.index({
+  course: 1,
+  branch: 1,
+  semester: 1,
+  materialType: 1,
+  visibility: 1,
+  isDeleted: 1,
+});
 
 module.exports = mongoose.model('Content', contentSchema);

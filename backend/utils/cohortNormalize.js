@@ -129,6 +129,32 @@ function calculateTextSimilarity(textA = '', textB = '') {
   return union === 0 ? 0 : intersection / union;
 }
 
+function normalizeCohortItem(item = {}) {
+  const rawCourse = String(item.course || '').trim();
+  let course = rawCourse;
+  if (/^engineering$/i.test(rawCourse) || /^btech$/i.test(rawCourse)) course = 'Engineering';
+  else if (/^cbse$/i.test(rawCourse)) course = 'CBSE';
+  else if (/^icse$/i.test(rawCourse)) course = 'ICSE';
+  else if (/^bsc$/i.test(rawCourse) || /^b\.sc$/i.test(rawCourse)) course = 'B.Sc';
+  else if (/^wbjee$/i.test(rawCourse)) course = 'WBJEE';
+  else if (/^jee/i.test(rawCourse)) course = 'JEE Advanced';
+
+  const branch = item.branch ? String(item.branch).toUpperCase().trim() : '';
+  const semester = normalizeSemester(item.semester, course);
+  const classLevel = item.classLevel ? String(item.classLevel).trim() : null;
+  const isCommon = computeIsCommon({ course, semester, subject: item.subject, explicitIsCommon: item.isCommon });
+
+  return {
+    ...item,
+    course,
+    branch,
+    semester,
+    classLevel,
+    subject: item.subject ? String(item.subject).trim() : '',
+    isCommon,
+  };
+}
+
 module.exports = {
   CANONICAL_QTYPES,
   normalizeSemester,
@@ -138,4 +164,5 @@ module.exports = {
   normalizeMathText,
   computeContentHash,
   calculateTextSimilarity,
+  normalizeCohortItem,
 };
