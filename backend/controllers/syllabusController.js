@@ -1030,7 +1030,8 @@ exports.restoreSyllabus = async (req, res) => {
 };
 
 /**
- * 8. POST /api/syllabus/extract-pdf — Lightweight PDF text extraction (Amendment 3)
+ * 8. POST /api/syllabus/extract-pdf & POST /api/syllabus/import-pdf
+ * Structured Gemini AI Syllabus Extractor with Graceful Fallback (Amendments 4 & 5)
  */
 exports.extractPdfText = async (req, res) => {
   try {
@@ -1045,10 +1046,125 @@ exports.extractPdfText = async (req, res) => {
     const rawText = (result && result.text) || '';
     const cleanText = rawText.replace(/\r\n/g, '\n').replace(/\n{3,}/g, '\n\n').trim();
 
+    if (!cleanText) {
+      return res.status(200).json({
+        success: true,
+        fallback: true,
+        description: '',
+        message: 'No readable text could be extracted from this PDF.',
+      });
+    }
+
+    // Attempt Gemini AI Structured Extraction (15s timeout)
+    const apiKey = (process.env.GEMINI_API_KEY || '').trim();
+    if (apiKey) {
+      const candidateModels = ['gemini-2.0-flash', 'gemini-1.5-flash'];
+      let extractedData = null;
+
+      const prompt = `Extract the syllabus structure from this text.
+Return ONLY valid JSON in this exact format:
+{
+  "subjectName": "...",
+  "subjectCode": "...",
+  "credits": 4,
+  "totalHours": 40,
+  "modules": [
+    {
+      "moduleNumber": 1,
+      "title": "...",
+      "hours": 10,
+      "topics": ["topic 1", "topic 2", "topic 3"]
+    }
+  ],
+  "textbooks": [
+    { "title": "...", "author": "...", "edition": "..." }
+  ]
+}
+
+Return ONLY the raw JSON object.
+No markdown code blocks, no backticks, no explanation text.
+If you cannot extract structured data, return exactly:
+{"error": "extraction_failed"}
+
+Course syllabus text:
+${cleanText.slice(0, 10000)}`;
+
+      for (const model of candidateModels) {
+        try {
+          const controller = new AbortController();
+          const timeoutId = setTimeout(() => controller.abort(), 15000); // 15s timeout
+
+          const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
+          const apiRes = await fetch(url, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              contents: [{ parts: [{ text: prompt }] }],
+              generationConfig: {
+                temperature: 0.1,
+                responseMimeType: 'application/json',
+              },
+            }),
+            signal: controller.signal,
+          });
+          clearTimeout(timeoutId);
+
+          if (apiRes.ok) {
+            const jsonResp = await apiRes.json();
+            const textContent = jsonResp?.candidates?.[0]?.content?.parts?.[0]?.text || '';
+            const clean = textContent.replace(/\`\`\`json|\`\`\`/g, '').trim();
+            const parsed = JSON.parse(clean);
+
+            if (parsed && !parsed.error && Array.isArray(parsed.modules) && parsed.modules.length > 0) {
+              extractedData = {
+                subjectName: parsed.subjectName || '',
+                subjectCode: parsed.subjectCode || '',
+                credits: Number(parsed.credits) || 4,
+                totalHours: Number(parsed.totalHours) || 40,
+                modules: parsed.modules.map((m, idx) => ({
+                  moduleNumber: Number(m.moduleNumber) || idx + 1,
+                  title: String(m.title || `Module ${idx + 1}`),
+                  hours: Number(m.hours) || 8,
+                  topics: Array.isArray(m.topics) ? m.topics.map(t => String(t).trim()).filter(Boolean) : [],
+                })),
+                textbooks: Array.isArray(parsed.textbooks)
+                  ? parsed.textbooks.map(tb => ({
+                      title: String(tb.title || '').trim(),
+                      author: String(tb.author || '').trim(),
+                      edition: String(tb.edition || 'Latest Edition').trim(),
+                      type: 'prescribed',
+                    })).filter(tb => tb.title)
+                  : [],
+              };
+              console.log(`✅ [Gemini Syllabus Extract]: Successfully extracted via ${model}`);
+              break;
+            }
+          }
+        } catch (mErr) {
+          console.warn(`[Gemini Syllabus Extract] Model ${model} failed or timed out: ${mErr.message}`);
+        }
+      }
+
+      if (extractedData) {
+        const totalTopics = extractedData.modules.reduce((sum, m) => sum + m.topics.length, 0);
+        return res.status(200).json({
+          success: true,
+          structured: true,
+          fallback: false,
+          data: extractedData,
+          description: cleanText.slice(0, 3000),
+          message: `✓ AI extracted ${extractedData.modules.length} modules and ${totalTopics} topics. Please review.`,
+        });
+      }
+    }
+
+    // Graceful fallback to plain text description
     return res.status(200).json({
       success: true,
-      message: 'PDF text extracted successfully.',
-      text: cleanText.slice(0, 3000), // Pre-fill description up to 3000 chars
+      structured: false,
+      fallback: true,
+      description: cleanText.slice(0, 3000),
+      message: '⚠️ AI could not structure this PDF. Description pre-filled. Add modules manually.',
     });
   } catch (error) {
     console.error('extractPdfText error:', error);

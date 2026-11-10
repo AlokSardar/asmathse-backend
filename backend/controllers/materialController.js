@@ -51,8 +51,9 @@ exports.getMaterials = async (req, res) => {
       isDeleted: { $ne: true },
     };
 
-    // Role-based visibility enforcement (Amendment 1 & 5)
-    if (isStudent) {
+    const isEducator = user && (user.role === 'admin' || user.role === 'teacher');
+    // Role-based visibility enforcement (Amendment 1)
+    if (!isEducator) {
       query.visibility = 'published';
     } else if (visibility && visibility !== 'all') {
       query.visibility = visibility;

@@ -13,15 +13,7 @@ const {
   getAssignmentSubmissions,
   gradeSubmission,
 } = require('../controllers/assignmentController');
-const { protect, requireTeacherOrAdmin } = require('../middleware/authMiddleware');
-
-// Soft auth helper for GET /: allows authenticated (teacher/student) and unauthenticated
-const optionalAuth = async (req, res, next) => {
-  if (req.headers.authorization && req.headers.authorization.startsWith('Bearer')) {
-    return protect(req, res, next);
-  }
-  next();
-};
+const { protect, optionalAuth, requireTeacherOrAdmin } = require('../middleware/authMiddleware');
 
 // Multer memoryStorage configuration with 20MB limit and strict file type validation (Amendment 2)
 const assignmentUpload = multer({

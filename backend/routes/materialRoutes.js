@@ -8,16 +8,8 @@ const {
   deleteMaterial,
   downloadMaterial,
 } = require('../controllers/materialController');
-const { protect, requireTeacherOrAdmin } = require('../middleware/authMiddleware');
+const { protect, optionalAuth, requireTeacherOrAdmin } = require('../middleware/authMiddleware');
 const { upload } = require('../middleware/uploadMiddleware');
-
-// Soft auth helper for GET /: allows both authenticated (teacher/student) and unauthenticated
-const optionalAuth = async (req, res, next) => {
-  if (req.headers.authorization && req.headers.authorization.startsWith('Bearer')) {
-    return protect(req, res, next);
-  }
-  next();
-};
 
 // 1. Query materials (server-side filtering, role-aware)
 router.get('/', optionalAuth, getMaterials);

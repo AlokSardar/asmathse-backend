@@ -12,15 +12,7 @@ const {
   restoreSyllabus,
   extractPdfText,
 } = require('../controllers/syllabusController');
-const { protect, requireTeacherOrAdmin } = require('../middleware/authMiddleware');
-
-// Soft auth helper for GET /: allows authenticated (teacher/student) and unauthenticated
-const optionalAuth = async (req, res, next) => {
-  if (req.headers.authorization && req.headers.authorization.startsWith('Bearer')) {
-    return protect(req, res, next);
-  }
-  next();
-};
+const { protect, optionalAuth, requireTeacherOrAdmin } = require('../middleware/authMiddleware');
 
 // Multer memoryStorage configuration with 20MB limit for PDF syllabus attachments
 const syllabusUpload = multer({
@@ -63,6 +55,7 @@ router.get('/', optionalAuth, getSyllabi);
 
 // 2. Extract description text from uploaded PDF (Amendment 3)
 router.post('/extract-pdf', requireTeacherOrAdmin, handlePdfUpload, extractPdfText);
+router.post('/import-pdf', requireTeacherOrAdmin, handlePdfUpload, extractPdfText);
 
 // 3. Get single syllabus detail
 router.get('/:id', optionalAuth, getSyllabusById);

@@ -130,7 +130,61 @@ const verifyRoleSegregation = (req, res, next) => {
   next();
 };
 
+
+/**
+ * Soft Authentication Guard (optionalAuth):
+ * - If Authorization header with Bearer token is present:
+ *   Attempts token verification. If valid, attaches req.user.
+ *   If token is missing, expired (TokenExpiredError), malformed (JsonWebTokenError),
+ *   or invalid signature, softly sets req.user = null and continues without error.
+ * - If no Authorization header: sets req.user = null and continues.
+ */
+const optionalAuth = async (req, res, next) => {
+  req.user = null;
+  const authHeader = req.headers.authorization;
+  if (!authHeader || !authHeader.startsWith('Bearer ')) {
+    return next();
+  }
+
+  const rawToken = authHeader.split(' ')[1];
+  if (!rawToken || !rawToken.trim()) {
+    return next();
+  }
+
+  try {
+    const decoded = verifyToken(rawToken.trim());
+    if (decoded && decoded.id) {
+      if (decoded.id === 'master_admin_id') {
+        req.user = {
+          _id: 'master_admin_id',
+          id: 'master_admin_id',
+          role: 'admin',
+          name: 'Dr. A. Sardar',
+          email: 'admin@asmaths.com',
+          tokenVersion: 0,
+          mustChangePassword: false,
+        };
+      } else {
+        const user = await User.findById(decoded.id).select('-password');
+        if (user) {
+          const tokenV = decoded.tokenVersion ?? 0;
+          const currentV = user.tokenVersion ?? 0;
+          if (tokenV >= currentV) {
+            req.user = user;
+          }
+        }
+      }
+    }
+  } catch (_) {
+    // Soft fail silently on TokenExpiredError, JsonWebTokenError, invalid signature, etc.
+    req.user = null;
+  }
+
+  next();
+};
+
 module.exports = {
+  optionalAuth,
   protect,
   authorize,
   requireAdmin,

@@ -149,7 +149,41 @@ async function runTests() {
       }),
     });
     assert.strictEqual(crossCohortRes.status, 403, 'Teacher cross-cohort create must be 403 Forbidden');
-    console.log('✅ Teacher cross-cohort POST /api/syllabus -> 403 Forbidden\n');
+    console.log('✅ Teacher cross-cohort POST /api/syllabus -> 403 Forbidden');
+
+    // 4. optionalAuth Soft-Fail Verification (Amendment 1 & 7)
+    // 4a. GET with invalid token -> 200 OK (soft auth failure treated as guest view, not 401)
+    const invalidTokenGetRes = await fetch(`${BASE_URL}/api/syllabus`, {
+      headers: { Authorization: 'Bearer invalid_malformed_expired_jwt_token_123' },
+    });
+    assert.strictEqual(invalidTokenGetRes.status, 200, 'optionalAuth GET with invalid token must return 200 OK');
+    const invalidTokenJson = await invalidTokenGetRes.json();
+    assert.strictEqual(invalidTokenJson.success, true);
+    assert.ok(invalidTokenJson.data.length > 0, 'Must return published syllabus items');
+    assert.ok(invalidTokenJson.data.every(s => s.visibility === 'published'), 'Must strictly return published content only');
+    console.log('✅ optionalAuth GET with invalid token -> 200 OK (published content only, not 401)');
+
+    // 4b. GET with no token -> 200 OK (published content only)
+    const noTokenGetRes = await fetch(`${BASE_URL}/api/syllabus`);
+    assert.strictEqual(noTokenGetRes.status, 200, 'optionalAuth GET with no token must return 200 OK');
+    const noTokenJson = await noTokenGetRes.json();
+    assert.strictEqual(noTokenJson.success, true);
+    assert.ok(noTokenJson.data.every(s => s.visibility === 'published'), 'Must strictly return published content only');
+    console.log('✅ optionalAuth GET with no token -> 200 OK (published content only)');
+
+    // 4c. POST with invalid token -> 401 Unauthorized
+    const invalidTokenPostRes = await fetch(`${BASE_URL}/api/syllabus`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: 'Bearer invalid_malformed_expired_jwt_token_123',
+      },
+      body: JSON.stringify({ subjectName: 'Hacker Course', subjectCode: 'HACK-101' }),
+    });
+    assert.strictEqual(invalidTokenPostRes.status, 401, 'POST /api/syllabus with invalid token must return 401');
+    console.log('✅ POST with invalid token -> 401 Unauthorized');
+
+
 
     // ──────────────────────────────────────────────────────────────────────────
     // [TEST 3]: Assessment Weightage 100% Validation (Amendment 6)

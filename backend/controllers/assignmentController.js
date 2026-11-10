@@ -183,8 +183,9 @@ exports.getAssignments = async (req, res) => {
       isDeleted: { $ne: true },
     };
 
-    // Role-based visibility enforcement
-    if (isStudent) {
+    const isEducator = user && (user.role === 'admin' || user.role === 'teacher');
+    // Role-based visibility enforcement (Amendment 1)
+    if (!isEducator) {
       baseQuery.status = { $in: ['active', 'completed'] };
     }
 
