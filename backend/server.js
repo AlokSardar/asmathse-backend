@@ -82,6 +82,10 @@ const uploadsDir = path.join(__dirname, 'uploads');
 if (!fs.existsSync(uploadsDir)) {
   fs.mkdirSync(uploadsDir, { recursive: true });
 }
+const pyqUploadsDir = path.join(uploadsDir, 'pyq');
+if (!fs.existsSync(pyqUploadsDir)) {
+  fs.mkdirSync(pyqUploadsDir, { recursive: true });
+}
 const privateUploadsDir = path.join(uploadsDir, 'private_scripts');
 if (!fs.existsSync(privateUploadsDir)) {
   fs.mkdirSync(privateUploadsDir, { recursive: true });
@@ -133,6 +137,7 @@ const testsScheduleRoutes = require('./routes/testsScheduleRoutes');
 const materialRoutes = require('./routes/materialRoutes');
 const assignmentRoutes = require('./routes/assignmentRoutes');
 const syllabusRoutes = require('./routes/syllabusRoutes');
+const pyqRoutes = require('./routes/pyqRoutes');
 
 // Mount routers with sensitive route protection
 app.use('/api/upload', uploadRoutes);
@@ -144,6 +149,7 @@ app.use('/api/content', contentRoutes);
 app.use('/api/materials', materialRoutes);
 app.use('/api/assignments', assignmentRoutes);
 app.use('/api/syllabus', syllabusRoutes);
+app.use('/api/pyq', pyqRoutes);
 app.use('/api/evaluations', evaluationRoutes);
 app.use('/api/analytics', activityRoutes);
 app.use('/api/notifications', notificationRoutes);
