@@ -17,11 +17,15 @@ const {
   generateQuestionSolution,
   updateQuestionContent,
   generateQuestionRubric,
+  verifyQuestion,
+  bulkGenerateSolutions,
+  bulkUpdateContent,
 } = require('../controllers/contentController');
 
 const {
   getQuestionBank,
   getQuestionBankMeta,
+  patchQuestionBankMeta,
 } = require('../controllers/questionBankController');
 
 const {
@@ -35,8 +39,11 @@ const { upload } = require('../middleware/uploadMiddleware');
 
 router.get('/academic-structure', getAcademicStructure);
 router.get('/question-bank/meta', requireTeacherOrAdmin, getQuestionBankMeta);
+router.patch('/question-bank/meta', requireTeacherOrAdmin, patchQuestionBankMeta);
 router.get('/question-bank', requireTeacherOrAdmin, getQuestionBank);
 router.post('/bulk-import', requireTeacherOrAdmin, bulkImportQuestions);
+router.post('/bulk-generate-solutions', requireTeacherOrAdmin, bulkGenerateSolutions);
+router.post('/bulk-update', requireTeacherOrAdmin, bulkUpdateContent);
 router.post('/check-duplicates', requireTeacherOrAdmin, checkDuplicates);
 router.get('/import-history', requireTeacherOrAdmin, getImportHistory);
 router.get('/', getAllContent);
@@ -50,6 +57,8 @@ router.put('/:id/answer-key', updateAnswerKey);
 router.post('/:id/generate-answer-key', generateAnswerKey);
 router.post('/:id/generate-answer-key-stream', generateAnswerKeyStream);
 router.post('/:id/generate-solution', requireTeacherOrAdmin, generateQuestionSolution);
+router.post('/:id/generate-rubric', requireTeacherOrAdmin, generateQuestionRubric);
+router.patch('/:id/verify', requireTeacherOrAdmin, verifyQuestion);
 router.patch('/:id', requireTeacherOrAdmin, updateQuestionContent);
 router.post('/:id/rubric', requireTeacherOrAdmin, generateQuestionRubric);
 router.get('/:id', getContentById);

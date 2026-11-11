@@ -274,6 +274,8 @@ mongoose.connection.on('connected', () => {
   seedInitialAssignments().catch((err) => console.warn('[SEED_ASSIGNMENTS] Warning:', err.message));
   const { seedInitialSyllabi } = require('./controllers/syllabusController');
   seedInitialSyllabi().catch((err) => console.warn('[SEED_SYLLABI] Warning:', err.message));
+  const { migrateQBLocalStorage } = require('./scripts/migrateQBLocalStorage');
+  migrateQBLocalStorage().catch((err) => console.warn('[MIGRATE_QB] Warning:', err.message));
   // Clear legacy extraction cache once
   ExtractionCache.deleteMany({ promptVersion: { $ne: 'v2-ocr-pure-transcription' } })
     .then((res) => {
@@ -293,6 +295,8 @@ mongoose.connection.once('open', () => {
   seedInitialAssignments().catch((err) => console.warn('[SEED_ASSIGNMENTS] Warning:', err.message));
   const { seedInitialSyllabi } = require('./controllers/syllabusController');
   seedInitialSyllabi().catch((err) => console.warn('[SEED_SYLLABI] Warning:', err.message));
+  const { migrateQBLocalStorage } = require('./scripts/migrateQBLocalStorage');
+  migrateQBLocalStorage().catch((err) => console.warn('[MIGRATE_QB] Warning:', err.message));
   sweepStuckDoubtJobs()
     .then((count) => {
       if (count > 0) console.log(`🧹 [DOUBT SWEEPER]: Swept ${count} stuck doubt jobs from previous server run.`);

@@ -115,6 +115,9 @@ const contentSchema = new mongoose.Schema({
   duration: { type: String },
   topicTags: [{ type: String }],
   publishedAt: { type: Date },
+  isVerified: { type: Boolean, default: false, index: true },
+  verifiedBy: { type: String, default: null },
+  verifiedAt: { type: Date, default: null },
 }, { 
   timestamps: true,
   strict: false 

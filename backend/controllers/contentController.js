@@ -551,6 +551,13 @@ const getContentById = async (req, res) => {
         });
       }
     }
+    // Student safety: strip solutions if hidden (Amendment 4)
+    if (!isAdmin && doc.solutionHidden === true) {
+      delete doc.steps;
+      delete doc.finalAnswer;
+      delete doc.graphicSvg;
+      delete doc.explanation;
+    }
     res.json(doc);
   } catch (error) {
     res.status(500).json({ message: error.message });
@@ -2065,7 +2072,157 @@ const generateQuestionRubric = async (req, res) => {
   }
 };
 
+
+/**
+ * Verify a Question in Question Bank (Teacher/Admin action)
+ */
+const verifyQuestion = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const query = buildIdQuery(id);
+    const content = await Content.findOne(query);
+    if (!content) {
+      return res.status(404).json({ success: false, message: 'Question content not found' });
+    }
+
+    content.isVerified = true;
+    content.verifiedBy = req.user?.name || req.user?.email || 'Teacher';
+    content.verifiedAt = new Date();
+    await content.save();
+
+    return res.status(200).json({
+      success: true,
+      message: 'Question verified successfully',
+      isVerified: true,
+      verifiedBy: content.verifiedBy,
+      verifiedAt: content.verifiedAt,
+      data: content,
+    });
+  } catch (error) {
+    console.error('Error in verifyQuestion:', error);
+    return res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+/**
+ * Bulk Generate Solutions sequentially with rate-limit protection (Amendment 5)
+ */
+const bulkGenerateSolutions = async (req, res) => {
+  try {
+    const { questionIds, language = 'english', style = 'step-by-step' } = req.body || {};
+
+    if (!Array.isArray(questionIds) || questionIds.length === 0) {
+      return res.status(400).json({ success: false, message: 'questionIds array is required' });
+    }
+
+    // Amendment 5: Max batch size: 20 questions per request
+    if (questionIds.length > 20) {
+      return res.status(400).json({
+        success: false,
+        message: 'Max 20 questions can be processed at once. Please select up to 20 questions.',
+      });
+    }
+
+    const results = [];
+    for (let i = 0; i < questionIds.length; i++) {
+      const qId = questionIds[i];
+      try {
+        const query = buildIdQuery(qId);
+        const content = await Content.findOne(query);
+        if (content) {
+          const sol = await generateSolution({
+            questionText: content.questionText || content.title,
+            marks: content.marks || 5,
+            unit: content.topic || 'General',
+            course: content.course,
+            subject: content.subject,
+            language,
+            style,
+          });
+
+          content.steps = sol.steps;
+          content.finalAnswer = sol.finalAnswer;
+          content.graphicSvg = sol.graphicSvg || '';
+          content.solutionLanguage = sol.language;
+          if (sol.steps && sol.steps.length > 0) {
+            content.explanation = sol.steps.join('\n\n');
+          }
+          await content.save();
+
+          results.push({ id: qId, success: true, finalAnswer: sol.finalAnswer });
+        } else {
+          results.push({ id: qId, success: false, error: 'Not found' });
+        }
+      } catch (err) {
+        console.error(`Error generating solution for question ${qId}:`, err);
+        results.push({ id: qId, success: false, error: err.message });
+      }
+
+      // Sequential delay of >= 1 second between Gemini calls to avoid rate limits (Amendment 5)
+      if (i < questionIds.length - 1) {
+        await new Promise((r) => setTimeout(r, 1000));
+      }
+    }
+
+    return res.status(200).json({
+      success: true,
+      message: `Processed ${results.filter((r) => r.success).length} of ${questionIds.length} solutions successfully.`,
+      processed: results.length,
+      results,
+    });
+  } catch (error) {
+    console.error('Error in bulkGenerateSolutions:', error);
+    return res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+/**
+ * Bulk Update Question Bank items (Move cohort, update topic, difficulty, marks)
+ */
+const bulkUpdateContent = async (req, res) => {
+  try {
+    const rawIds = req.body?.questionIds || req.body?.ids;
+    const { updates = {} } = req.body || {};
+    if (!Array.isArray(rawIds) || rawIds.length === 0) {
+      return res.status(400).json({ success: false, message: 'questionIds or ids array is required' });
+    }
+    const questionIds = rawIds;
+
+    const allowedUpdates = {};
+    if (updates.course !== undefined) allowedUpdates.course = updates.course;
+    if (updates.branch !== undefined) {
+      allowedUpdates.branch = updates.branch;
+      allowedUpdates.stream = updates.branch;
+    }
+    if (updates.semester !== undefined) allowedUpdates.semester = updates.semester;
+    if (updates.classLevel !== undefined) allowedUpdates.classLevel = updates.classLevel;
+    if (updates.subject !== undefined) allowedUpdates.subject = updates.subject;
+    if (updates.topic !== undefined) allowedUpdates.topic = updates.topic;
+    if (updates.difficulty !== undefined) allowedUpdates.difficulty = updates.difficulty;
+    if (updates.marks !== undefined) allowedUpdates.marks = Number(updates.marks);
+    if (updates.solutionHidden !== undefined) allowedUpdates.solutionHidden = Boolean(updates.solutionHidden);
+
+    const orQueries = questionIds.map((id) => buildIdQuery(id));
+    const result = await Content.updateMany(
+      { $or: orQueries },
+      { $set: allowedUpdates }
+    );
+
+    return res.status(200).json({
+      success: true,
+      message: `Successfully updated ${result.modifiedCount} questions.`,
+      updatedCount: result.modifiedCount,
+    });
+  } catch (error) {
+    console.error('Error in bulkUpdateContent:', error);
+    return res.status(500).json({ success: false, message: error.message });
+  }
+};
+
 module.exports = {
+  verifyQuestion,
+  bulkGenerateSolutions,
+  bulkUpdateContent,
   generateQuestionSolution,
   updateQuestionContent,
   generateQuestionRubric,
