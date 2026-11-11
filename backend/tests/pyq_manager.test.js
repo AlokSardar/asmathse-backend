@@ -13,6 +13,7 @@ require('dotenv').config({ path: path.join(__dirname, '..', '.env') });
 const mongoose = require('mongoose');
 
 const PYQPaper = require('../models/PYQPaper');
+const Content = require('../models/Content');
 const User = require('../models/User');
 const { assertDevOrTestDatabase } = require('../utils/dbGuard');
 const app = require('../server');
@@ -486,12 +487,73 @@ async function runPYQTestSuite() {
     assert.strictEqual(docAfterRestore.isDeleted, false);
     console.log('✅ Restore verified (isDeleted: false, restored to active collection)');
 
+    // -------------------------------------------------------------
+    // [TEST 9]: Send PYQ Questions to Question Bank & Solution Hidden
+    // -------------------------------------------------------------
+    console.log('\n[TEST 9]: Send PYQ Questions to Question Bank & Default Hidden Solutions');
+
+    const sendToQbRes = await httpRequest({
+      path: `/api/pyq/${createdPaperId}/send-to-qb`,
+      method: 'POST',
+      headers: { Authorization: `Bearer ${teacherToken}` },
+    });
+    assert.strictEqual(sendToQbRes.statusCode, 200, 'send-to-qb must return 200');
+    assert.strictEqual(sendToQbRes.body.success, true);
+    assert.strictEqual(sendToQbRes.body.imported, 3, 'Must import 3 questions');
+    assert.strictEqual(sendToQbRes.body.skipped, 0, 'No duplicates on initial import');
+
+    const importedQuestions = await Content.find({ importSessionId: String(createdPaperId) });
+    assert.strictEqual(importedQuestions.length, 3);
+    for (const q of importedQuestions) {
+      assert.strictEqual(q.source, 'PYQ', 'Source must be PYQ');
+      assert.strictEqual(q.solutionHidden, true, 'solutionHidden must default to true for PYQ imports');
+      assert.strictEqual(q.pyqYear, 2023);
+      assert.strictEqual(q.pyqExam, 'MAKAUT');
+      assert.ok(q.contentHash, 'contentHash must be present for duplicate tracking');
+    }
+    console.log('✅ Imported 3 questions to Question Bank with solutionHidden: true and source: PYQ');
+
+    // -------------------------------------------------------------
+    // [TEST 10]: Question Bank Duplicate Skipping Verification
+    // -------------------------------------------------------------
+    console.log('\n[TEST 10]: Question Bank Duplicate Detection & Skipping');
+
+    const duplicateSendRes = await httpRequest({
+      path: `/api/pyq/${createdPaperId}/send-to-qb`,
+      method: 'POST',
+      headers: { Authorization: `Bearer ${teacherToken}` },
+    });
+    assert.strictEqual(duplicateSendRes.statusCode, 200);
+    assert.strictEqual(duplicateSendRes.body.imported, 0, 'Must import 0 questions on duplicate send');
+    assert.strictEqual(duplicateSendRes.body.skipped, 3, 'Must skip 3 duplicate questions');
+    console.log('✅ Duplicate detection verified: 0 imported, 3 skipped via contentHash');
+
+    // -------------------------------------------------------------
+    // [TEST 11]: Teacher Toggle Solution Visibility (PATCH /api/content/:id)
+    // -------------------------------------------------------------
+    console.log('\n[TEST 11]: Teacher Toggle Solution Visibility in Question Bank');
+
+    const sampleQ = importedQuestions[0];
+    const patchRes = await httpRequest({
+      path: `/api/content/${sampleQ.id || sampleQ._id}`,
+      method: 'PATCH',
+      headers: { Authorization: `Bearer ${teacherToken}` },
+      body: { solutionHidden: false },
+    });
+    assert.strictEqual(patchRes.statusCode, 200);
+    assert.strictEqual(patchRes.body.data.solutionHidden, false);
+
+    const docAfterPatch = await Content.findById(sampleQ._id);
+    assert.strictEqual(docAfterPatch.solutionHidden, false);
+    console.log('✅ Teacher successfully updated solutionHidden: false');
+
     console.log('\n================================================================================');
-    console.log('🎉 ALL PYQ MANAGER BACKEND TESTS PASSED PERFECTLY!');
+    console.log('🎉 ALL PYQ MANAGER & QUESTION BANK INTEGRATION TESTS PASSED PERFECTLY!');
     console.log('================================================================================');
   } finally {
     server.close();
     await mongoose.disconnect();
+    process.exit(0);
   }
 }
 

@@ -76,6 +76,12 @@ const pyqQuestionSchema = new mongoose.Schema(
       type: String,
       default: '',
     },
+    rubric: {
+      maxMarks: { type: Number },
+      markingScheme: { type: [String], default: [] },
+      keyPoints: { type: [String], default: [] },
+      commonErrors: { type: [String], default: [] },
+    },
   },
   { _id: true }
 );

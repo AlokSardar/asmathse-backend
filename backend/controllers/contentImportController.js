@@ -91,6 +91,13 @@ exports.bulkImportQuestions = async (req, res) => {
         const customId = `QB-AI-${Date.now()}-${i}-${Math.random().toString(36).substring(2, 6)}`;
         const hash = computeContentHash(qText);
 
+        // Duplicate detection: check if question with identical contentHash already exists
+        const existingQuestion = await Content.findOne({ contentHash: hash, isDeleted: false }).lean();
+        if (existingQuestion && q.duplicateAction !== 'import_anyway' && !q.isDuplicate) {
+          skippedCount++;
+          continue;
+        }
+
         const contentDoc = new Content({
           id: customId,
           itemId: customId,
@@ -113,11 +120,17 @@ exports.bulkImportQuestions = async (req, res) => {
           finalAnswer: q.finalAnswer || q.answer_latex || '',
           steps: Array.isArray(q.steps) ? q.steps : (q.solution_latex ? [q.solution_latex] : []),
           explanation: q.explanation || q.solution_latex || '',
+          solutionHidden: q.solutionHidden !== undefined ? Boolean(q.solutionHidden) : false,
+          solutionLanguage: q.solutionLanguage || 'english',
+          graphicSvg: q.graphicSvg || '',
+          rubric: q.rubric || null,
           isCommon: isCommonVal,
-          yearTag: q.yearTag || q.sourceYear || 'AI Import',
+          yearTag: q.yearTag || (q.pyqYear ? String(q.pyqYear) : (q.sourceYear || 'AI Import')),
           source: q.source || (fileName ? `${fileName} (Page ${q.pageNumber || 1})` : 'AI Import Pipeline'),
+          pyqYear: q.pyqYear ? Number(q.pyqYear) : null,
+          pyqExam: q.pyqExam || '',
           importSessionId: generatedSessionId,
-          importSource: 'AI Import',
+          importSource: q.importSource || 'AI Import',
           contentHash: hash,
           // Amendment 5: tag duplicate_of if imported anyway
           duplicate_of: (q.duplicateAction === 'import_anyway' || q.isDuplicate) && q.duplicateMatchId ? q.duplicateMatchId : null,

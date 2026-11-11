@@ -364,6 +364,13 @@ exports.getQuestionBank = async (req, res) => {
         options: Array.isArray(q.options) ? q.options : [],
         isCommon: Boolean(q.isCommon || q.isCommonFirstYear),
         yearTag: q.examYear ? `${q.examYear} PYQ` : (q.academicYear || null),
+        source: q.source || 'Manual',
+        pyqYear: q.pyqYear || (q.examYear ? Number(q.examYear) : null),
+        pyqExam: q.pyqExam || q.examName || '',
+        solutionHidden: Boolean(q.solutionHidden),
+        solutionLanguage: q.solutionLanguage || 'english',
+        graphicSvg: q.graphicSvg || '',
+        rubric: q.rubric || null,
         createdAt: q.createdAt,
         updatedAt: q.updatedAt,
       };
@@ -373,6 +380,9 @@ exports.getQuestionBank = async (req, res) => {
         doc.finalAnswer = q.finalAnswer || '';
         doc.steps = q.steps || [];
         doc.explanation = q.explanation || (q.steps?.length > 0 ? q.steps[0] : '');
+      } else if (!q.solutionHidden) {
+        doc.finalAnswer = q.finalAnswer || '';
+        doc.steps = q.steps || [];
       }
 
       return doc;

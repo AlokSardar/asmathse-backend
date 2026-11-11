@@ -1,15 +1,21 @@
 const fs = require('fs');
 const path = require('path');
+const crypto = require('crypto');
 const multer = require('multer');
 const { PDFDocument } = require('pdf-lib');
 const { GoogleGenAI } = require('@google/genai');
 const PYQPaper = require('../models/PYQPaper');
+const Content = require('../models/Content');
+const { generateRubric } = require('../services/solutionGeneratorService');
 const {
   normalizeSemester,
   normalizeMarks,
   normalizeQType,
 } = require('../utils/cohortNormalize');
 const { dbGuard } = require('../utils/dbGuard');
+
+const computeContentHash = (text) =>
+  crypto.createHash('sha256').update(String(text || '').trim().toLowerCase()).digest('hex');
 
 // Candidate model chain matching AI Question Import
 const MODEL_CANDIDATE_CHAIN = [
@@ -1088,5 +1094,140 @@ exports.getPaperPrintView = async (req, res) => {
   } catch (err) {
     console.error('[PYQ getPaperPrintView error]:', err);
     return res.status(500).send(`<h2>Error generating print view: ${err.message}</h2>`);
+  }
+};
+
+/**
+ * Send questions from published/verified PYQ paper directly into Question Bank (Content model)
+ */
+exports.sendToQuestionBank = async (req, res) => {
+  try {
+    const { paperId } = req.params;
+    const paper = await PYQPaper.findById(paperId);
+    if (!paper) {
+      return res.status(404).json({ success: false, message: 'PYQ Paper not found' });
+    }
+
+    if (!paper.questions || paper.questions.length === 0) {
+      return res.status(400).json({ success: false, message: 'Paper has no questions to send' });
+    }
+
+    let importedCount = 0;
+    let skippedCount = 0;
+    const errors = [];
+
+    for (let i = 0; i < paper.questions.length; i++) {
+      const q = paper.questions[i];
+      try {
+        const qText = String(q.questionText || '').trim();
+        if (!qText) {
+          skippedCount++;
+          continue;
+        }
+
+        const hash = computeContentHash(qText);
+        const existing = await Content.findOne({ contentHash: hash, isDeleted: false }).lean();
+        if (existing) {
+          skippedCount++;
+          continue;
+        }
+
+        const customId = `QB-PYQ-${paper.examYear || Date.now()}-${i + 1}-${Math.random().toString(36).substring(2, 6)}`;
+        const canonicalType = normalizeQType(q.qType || 'Subjective', q.options);
+        const canonicalMarks = normalizeMarks(q.marks || 5);
+
+        const contentDoc = new Content({
+          id: customId,
+          itemId: customId,
+          customId,
+          title: `${paper.subject} - PYQ ${paper.examYear} - Q${q.questionNumber || i + 1}`,
+          type: 'question',
+          qType: canonicalType,
+          course: paper.course,
+          branch: paper.branch || 'CSE',
+          stream: paper.branch || 'CSE',
+          semester: paper.semester,
+          classLevel: paper.classLevel || null,
+          subject: paper.subject,
+          topic: q.unit || 'General Mathematics',
+          difficulty: 'Medium',
+          marks: canonicalMarks,
+          questionText: qText,
+          options: Array.isArray(q.options) ? q.options : [],
+          correctOption: q.correctOption !== undefined ? q.correctOption : null,
+          finalAnswer: q.solution?.finalAnswer || '',
+          steps: Array.isArray(q.solution?.steps) ? q.solution.steps : [],
+          explanation: q.solution?.steps ? q.solution.steps.join('\n\n') : '',
+          solutionHidden: true, // Default hidden for PYQ imports
+          solutionLanguage: q.solution?.language || 'english',
+          graphicSvg: q.solution?.graphicSvg || '',
+          rubric: q.rubric || null,
+          isCommon: false,
+          yearTag: String(paper.examYear),
+          source: 'PYQ',
+          pyqYear: paper.examYear,
+          pyqExam: paper.examBody,
+          importSessionId: String(paper._id),
+          importSource: 'PYQ Manager',
+          contentHash: hash,
+          uploadedBy: req.user?.name || req.user?.email || 'Faculty Admin',
+          uploadedAt: new Date(),
+        });
+
+        await contentDoc.save();
+        importedCount++;
+      } catch (err) {
+        console.error(`Error sending PYQ question ${i} to QB:`, err);
+        errors.push({ index: i, error: err.message });
+      }
+    }
+
+    return res.status(200).json({
+      success: true,
+      message: `Successfully sent ${importedCount} questions to Question Bank (${skippedCount} duplicates skipped).`,
+      imported: importedCount,
+      skipped: skippedCount,
+      errors,
+    });
+  } catch (err) {
+    console.error('[PYQ sendToQuestionBank error]:', err);
+    return res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+/**
+ * Generate grading rubric for a question in a PYQ paper
+ */
+exports.generateQuestionRubric = async (req, res) => {
+  try {
+    const { paperId, qIndex } = req.params;
+    const paper = await PYQPaper.findById(paperId);
+    if (!paper) {
+      return res.status(404).json({ success: false, message: 'PYQ Paper not found' });
+    }
+
+    const index = parseInt(qIndex, 10);
+    const question = Number.isInteger(index) ? paper.questions[index] : paper.questions.id(qIndex);
+    if (!question) {
+      return res.status(404).json({ success: false, message: 'Question not found' });
+    }
+
+    const rubric = await generateRubric({
+      questionText: question.questionText,
+      solution: question.solution,
+      marks: question.marks || 5,
+    });
+
+    question.rubric = rubric;
+    await paper.save();
+
+    return res.status(200).json({
+      success: true,
+      message: 'Rubric generated successfully',
+      rubric,
+    });
+  } catch (err) {
+    console.error('[PYQ generateQuestionRubric error]:', err);
+    return res.status(500).json({ success: false, message: err.message });
   }
 };

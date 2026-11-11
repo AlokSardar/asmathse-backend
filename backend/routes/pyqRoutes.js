@@ -72,6 +72,22 @@ router.post(
   pyqController.restorePaper
 );
 
+// 8b. Send Questions to Question Bank - Faculty Only
+router.post(
+  '/:paperId/send-to-qb',
+  protect,
+  requireTeacherOrAdmin,
+  pyqController.sendToQuestionBank
+);
+
+// 8c. Generate Rubric for Question - Faculty Only
+router.post(
+  '/:paperId/questions/:qIndex/rubric',
+  protect,
+  requireTeacherOrAdmin,
+  pyqController.generateQuestionRubric
+);
+
 // 9. Download / Print Solved Paper View (HTML with Print Stylesheet) - Public / Optional Auth
 router.get(
   '/:paperId/download',

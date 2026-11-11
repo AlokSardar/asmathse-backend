@@ -14,6 +14,9 @@ const {
   generateAnswerKeyStream,
   extractQuestions,
   bulkDeleteContent,
+  generateQuestionSolution,
+  updateQuestionContent,
+  generateQuestionRubric,
 } = require('../controllers/contentController');
 
 const {
@@ -46,6 +49,9 @@ router.get('/:id/answer-key', getAnswerKey);
 router.put('/:id/answer-key', updateAnswerKey);
 router.post('/:id/generate-answer-key', generateAnswerKey);
 router.post('/:id/generate-answer-key-stream', generateAnswerKeyStream);
+router.post('/:id/generate-solution', requireTeacherOrAdmin, generateQuestionSolution);
+router.patch('/:id', requireTeacherOrAdmin, updateQuestionContent);
+router.post('/:id/rubric', requireTeacherOrAdmin, generateQuestionRubric);
 router.get('/:id', getContentById);
 router.delete('/:id', deleteContent);
 

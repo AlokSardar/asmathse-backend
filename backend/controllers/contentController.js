@@ -9,6 +9,7 @@ const ClassTest = require('../models/ClassTest');
 const { resolveTestTimestamps } = require('../utils/scheduleTime');
 const Notification = require('../models/Notification');
 const { generateAnswerKeyForQuestionPaper, streamAnswerKeyForQuestionPaper } = require('../services/geminiService');
+const { generateSolution, generateRubric } = require('../services/solutionGeneratorService');
 const { uploadBufferToCloudinary } = require('../services/cloudinaryService');
 
 // Helper: Inspect request credentials for administrator authorization
@@ -1925,7 +1926,149 @@ const getAcademicStructure = async (req, res) => {
   }
 };
 
+
+/**
+ * Generate AI Solution for a question in Question Bank
+ */
+const generateQuestionSolution = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { language = 'english' } = req.body || {};
+    const query = buildIdQuery(id);
+    const content = await Content.findOne(query);
+    if (!content) {
+      return res.status(404).json({ success: false, message: 'Question content not found' });
+    }
+
+    const sol = await generateSolution({
+      questionText: content.questionText,
+      marks: content.marks || 5,
+      unit: content.topic || 'General',
+      course: content.course,
+      subject: content.subject,
+      language,
+    });
+
+    content.steps = sol.steps;
+    content.finalAnswer = sol.finalAnswer;
+    content.graphicSvg = sol.graphicSvg || '';
+    content.solutionLanguage = sol.language;
+    if (sol.steps && sol.steps.length > 0) {
+      content.explanation = sol.steps.join('\n\n');
+    }
+
+    await content.save();
+
+    return res.status(200).json({
+      success: true,
+      message: 'Solution generated successfully',
+      steps: content.steps,
+      finalAnswer: content.finalAnswer,
+      graphicSvg: content.graphicSvg,
+      solutionLanguage: content.solutionLanguage,
+    });
+  } catch (error) {
+    console.error('Error in generateQuestionSolution:', error);
+    return res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+/**
+ * Partial update for Question Bank item (e.g. toggle solutionHidden, update rubric)
+ */
+const updateQuestionContent = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const updates = req.body || {};
+    const query = buildIdQuery(id);
+
+    const allowedFields = [
+      'solutionHidden',
+      'solutionLanguage',
+      'steps',
+      'finalAnswer',
+      'graphicSvg',
+      'explanation',
+      'rubric',
+      'marks',
+      'difficulty',
+      'topic',
+      'subject',
+      'questionText',
+      'options',
+      'correctOption',
+      'source',
+      'pyqYear',
+      'pyqExam',
+    ];
+
+    const safeUpdates = {};
+    for (const key of allowedFields) {
+      if (updates[key] !== undefined) {
+        safeUpdates[key] = updates[key];
+      }
+    }
+
+    const updated = await Content.findOneAndUpdate(
+      query,
+      { $set: safeUpdates },
+      { returnDocument: 'after' }
+    );
+
+    if (!updated) {
+      return res.status(404).json({ success: false, message: 'Question not found' });
+    }
+
+    return res.status(200).json({
+      success: true,
+      message: 'Question updated successfully',
+      data: updated,
+    });
+  } catch (error) {
+    console.error('Error in updateQuestionContent:', error);
+    return res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+/**
+ * Generate Rubric for a question in Question Bank
+ */
+const generateQuestionRubric = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const query = buildIdQuery(id);
+    const content = await Content.findOne(query);
+    if (!content) {
+      return res.status(404).json({ success: false, message: 'Question content not found' });
+    }
+
+    const rubric = await generateRubric({
+      questionText: content.questionText,
+      solution: {
+        steps: content.steps,
+        finalAnswer: content.finalAnswer,
+      },
+      marks: content.marks || 5,
+    });
+
+    content.rubric = rubric;
+    await content.save();
+
+    return res.status(200).json({
+      success: true,
+      message: 'Rubric generated successfully',
+      rubric,
+    });
+  } catch (error) {
+    console.error('Error in generateQuestionRubric:', error);
+    return res.status(500).json({ success: false, message: error.message });
+  }
+};
+
 module.exports = {
+  generateQuestionSolution,
+  updateQuestionContent,
+  generateQuestionRubric,
   getAcademicStructure,
   getAllContent,
   getContentById,
