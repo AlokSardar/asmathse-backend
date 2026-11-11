@@ -342,13 +342,81 @@ exports.getAssignments = async (req, res) => {
       Assignment.countDocuments(baseQuery),
     ]);
 
+    // Look up student submissions if requesting user is student or provided student identifier
+    const studentId = user.role === 'student' ? String(user.id || user._id) : (req.query.studentId || '');
+    const studentEmail = user.role === 'student' ? (user.email || '') : (req.query.studentEmail || '');
+
+    let studentSubmissionsMap = new Map();
+    if (studentId || studentEmail) {
+      const subConditions = [];
+      if (studentId) {
+        subConditions.push({ student: studentId });
+        subConditions.push({ studentId: studentId });
+      }
+      if (studentEmail) {
+        subConditions.push({ studentEmail: studentEmail.toLowerCase() });
+      }
+      if (subConditions.length > 0) {
+        const subs = await Submission.find({ $or: subConditions }).lean();
+        subs.forEach((s) => {
+          const aId = String(s.assignment || s.assignmentId || '');
+          if (aId) studentSubmissionsMap.set(aId, s);
+        });
+      }
+    }
+
+    if (studentId || studentEmail) {
+      let sActive = 0;
+      let sSubmitted = 0;
+      let sGraded = 0;
+      let sOverdue = 0;
+
+      for (const item of cohortItems) {
+        const itemId = item._id.toString();
+        const sub = studentSubmissionsMap.get(itemId);
+        const hasSub = Boolean(sub);
+        const hasGrade = hasSub && sub.marksObtained !== null && sub.marksObtained !== undefined;
+        const isPast = item.dueDate && new Date(item.dueDate) < now;
+
+        if (hasGrade) sGraded++;
+        else if (hasSub) sSubmitted++;
+        else if (isPast) sOverdue++;
+        else sActive++;
+      }
+
+      stats.student = {
+        active: sActive,
+        submitted: sSubmitted,
+        graded: sGraded,
+        overdue: sOverdue,
+        total: cohortItems.length,
+      };
+    }
+
     // Enhance each document with query-time computed isOverdue field (Amendment 1)
     const enhancedAssignments = assignments.map((doc) => {
-      const isOverdue = Boolean(doc.status === 'active' && doc.dueDate && new Date(doc.dueDate) < now);
+      const docId = doc._id.toString();
+      const sub = studentSubmissionsMap.get(docId) || null;
+      const isSubmitted = Boolean(sub);
+      const isGraded = isSubmitted && sub.marksObtained !== null && sub.marksObtained !== undefined;
+      const marksAwarded = isGraded ? sub.marksObtained : null;
+      const isOverdue = Boolean(doc.dueDate && new Date(doc.dueDate) < now && !isSubmitted);
+
+      let studentStatus = 'active';
+      if (isGraded) studentStatus = 'graded';
+      else if (isSubmitted) studentStatus = 'submitted';
+      else if (isOverdue) studentStatus = 'overdue';
+
       return {
         ...doc,
-        id: doc._id.toString(),
+        id: docId,
         isOverdue,
+        isSubmitted,
+        isGraded,
+        marksAwarded,
+        marksObtained: marksAwarded,
+        mySubmission: sub,
+        studentStatus,
       };
     });
 
@@ -913,6 +981,161 @@ exports.gradeSubmission = async (req, res) => {
     });
   } catch (error) {
     console.error('gradeSubmission error:', error);
+    return res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+/**
+ * 10. POST /api/assignments/:id/submit - Student submits assignment (Amendment 1)
+ */
+exports.submitAssignment = async (req, res) => {
+  try {
+    dbGuard('POST /api/assignments/:id/submit');
+    const { id } = req.params;
+    const user = req.user || {};
+    const assignment = await Assignment.findById(id);
+    if (!assignment) {
+      return res.status(404).json({ success: false, message: 'Assignment not found.' });
+    }
+
+    const studentId = String(user._id || user.id || req.body.studentId || 'STU-01');
+    const studentName = user.name || req.body.studentName || 'Student';
+    const studentEmail = (user.email || req.body.studentEmail || '').toLowerCase();
+    const studentRoll = user.rollNumber || req.body.studentRoll || '';
+    const textAnswer = req.body.textAnswer || req.body.notes || '';
+
+    let answerFileUrl = '';
+    let fileName = '';
+    let fileSize = '';
+
+    if (req.file && req.file.buffer) {
+      const ext = path.extname(req.file.originalname).toLowerCase() || '.pdf';
+      const safeName = `sub_${Date.now()}_${Math.random().toString(36).substring(2, 7)}${ext}`;
+      const diskPath = path.join(assignmentsDir, safeName);
+      fs.writeFileSync(diskPath, req.file.buffer);
+      answerFileUrl = `/uploads/assignments/${safeName}`;
+      fileName = req.file.originalname;
+      fileSize = `${(req.file.size / 1024).toFixed(1)} KB`;
+    } else if (req.body.fileDataUrl && req.body.fileDataUrl.startsWith('data:')) {
+      const matches = req.body.fileDataUrl.match(/^data:([A-Za-z-+/]+);base64,(.+)$/);
+      if (matches) {
+        const buffer = Buffer.from(matches[2], 'base64');
+        const ext = req.body.fileName && path.extname(req.body.fileName) ? path.extname(req.body.fileName) : '.pdf';
+        const safeName = `sub_${Date.now()}_${Math.random().toString(36).substring(2, 7)}${ext}`;
+        const diskPath = path.join(assignmentsDir, safeName);
+        fs.writeFileSync(diskPath, buffer);
+        answerFileUrl = `/uploads/assignments/${safeName}`;
+        fileName = req.body.fileName || 'submission.pdf';
+        fileSize = `${(buffer.length / 1024).toFixed(1)} KB`;
+      }
+    }
+
+    // Check for existing submission to support overwrite before deadline
+    const existing = await Submission.findOne({
+      $or: [
+        { assignment: id, student: studentId },
+        { assignment: id, studentId },
+        { assignmentId: id, studentId },
+        ...(studentEmail ? [
+          { assignment: id, studentEmail },
+          { assignmentId: id, studentEmail }
+        ] : [])
+      ]
+    });
+
+    const subId = existing?._id ? existing._id.toString() : (existing?.id || `SUB-${Date.now()}`);
+    const updatePayload = {
+      id: subId,
+      assignment: id,
+      assignmentId: id,
+      assignmentTitle: assignment.title,
+      student: studentId,
+      studentId,
+      studentName,
+      studentEmail,
+      studentRoll,
+      course: assignment.course,
+      stream: assignment.branch,
+      branch: assignment.branch,
+      semester: assignment.semester,
+      totalMarks: assignment.totalMarks || 30,
+      status: existing?.status === 'graded' ? 'graded' : 'submitted',
+      submittedAt: new Date(),
+    };
+
+    if (answerFileUrl) {
+      updatePayload.answerFileUrl = answerFileUrl;
+      updatePayload.fileName = fileName;
+      updatePayload.fileSize = fileSize;
+    }
+    if (textAnswer) {
+      updatePayload.notes = textAnswer;
+    }
+
+    const submission = await Submission.findOneAndUpdate(
+      {
+        $or: [
+          { assignment: id, student: studentId },
+          { assignment: id, studentId },
+          { assignmentId: id, studentId },
+          ...(studentEmail ? [
+            { assignment: id, studentEmail },
+            { assignmentId: id, studentEmail }
+          ] : [])
+        ]
+      },
+      { $set: updatePayload },
+      { new: true, upsert: true }
+    );
+
+    // If new submission, increment assignment counter
+    if (!existing) {
+      await Assignment.findByIdAndUpdate(id, { $inc: { submissionCount: 1 } });
+    }
+
+    // Sync to Evaluation model for Educator Grading Hub
+    await Evaluation.findOneAndUpdate(
+      {
+        $or: [
+          { testId: id, studentId },
+          { examId: id, studentId },
+          ...(studentEmail ? [{ testId: id, studentEmail }] : [])
+        ]
+      },
+      {
+        $set: {
+          id: subId,
+          testId: id,
+          testTitle: assignment.title,
+          examId: id,
+          examTitle: assignment.title,
+          examType: 'Assignment Submission',
+          studentId,
+          studentName,
+          studentEmail,
+          rollNumber: studentRoll,
+          course: assignment.course,
+          branch: assignment.branch,
+          semester: assignment.semester,
+          totalMarks: assignment.totalMarks || 30,
+          status: 'Pending Evaluation',
+          submittedAt: updatePayload.submittedAt,
+          notes: textAnswer || '',
+          answerFileUrl: answerFileUrl || existing?.answerFileUrl || '',
+        }
+      },
+      { upsert: true }
+    ).catch(() => {});
+
+    return res.status(200).json({
+      success: true,
+      message: '✓ Assignment submitted successfully',
+      submissionId: submission._id || submission.id,
+      submittedAt: submission.submittedAt,
+      data: submission,
+    });
+  } catch (error) {
+    console.error('submitAssignment error:', error);
     return res.status(500).json({ success: false, message: error.message });
   }
 };

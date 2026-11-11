@@ -12,6 +12,7 @@ const {
   bulkAssignmentsAction,
   getAssignmentSubmissions,
   gradeSubmission,
+  submitAssignment,
 } = require('../controllers/assignmentController');
 const { protect, optionalAuth, requireTeacherOrAdmin } = require('../middleware/authMiddleware');
 
@@ -90,5 +91,8 @@ router.get('/:id/submissions', requireTeacherOrAdmin, getAssignmentSubmissions);
 
 // 9. Grade student submission
 router.post('/:id/submissions/:studentId/grade', requireTeacherOrAdmin, gradeSubmission);
+
+// 10. Submit assignment (Student submission with file + textAnswer)
+router.post('/:id/submit', optionalAuth, handleUpload, submitAssignment);
 
 module.exports = router;
