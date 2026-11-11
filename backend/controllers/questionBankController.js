@@ -352,6 +352,27 @@ exports.getQuestionBank = async (req, res) => {
       });
     }
 
+    // Unsolved Status Filter (steps empty/null and finalAnswer empty/null)
+    if (req.query.unsolved === 'true' || req.query.status === 'unsolved') {
+      specificAndClauses.push({
+        $and: [
+          { $or: [{ finalAnswer: { $exists: false } }, { finalAnswer: null }, { finalAnswer: '' }] },
+          { $or: [{ steps: { $exists: false } }, { steps: null }, { steps: { $size: 0 } }] },
+        ],
+      });
+    }
+
+    // Unverified Status Filter (isVerified is false, null, or not set)
+    if (req.query.unverified === 'true' || req.query.status === 'unverified') {
+      specificAndClauses.push({
+        $or: [
+          { isVerified: false },
+          { isVerified: { $exists: false } },
+          { isVerified: null },
+        ],
+      });
+    }
+
     if (specificAndClauses.length > 0) {
       questionQuery.$and = specificAndClauses;
     }
