@@ -31,6 +31,23 @@ const userSchema = new mongoose.Schema({
   isApproved: { type: Boolean, default: false },
   registrationDate: { type: Date, default: Date.now },
 
+  // Approval Lifecycle & Institutional Moderation
+  approvalStatus: {
+    type: String,
+    enum: ['pending', 'approved', 'rejected', 'suspended'],
+    default: 'pending',
+    index: true,
+  },
+  isActive: { type: Boolean, default: true },
+  approvedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
+  approvedAt: { type: Date },
+  rejectedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
+  rejectedAt: { type: Date },
+  rejectionReason: { type: String, default: '' },
+  suspendedAt: { type: Date },
+  suspensionReason: { type: String, default: '' },
+  registrationNote: { type: String, default: '', maxLength: 500 },
+
   // Password Recovery / Reset
   resetPasswordToken: { type: String },
   resetPasswordExpire: { type: Date },

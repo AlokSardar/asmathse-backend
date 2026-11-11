@@ -250,10 +250,18 @@ const PORT = process.env.PORT || 5000;
 
 // Force Admin Upsert on Startup
 const { bootstrapAdminIfEmpty } = require('./controllers/authController');
+const { migrateApprovalStatus } = require('./scripts/migrateApprovalStatus');
+let hasRunApprovalMigration = false;
+const runApprovalMigrationOnce = () => {
+  if (hasRunApprovalMigration) return;
+  hasRunApprovalMigration = true;
+  migrateApprovalStatus().catch((err) => console.warn('[MIGRATE_APPROVALS] Warning:', err.message));
+};
 const ExtractionCache = require('./models/ExtractionCache');
 
 mongoose.connection.on('connected', () => {
   bootstrapAdminIfEmpty();
+  runApprovalMigrationOnce();
   const { seedInitialMaterials } = require('./controllers/materialController');
   seedInitialMaterials().catch((err) => console.warn('[SEED_MATERIALS] Warning:', err.message));
   const { seedInitialAssignments } = require('./controllers/assignmentController');

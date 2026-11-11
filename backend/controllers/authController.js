@@ -334,11 +334,14 @@ const registerUser = async (req, res) => {
     }
 
     // Stream / Category fields
-    const { subject, bscType } = req.body;
+    const { subject, bscType, registrationNote } = req.body;
+    const cleanNote = typeof registrationNote === 'string' ? registrationNote.trim().slice(0, 500) : '';
 
     // Mandatory Admin Approval process:
     // New student registrations remain pending (isApproved: false) until explicitly approved by the admin.
     const isApproved = role === 'admin' ? true : false;
+    const approvalStatus = isApproved ? 'approved' : 'pending';
+    const isActive = isApproved;
 
     const user = await User.create({
       role,
@@ -358,7 +361,10 @@ const registerUser = async (req, res) => {
       classLevel: classLevel || '',
       subject: subject || targetCourse || 'Mathematics',
       bscType: bscType || '',
+      approvalStatus,
+      isActive,
       isApproved,
+      registrationNote: cleanNote,
       profileCompleted: true,
       isProfileComplete: true,
       registrationDate: new Date(),
@@ -390,6 +396,20 @@ const registerUser = async (req, res) => {
         },
         { upsert: true, new: true }
       ).catch(() => {});
+      // Dispatch in-app notification to all admins
+      const Notification = require('../models/Notification');
+      const courseName = user.course || user.stream || 'Engineering';
+      const branchName = user.branch || 'General';
+      const semName = user.semester ? `Sem ${user.semester}` : (user.classLevel || 'Class 10');
+      await Notification.create({
+        title: 'New Student Registration',
+        message: `${user.name} registered for ${courseName} • ${branchName} • ${semName}. Approval required.`,
+        type: 'approval_request',
+        targetRole: 'admin',
+        contentId: String(user._id),
+        isRead: false,
+        createdAt: new Date(),
+      }).catch((nErr) => console.warn('[NOTIFICATION WARNING]:', nErr.message));
     }
 
     const token = role === 'admin' ? generateToken(user._id) : null;
@@ -413,8 +433,11 @@ const registerUser = async (req, res) => {
       profileCompleted: true,
       isProfileComplete: true,
       token,
+      success: true,
+      pending: role === 'student',
+      approvalStatus: user.approvalStatus,
       message: role === 'student'
-        ? 'Registration submitted! Your account is pending teacher/admin approval.'
+        ? 'Registration successful. Awaiting admin approval.'
         : 'Faculty account registered and active.',
     });
   } catch (error) {
@@ -550,13 +573,51 @@ const loginUser = async (req, res) => {
       });
     }
 
-    // Registration Approval / Verification check:
-    // If student has isApproved: false, refuse access until admin manually approves
-    if (!isFaculty && user.isApproved === false) {
-      return res.status(403).json({
-        message: 'Your account registration is pending approval by the teacher/admin. Please wait for activation.',
-        pendingApproval: true,
-      });
+    // Registration Approval & Moderation verification check:
+    // Strictly blocks pending, rejected, and suspended student accounts
+    if (!isFaculty) {
+      const status = user.approvalStatus || (user.isApproved ? 'approved' : 'pending');
+
+      if (status === 'pending') {
+        return res.status(403).json({
+          success: false,
+          code: 'APPROVAL_PENDING',
+          approvalStatus: 'pending',
+          pendingApproval: true,
+          message: 'Your account is pending approval. You will be notified once approved.',
+        });
+      }
+
+      if (status === 'rejected') {
+        const reasonSuffix = user.rejectionReason ? ` Reason: ${user.rejectionReason}` : '';
+        return res.status(403).json({
+          success: false,
+          code: 'APPROVAL_REJECTED',
+          approvalStatus: 'rejected',
+          rejectionReason: user.rejectionReason || '',
+          message: `Your registration was not approved.${reasonSuffix} Contact your institution.`,
+        });
+      }
+
+      if (status === 'suspended') {
+        const reasonSuffix = user.suspensionReason ? ` Reason: ${user.suspensionReason}` : '';
+        return res.status(403).json({
+          success: false,
+          code: 'ACCOUNT_SUSPENDED',
+          approvalStatus: 'suspended',
+          suspensionReason: user.suspensionReason || '',
+          message: `Your account has been suspended.${reasonSuffix} Contact admin.`,
+        });
+      }
+
+      if (user.isActive === false || status !== 'approved' || user.isApproved === false) {
+        return res.status(403).json({
+          success: false,
+          code: 'ACCOUNT_INACTIVE',
+          approvalStatus: status,
+          message: 'Your account is not active. Please contact administrator.',
+        });
+      }
     }
 
     // Check MongoDB Students collection to see if student onboarding is completed
