@@ -7,6 +7,7 @@ const ImportPage = require('../models/ImportPage');
 const ImportItem = require('../models/ImportItem');
 const ExtractionCache = require('../models/ExtractionCache');
 const Content = require('../models/Content');
+const { generateSolution } = require('../services/solutionGeneratorService');
 
 const ALL_ENGINEERING_STREAMS = ['CSE', 'ECE', 'ME', 'EE', 'CE', 'IT'];
 const PROMPT_VERSION = 'v2-ocr-pure-transcription';
@@ -271,6 +272,7 @@ exports.initImportSession = async (req, res) => {
       processedPages: 0,
       extractedCount: 0,
       activePage: 1,
+      extractionOptions: req.body.extractionOptions || {},
       createdBy: req.user ? { id: req.user.id, name: req.user.name, email: req.user.email } : 'Faculty Admin',
     });
     await sessionDoc.save();
@@ -386,11 +388,23 @@ exports.extractPage = async (req, res) => {
     const pageHash = crypto.createHash('sha256').update(pageBuffer).digest('hex');
     pageDoc.pageHash = pageHash;
 
+    // Resolve extraction options
+    const extractionOpts = {
+      extractSolutions: true,
+      detectMarks: true,
+      autoTagTopic: true,
+      checkDuplicates: true,
+      enhancedLatex: true,
+      outputLanguage: 'english',
+      ...(session.extractionOptions || {}),
+      ...(req.body.extractionOptions || {}),
+    };
+
     // Cache Key computation
     const primaryModel = MODEL_CANDIDATE_CHAIN[0];
     const cacheKey = crypto
       .createHash('sha256')
-      .update(pageHash + '::' + PROMPT_VERSION + '::' + primaryModel)
+      .update(pageHash + '::' + PROMPT_VERSION + '::' + primaryModel + '::' + JSON.stringify(extractionOpts))
       .digest('hex');
 
     // Server-side dev mode telemetry
@@ -417,14 +431,31 @@ exports.extractPage = async (req, res) => {
 
     // ── Execute Live Gemini OCR If Not Cached ──────────────────────────────
     if (!isCached) {
+      const solutionInstruction = extractionOpts.extractSolutions
+        ? 'SOLUTIONS: For each question, formulate a thorough, step-by-step mathematical derivation in "solution_latex" and provide the concise final answer in "answer_latex". Format all formulas in valid KaTeX LaTeX ($...$ or $$...$$).'
+        : 'Do NOT calculate or generate solutions. Transcribe "answer_latex" and "solution_latex" ONLY if they are explicitly printed on the page; otherwise set them to empty strings "".';
+
+      const marksInstruction = extractionOpts.detectMarks !== false
+        ? 'Scan margins or question ends for individual mark allocations (e.g. "[2 Marks]", "(5M)"). CRITICAL SECTION RULE: Section instructions like "(10 x 1 = 10 Marks)" mean that each individual sub-question is worth 1 mark or 2 marks. Do NOT assign the section total (10) as the marks of an individual sub-question. Set "marks": 1 and "marksRawLabel": "[1 Mark]".'
+        : 'Set "marks": 0 and "marksRawLabel": "" unless explicitly marked on the question itself.';
+
+      const langInstruction = extractionOpts.outputLanguage === 'bengali'
+        ? 'LANGUAGE REQUIREMENT: Respond in Bengali language (বাংলা) for question explanations, solutions, and mathematical notes while preserving all mathematical formulas in standard LaTeX ($...$ or $$...$$).'
+        : '';
+
+      const topicInstruction = extractionOpts.autoTagTopic !== false
+        ? 'Infer and tag "chapter_guess" (e.g. "Linear Algebra", "Calculus") and "topic_guess" (e.g. "Eigenvalues", "Double Integrals") for each question based on the content.'
+        : '';
+
       const promptText = `
-You are an OCR and transcription engine.
+You are an advanced mathematical OCR and examination parsing engine.
 Transcribe ONLY the questions visibly printed on the attached examination page.
-Never invent, complete, solve, extrapolate, or paraphrase.
+Never invent questions that do not exist on the page.
 If the page has no questions (e.g. title page, instructions only, or blank), return an empty JSON array: [].
-Do NOT calculate or generate solutions. Transcribe "answer_latex" and "solution_latex" ONLY if they are explicitly printed on the page; otherwise set them to empty strings "".
-Scan margins or question ends for individual mark allocations (e.g. "[2 Marks]", "(5M)").
-CRITICAL SECTION RULE: Section instructions like "(10 x 1 = 10 Marks)" or "(5 x 2 = 10)" mean that each individual sub-question is worth 1 mark or 2 marks. Do NOT assign the section total (10) as the marks of an individual sub-question. Set "marks": 1 and "marksRawLabel": "[1 Mark]".
+${marksInstruction}
+${solutionInstruction}
+${topicInstruction}
+${langInstruction}
 
 OUTPUT JSON SCHEMA:
 Return ONLY a valid JSON array of question objects adhering to this schema:
@@ -437,9 +468,11 @@ Return ONLY a valid JSON array of question objects adhering to this schema:
     "question_latex": "<full text of the question with mathematical formulas in $...$ or $$...$>",
     "options": ["<option 1>", "<option 2>"],
     "correctOption": <number index or null>,
-    "answer_latex": "<only if printed on page, else ''>",
-    "solution_latex": "<only if printed on page, else ''>",
+    "answer_latex": "<concise final answer or printed answer>",
+    "solution_latex": "<step-by-step mathematical solution>",
     "has_figure": <boolean>,
+    "chapter_guess": "<chapter/module name>",
+    "topic_guess": "<specific topic name>",
     "difficulty_guess": "Easy" | "Medium" | "Hard",
     "confidence": <number between 0.0 and 1.0>,
     "warnings": []
@@ -884,6 +917,40 @@ exports.undoImport = async (req, res) => {
     });
   } catch (error) {
     console.error('undoImport error:', error);
+    return res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+/**
+ * 7. On-demand AI Solution Generator for Question Bank & AI Import items
+ */
+exports.generateItemSolution = async (req, res) => {
+  try {
+    const { questionText, marks = 4, language = 'english' } = req.body;
+    if (!questionText || !String(questionText).trim()) {
+      return res.status(400).json({ success: false, message: 'questionText is required to generate a solution.' });
+    }
+
+    const sol = await generateSolution({
+      questionText: String(questionText).trim(),
+      marks: Number(marks) || 4,
+      language: language === 'bengali' ? 'bengali' : 'english',
+    });
+
+    const stepArray = Array.isArray(sol.steps) ? sol.steps : (sol.steps ? [String(sol.steps)] : []);
+    const solutionLatex = stepArray.join('\n\n') || sol.finalAnswer || '';
+
+    return res.status(200).json({
+      success: true,
+      solution_latex: solutionLatex,
+      answer_latex: sol.finalAnswer || '',
+      steps: stepArray,
+      finalAnswer: sol.finalAnswer || '',
+      graphicSvg: sol.graphicSvg || '',
+      language: language === 'bengali' ? 'bengali' : 'english',
+    });
+  } catch (error) {
+    console.error('generateItemSolution error:', error);
     return res.status(500).json({ success: false, message: error.message });
   }
 };

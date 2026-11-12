@@ -287,6 +287,80 @@ async function runSuite() {
   assert(historyRes.data.stats.byQType.Subjective >= 2, 'Subjective count must be >= 2');
   console.log('✅ Import history & aggregate stats successfully retrieved');
 
+  // 8. Enhancement 5 & Solutions Test: Destination PYQ vs Central Question Bank
+  console.log('\n[TEST 6]: Destination Repositories (PYQ vs Central Question Bank) & Solution Ingestion');
+  const pyqPayload = {
+    sessionId: 'TEST-SESSION-PYQ-002',
+    fileName: 'MAKAUT_BTech_2024.pdf',
+    course: 'Engineering',
+    branch: 'CSE',
+    semester: 2,
+    subject: 'Mathematics II',
+    destination: 'pyq',
+    pyqExam: 'MAKAUT',
+    pyqYear: 2024,
+    questions: [
+      {
+        questionText: 'Find the eigenvalues and eigenvectors of the matrix $\\begin{pmatrix} 2 & 1 \\\\ 1 & 2 \\end{pmatrix}$.',
+        marks: 5,
+        qType: 'Subjective',
+        difficulty: 'Medium',
+        topic: 'Linear Algebra',
+        solution_latex: 'Characteristic equation: $|A - \\lambda I| = 0 \\implies (2-\\lambda)^2 - 1 = 0 \\implies \\lambda = 1, 3$.',
+        steps: [
+          'Form the characteristic equation $|A - \\lambda I| = 0$',
+          'Solve quadratic $(2 - \\lambda)^2 - 1 = 0$ giving $\\lambda = 1, 3$',
+          'For $\\lambda=1$: $(A-I)v = 0 \\implies v_1 = [1, -1]^T$',
+          'For $\\lambda=3$: $(A-3I)v = 0 \\implies v_2 = [1, 1]^T$'
+        ],
+        answer_latex: '$\\lambda_1 = 1, v_1 = [1, -1]^T; \\lambda_2 = 3, v_2 = [1, 1]^T$',
+        finalAnswer: '$\\lambda_1 = 1, \\lambda_2 = 3$',
+      },
+    ],
+  };
+
+  const pyqImportRes = await api('POST', '/api/content/bulk-import', adminToken, pyqPayload);
+  assert.strictEqual(pyqImportRes.status, 200);
+  assert.strictEqual(pyqImportRes.data.success, true);
+  assert.strictEqual(pyqImportRes.data.imported, 1);
+
+  const savedPyq = await Content.findOne({ importSessionId: 'TEST-SESSION-PYQ-002' });
+  assert(savedPyq, 'PYQ question must be stored in database');
+  assert.strictEqual(savedPyq.source, 'PYQ', 'source field must be tagged "PYQ" for PYQ Manager integration');
+  assert.strictEqual(savedPyq.pyqExam, 'MAKAUT', 'pyqExam must be "MAKAUT"');
+  assert.strictEqual(savedPyq.pyqYear, 2024, 'pyqYear must be 2024');
+  assert.strictEqual(savedPyq.finalAnswer, '$\\lambda_1 = 1, \\lambda_2 = 3$');
+  assert(Array.isArray(savedPyq.steps) && savedPyq.steps.length === 4, 'steps array must contain 4 steps');
+  console.log('✅ Destination "pyq" correctly tagged with source="PYQ", pyqExam="MAKAUT", pyqYear=2024, and steps preserved');
+
+  // Central Question Bank test (destination: 'question_bank')
+  const qbPayload = {
+    sessionId: 'TEST-SESSION-QB-003',
+    fileName: 'Worksheet_Differential_Eq.pdf',
+    course: 'Engineering',
+    branch: 'CSE',
+    semester: 2,
+    subject: 'Mathematics II',
+    destination: 'question_bank',
+    questions: [
+      {
+        questionText: 'Solve the differential equation $\\frac{dy}{dx} + y = e^{-x}$.',
+        marks: 4,
+        qType: 'Subjective',
+        topic: 'Differential Equations',
+      },
+    ],
+  };
+
+  const qbImportRes = await api('POST', '/api/content/bulk-import', adminToken, qbPayload);
+  assert.strictEqual(qbImportRes.status, 200);
+  assert.strictEqual(qbImportRes.data.success, true);
+
+  const savedQb = await Content.findOne({ importSessionId: 'TEST-SESSION-QB-003' });
+  assert(savedQb, 'QB question must be stored in database');
+  assert.notStrictEqual(savedQb.source, 'PYQ', 'Central question bank import must NOT be tagged with source="PYQ"');
+  console.log('✅ Destination "question_bank" correctly preserves central question bank source');
+
   // Clean up
   await User.deleteMany({});
   await Content.deleteMany({});

@@ -25,6 +25,7 @@ const importSessionSchema = new mongoose.Schema(
     activePage: { type: Number, default: 1 },
     importedAt: { type: Date },
     lastImportedBatch: [{ type: String }], // Array of Content IDs for Undo support
+    extractionOptions: { type: mongoose.Schema.Types.Mixed, default: {} },
     createdBy: { type: mongoose.Schema.Types.Mixed },
   },
   {

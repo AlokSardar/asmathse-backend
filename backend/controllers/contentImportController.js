@@ -29,6 +29,9 @@ exports.bulkImportQuestions = async (req, res) => {
       classLevel,
       subject = 'Mathematics',
       questions = [],
+      destination = 'question_bank',
+      pyqExam = '',
+      pyqYear = null,
     } = req.body;
 
     if (!Array.isArray(questions) || questions.length === 0) {
@@ -98,6 +101,12 @@ exports.bulkImportQuestions = async (req, res) => {
           continue;
         }
 
+        const isPyq = destination === 'pyq' || q.destination === 'pyq';
+        const effectivePyqExam = q.pyqExam || pyqExam || (isPyq ? (fileName ? fileName.replace(/\.[^/.]+$/, '') : 'University Exam') : '');
+        const effectivePyqYear = q.pyqYear ? Number(q.pyqYear) : (pyqYear ? Number(pyqYear) : (isPyq ? new Date().getFullYear() : null));
+        const effectiveSource = isPyq ? 'PYQ' : (q.source || (fileName ? `${fileName} (Page ${q.pageNumber || 1})` : 'AI Import Pipeline'));
+        const effectiveYearTag = q.yearTag || (effectivePyqYear ? String(effectivePyqYear) : (q.sourceYear || 'AI Import'));
+
         const contentDoc = new Content({
           id: customId,
           itemId: customId,
@@ -118,17 +127,17 @@ exports.bulkImportQuestions = async (req, res) => {
           options: Array.isArray(q.options) ? q.options : [],
           correctOption: q.correctOption !== undefined ? Number(q.correctOption) : (canonicalType === 'MCQ' ? 0 : null),
           finalAnswer: q.finalAnswer || q.answer_latex || '',
-          steps: Array.isArray(q.steps) ? q.steps : (q.solution_latex ? [q.solution_latex] : []),
-          explanation: q.explanation || q.solution_latex || '',
+          steps: Array.isArray(q.steps) && q.steps.length > 0 ? q.steps : (q.solution_latex ? [q.solution_latex] : []),
+          explanation: q.explanation || q.solution_latex || (Array.isArray(q.steps) ? q.steps.join('\n\n') : ''),
           solutionHidden: q.solutionHidden !== undefined ? Boolean(q.solutionHidden) : false,
           solutionLanguage: q.solutionLanguage || 'english',
           graphicSvg: q.graphicSvg || '',
           rubric: q.rubric || null,
           isCommon: isCommonVal,
-          yearTag: q.yearTag || (q.pyqYear ? String(q.pyqYear) : (q.sourceYear || 'AI Import')),
-          source: q.source || (fileName ? `${fileName} (Page ${q.pageNumber || 1})` : 'AI Import Pipeline'),
-          pyqYear: q.pyqYear ? Number(q.pyqYear) : null,
-          pyqExam: q.pyqExam || '',
+          yearTag: effectiveYearTag,
+          source: effectiveSource,
+          pyqYear: effectivePyqYear,
+          pyqExam: effectivePyqExam,
           importSessionId: generatedSessionId,
           importSource: q.importSource || 'AI Import',
           contentHash: hash,
