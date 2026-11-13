@@ -176,6 +176,10 @@ exports.bulkImportQuestions = async (req, res) => {
       { upsert: true, new: true }
     );
 
+    try {
+      require('./dashboardController').clearDashboardCache();
+    } catch (_) {}
+
     return res.status(200).json({
       success: true,
       message: `Successfully imported ${importedIds.length} questions into ${course} / ${targetBranch} / ${normSemester}.`,

@@ -5,6 +5,7 @@ const Content = require('../models/Content');
 const MaterialDownload = require('../models/MaterialDownload');
 const { dbGuard } = require('../utils/dbGuard');
 const { normalizeCohortItem } = require('../utils/cohortNormalize');
+const { clearDashboardCache } = require('./dashboardController');
 
 // Ensure local uploads/materials directory exists on the filesystem (Amendment 2)
 const materialsDir = path.join(__dirname, '..', 'uploads', 'materials');
@@ -376,6 +377,7 @@ exports.uploadMaterial = async (req, res) => {
     });
 
     await newMaterial.save();
+    clearDashboardCache();
 
     return res.status(201).json({
       success: true,
@@ -431,6 +433,7 @@ exports.updateMaterial = async (req, res) => {
     }
 
     await material.save();
+    clearDashboardCache();
     return res.status(200).json({ success: true, data: material });
   } catch (error) {
     console.error('updateMaterial error:', error);
@@ -463,6 +466,7 @@ exports.updateVisibility = async (req, res) => {
     }
 
     await material.save();
+    clearDashboardCache();
     return res.status(200).json({
       success: true,
       message: `Material visibility updated to ${visibility}.`,
@@ -489,6 +493,7 @@ exports.deleteMaterial = async (req, res) => {
 
     material.isDeleted = true;
     await material.save();
+    clearDashboardCache();
 
     return res.status(200).json({
       success: true,

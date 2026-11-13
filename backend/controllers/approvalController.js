@@ -13,6 +13,7 @@ const User = require('../models/User');
 const Student = require('../models/Student');
 const Notification = require('../models/Notification');
 const { dbGuard } = require('../utils/dbGuard');
+const { clearDashboardCache } = require('./dashboardController');
 
 /**
  * Helper to ensure student record stays synchronized
@@ -204,6 +205,7 @@ exports.approveStudent = async (req, res) => {
     user.suspensionReason = '';
 
     await user.save();
+    clearDashboardCache();
 
     // Synchronize Student record
     await syncStudentDoc(user._id, user.email, {
@@ -273,6 +275,7 @@ exports.rejectStudent = async (req, res) => {
     user.rejectionReason = cleanReason;
 
     await user.save();
+    clearDashboardCache();
 
     await syncStudentDoc(user._id, user.email, {
       isApproved: false,
@@ -342,6 +345,7 @@ exports.suspendStudent = async (req, res) => {
     user.suspensionReason = `${cleanReason}${duration ? ` (Duration: ${duration})` : ''}`;
 
     await user.save();
+    clearDashboardCache();
 
     await syncStudentDoc(user._id, user.email, {
       isApproved: false,
@@ -391,6 +395,7 @@ exports.reinstateStudent = async (req, res) => {
     user.suspensionReason = '';
 
     await user.save();
+    clearDashboardCache();
 
     await syncStudentDoc(user._id, user.email, {
       isApproved: true,
@@ -495,6 +500,8 @@ exports.bulkApprovals = async (req, res) => {
       { userId: { $in: userIds } },
       { $set: { approvalStatus: updateFields.approvalStatus, isApproved: updateFields.isApproved } }
     ).catch(() => {});
+
+    clearDashboardCache();
 
     return res.status(200).json({
       success: true,

@@ -138,6 +138,7 @@ const materialRoutes = require('./routes/materialRoutes');
 const assignmentRoutes = require('./routes/assignmentRoutes');
 const syllabusRoutes = require('./routes/syllabusRoutes');
 const pyqRoutes = require('./routes/pyqRoutes');
+const dashboardRoutes = require('./routes/dashboardRoutes');
 
 // Mount routers with sensitive route protection
 app.use('/api/upload', uploadRoutes);
@@ -151,6 +152,7 @@ app.use('/api/assignments', assignmentRoutes);
 app.use('/api/syllabus', syllabusRoutes);
 app.use('/api/pyq', pyqRoutes);
 app.use('/api/evaluations', evaluationRoutes);
+app.use('/api/dashboard', dashboardRoutes);
 app.use('/api/analytics', activityRoutes);
 app.use('/api/notifications', notificationRoutes);
 app.use('/api/notices', notificationRoutes);

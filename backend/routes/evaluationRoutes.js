@@ -48,6 +48,7 @@ const {
   getExamsList,
   getSubmissionsQueue,
 } = require('../controllers/evaluationHubController');
+const { getWeeklyVolume } = require('../controllers/dashboardController');
 
 // All evaluation endpoints require verified authentication
 router.use(protect);
@@ -59,6 +60,7 @@ router.use(protect);
 // Global evaluation lists (student sees own published/autoGraded; teacher/admin scoped)
 router.get('/', getAllEvaluations);
 router.get('/my-evaluations', getAllEvaluations);
+router.get('/weekly-volume', requireTeacherOrAdmin, getWeeklyVolume);
 
 // Workspace listings: exams & submissions queue
 router.get('/exams', requireTeacherOrAdmin, getExamsList);
