@@ -15,6 +15,7 @@ const User = require('../models/User');
 const Content = require('../models/Content');
 const ClassTest = require('../models/ClassTest');
 const Evaluation = require('../models/Evaluation');
+const ImportSession = require('../models/ImportSession');
 const { assertDevOrTestDatabase } = require('../utils/dbGuard');
 const { clearDashboardCache } = require('../controllers/dashboardController');
 const dashboardRoutes = require('../routes/dashboardRoutes');
@@ -266,6 +267,117 @@ async function runTests() {
     assert.strictEqual(typeof weeklyJson.total, 'number');
     assert.strictEqual(typeof weeklyJson.isHighActivity, 'boolean');
     console.log(`✅ Weekly volume returned 7 days with total ${weeklyJson.total}`);
+
+    // ──────────────────────────────────────────────────────────────────────────
+    // [TEST 6]: Activity Grouping (10 Chunk Sessions -> 1 Grouped Activity) + Links
+    // ──────────────────────────────────────────────────────────────────────────
+    console.log('\n[TEST 6]: Activity 5-minute Chunk Grouping & Links');
+    await ImportSession.deleteMany({});
+    const nowTs = Date.now();
+    const chunkSessions = [];
+    for (let i = 0; i < 10; i++) {
+      chunkSessions.push({
+        sessionId: `CHUNK_SES_${i}`,
+        fileName: `chunk_batch_${i}.pdf`,
+        course: 'Engineering',
+        branch: 'CSE',
+        semester: 'Semester 1',
+        extractedCount: 2,
+        createdBy: 'Prof. Tester',
+        createdAt: new Date(nowTs + i * 1000), // all within 10 seconds
+      });
+    }
+    await ImportSession.insertMany(chunkSessions);
+
+    const groupActRes = await fetch(`${baseUrl}/api/dashboard/activity-feed?course=Engineering&branch=CSE`, {
+      headers: { Authorization: `Bearer ${adminToken}` },
+    });
+    const groupActJson = await groupActRes.json();
+    assert.strictEqual(groupActJson.success, true);
+
+    const importActivities = groupActJson.data.filter((ev) => ev.type === 'import_saved');
+    assert.strictEqual(importActivities.length, 1, '10 chunk sessions within 5 minutes must collapse into exactly 1 event');
+    assert.strictEqual(importActivities[0].label, 'Imported 20 questions to Question Bank', 'Must sum 10 * 2 = 20 questions');
+
+    groupActJson.data.forEach((ev) => {
+      assert(ev.link && typeof ev.link === 'string' && ev.link.startsWith('/admin'), `Every activity must have non-empty in-app link: ${JSON.stringify(ev)}`);
+    });
+    console.log('✅ 10 chunk sessions collapsed into 1 event with 20 questions; all activities have valid in-app links');
+
+    // ──────────────────────────────────────────────────────────────────────────
+    // [TEST 7]: Cohort Filtering on Activity Feed
+    // ──────────────────────────────────────────────────────────────────────────
+    console.log('\n[TEST 7]: Cohort Filtering on Activity Feed');
+    const cbseActRes = await fetch(`${baseUrl}/api/dashboard/activity-feed?course=CBSE`, {
+      headers: { Authorization: `Bearer ${adminToken}` },
+    });
+    const cbseActJson = await cbseActRes.json();
+    assert.strictEqual(cbseActJson.success, true);
+    const cbseImports = cbseActJson.data.filter((ev) => ev.type === 'import_saved');
+    assert.strictEqual(cbseImports.length, 0, 'CBSE query must exclude Engineering import events');
+    console.log('✅ CBSE cohort query excluded Engineering events');
+
+    // ──────────────────────────────────────────────────────────────────────────
+    // [TEST 8]: Score Distribution Buckets & Boundaries (80, 60, 40)
+    // ──────────────────────────────────────────────────────────────────────────
+    console.log('\n[TEST 8]: Score Distribution Buckets & Boundaries');
+    await Evaluation.deleteMany({});
+    await Evaluation.create([
+      { testId: 'T1', course: 'Engineering', branch: 'CSE', semester: 'Semester 1', percentage: 95, status: 'evaluated' },
+      { testId: 'T1', course: 'Engineering', branch: 'CSE', semester: 'Semester 1', percentage: 80, status: 'evaluated' }, // boundary >= 80
+      { testId: 'T1', course: 'Engineering', branch: 'CSE', semester: 'Semester 1', percentage: 70, status: 'evaluated' },
+      { testId: 'T1', course: 'Engineering', branch: 'CSE', semester: 'Semester 1', percentage: 60, status: 'evaluated' }, // boundary 60-<80
+      { testId: 'T1', course: 'Engineering', branch: 'CSE', semester: 'Semester 1', percentage: 50, status: 'evaluated' },
+      { testId: 'T1', course: 'Engineering', branch: 'CSE', semester: 'Semester 1', percentage: 40, status: 'evaluated' }, // boundary 40-<60
+      { testId: 'T1', course: 'Engineering', branch: 'CSE', semester: 'Semester 1', percentage: 25, status: 'evaluated' }, // < 40
+    ]);
+    clearDashboardCache();
+
+    const scoreStatsRes = await fetch(`${baseUrl}/api/dashboard/stats?course=Engineering&branch=CSE&semester=Semester 1`, {
+      headers: { Authorization: `Bearer ${adminToken}` },
+    });
+    const scoreStatsJson = await scoreStatsRes.json();
+    assert.strictEqual(scoreStatsJson.success, true);
+    const dist = scoreStatsJson.data.scoreDistribution;
+    assert(dist, 'scoreDistribution must exist');
+    assert.strictEqual(dist.above80, 2, '95 and 80 should be above80');
+    assert.strictEqual(dist.between60and80, 2, '70 and 60 should be between60and80');
+    assert.strictEqual(dist.between40and60, 2, '50 and 40 should be between40and60');
+    assert.strictEqual(dist.below40, 1, '25 should be below40');
+    assert.strictEqual(dist.total, 7, 'Total graded should be 7');
+    assert.strictEqual(dist.above80 + dist.between60and80 + dist.between40and60 + dist.below40, dist.total, 'Buckets must sum to total');
+    console.log('✅ scoreDistribution buckets verified: sum equals total, boundaries (80, 60, 40) land in correct bucket');
+
+    // ──────────────────────────────────────────────────────────────────────────
+    // [TEST 9]: Recent Exams Ordering & Cohort Filtering
+    // ──────────────────────────────────────────────────────────────────────────
+    console.log('\n[TEST 9]: Recent Exams Ordering & Cohort Filtering');
+    await ClassTest.deleteMany({});
+    const examDates = [
+      new Date('2025-05-10T10:00:00Z'),
+      new Date('2025-05-15T10:00:00Z'),
+      new Date('2025-05-19T10:00:00Z'),
+    ];
+    await ClassTest.create([
+      { testId: 'TEST_OLD', title: 'Midterm 1', course: 'Engineering', branch: 'CSE', startAt: examDates[0], status: 'ended' },
+      { testId: 'TEST_MID', title: 'Midterm 2', course: 'Engineering', branch: 'CSE', startAt: examDates[1], status: 'ended' },
+      { testId: 'TEST_NEW', title: 'Final Exam', course: 'Engineering', branch: 'CSE', startAt: examDates[2], status: 'live' },
+      { testId: 'TEST_OTHER', title: 'CBSE Physics', course: 'CBSE', startAt: examDates[2], status: 'live' },
+    ]);
+    clearDashboardCache();
+
+    const examsRes = await fetch(`${baseUrl}/api/dashboard/stats?course=Engineering&branch=CSE`, {
+      headers: { Authorization: `Bearer ${adminToken}` },
+    });
+    const examsJson = await examsRes.json();
+    assert.strictEqual(examsJson.success, true);
+    const recent = examsJson.data.recentExams;
+    assert(Array.isArray(recent), 'recentExams must be array');
+    assert.strictEqual(recent.length, 3, 'Must return 3 Engineering tests, excluding CBSE');
+    assert.strictEqual(recent[0].title, 'Final Exam', 'Newest exam must come first');
+    assert.strictEqual(recent[1].title, 'Midterm 2');
+    assert.strictEqual(recent[2].title, 'Midterm 1');
+    console.log('✅ recentExams correctly ordered by startAt desc and cohort-filtered');
 
     console.log('\n' + '='.repeat(80));
     console.log('🎉 ALL DASHBOARD TESTS PASSED SUCCESSFULLY (0 ERRORS)');
