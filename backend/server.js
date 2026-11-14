@@ -167,10 +167,11 @@ app.use('/api/account', accountRoutes);
 app.use('/api/tests-schedule', testsScheduleRoutes);
 
 
-// ── Lightweight Health Routes for External Uptime Pingers ────────────────────────
-// Responds with instant 200 OK without database queries or rate limiting.
+// ── Lightweight Health & Keep-Warm Routes ──────────────────────────────────────────
+// Responds with instant 200 OK ({ ok: true }) without database queries or rate limiting.
 app.all(['/health', '/healthz', '/api/health/ping'], (req, res) => {
   res.status(200).json({
+    ok: true,
     status: 'ok',
     uptime: Math.floor(process.uptime()),
     timestamp: new Date().toISOString(),
@@ -178,54 +179,67 @@ app.all(['/health', '/healthz', '/api/health/ping'], (req, res) => {
   });
 });
 
-// Database Health & Status check endpoint
+// Database Health & Keep-Warm endpoint
 app.get('/api/health', async (req, res) => {
-  const state = mongoose.connection.readyState;
-  const states = { 0: 'disconnected', 1: 'connected', 2: 'connecting', 3: 'disconnecting' };
+  // If caller explicitly asks for full database introspection (?full=true)
+  if (req.query.full === 'true') {
+    const state = mongoose.connection.readyState;
+    const states = { 0: 'disconnected', 1: 'connected', 2: 'connecting', 3: 'disconnecting' };
 
-  let stats = {};
-  if (state === 1) {
-    try {
-      const Content = require('./models/Content');
-      const User = require('./models/User');
-      const Evaluation = require('./models/Evaluation');
-      const Notification = require('./models/Notification');
-      stats = {
-        contentCount: await Content.countDocuments(),
-        userCount: await User.countDocuments(),
-        evaluationCount: await Evaluation.countDocuments(),
-        notificationCount: await Notification.countDocuments(),
-      };
-    } catch (e) {}
+    let stats = {};
+    if (state === 1) {
+      try {
+        const Content = require('./models/Content');
+        const User = require('./models/User');
+        const Evaluation = require('./models/Evaluation');
+        const Notification = require('./models/Notification');
+        stats = {
+          contentCount: await Content.countDocuments(),
+          userCount: await User.countDocuments(),
+          evaluationCount: await Evaluation.countDocuments(),
+          notificationCount: await Notification.countDocuments(),
+        };
+      } catch (e) {}
+    }
+
+    const isAiConfigured = Boolean(
+      (process.env.GEMINI_DOUBTS_API_KEY && process.env.GEMINI_DOUBTS_API_KEY.trim()) ||
+      (process.env.GEMINI_API_KEY && process.env.GEMINI_API_KEY.trim())
+    );
+    const hasSeparateDoubtsKey = Boolean(process.env.GEMINI_DOUBTS_API_KEY && process.env.GEMINI_DOUBTS_API_KEY.trim());
+    const isAiKillSwitchActive = process.env.DOUBTS_AI_ENABLED === 'false';
+
+    const showProxyDiagnostic = process.env.ENABLE_HEALTH_PROXY_DIAGNOSTICS !== 'false';
+    const rawForwarded = req.headers['x-forwarded-for'] || null;
+
+    return res.json({
+      ok: true,
+      status: 'ok',
+      database: 'MongoDB Atlas',
+      connectionState: states[state] || 'unknown',
+      connected: state === 1,
+      host: mongoose.connection.host || null,
+      dbName: mongoose.connection.name || 'asmaths_lms',
+      clientIp: showProxyDiagnostic ? req.ip : '[PROTECTED]',
+      xForwardedFor: showProxyDiagnostic ? rawForwarded : '[PROTECTED]',
+      proxyDiagnosticEnabled: showProxyDiagnostic,
+      aiConfigured: isAiConfigured,
+      hasSeparateDoubtsKey,
+      aiKillSwitchActive: isAiKillSwitchActive,
+      aiModel: process.env.GEMINI_DOUBT_MODEL || 'gemini-3.8-flash',
+      globalDailyCap: parseInt(process.env.GLOBAL_DAILY_AI_REQUEST_CAP || '40', 10),
+      stats,
+      timestamp: new Date().toISOString(),
+    });
   }
 
-  const isAiConfigured = Boolean(
-    (process.env.GEMINI_DOUBTS_API_KEY && process.env.GEMINI_DOUBTS_API_KEY.trim()) ||
-    (process.env.GEMINI_API_KEY && process.env.GEMINI_API_KEY.trim())
-  );
-  const hasSeparateDoubtsKey = Boolean(process.env.GEMINI_DOUBTS_API_KEY && process.env.GEMINI_DOUBTS_API_KEY.trim());
-  const isAiKillSwitchActive = process.env.DOUBTS_AI_ENABLED === 'false';
-
-  const showProxyDiagnostic = process.env.ENABLE_HEALTH_PROXY_DIAGNOSTICS !== 'false';
-  const rawForwarded = req.headers['x-forwarded-for'] || null;
-
-  res.json({
+  // Fast keep-warm path: instant 200 OK without database queries or rate limiting
+  res.status(200).json({
+    ok: true,
     status: 'ok',
-    database: 'MongoDB Atlas',
-    connectionState: states[state] || 'unknown',
-    connected: state === 1,
-    host: mongoose.connection.host || null,
-    dbName: mongoose.connection.name || 'asmaths_lms',
-    clientIp: showProxyDiagnostic ? req.ip : '[PROTECTED]',
-    xForwardedFor: showProxyDiagnostic ? rawForwarded : '[PROTECTED]',
-    proxyDiagnosticEnabled: showProxyDiagnostic,
-    aiConfigured: isAiConfigured,
-    hasSeparateDoubtsKey,
-    aiKillSwitchActive: isAiKillSwitchActive,
-    aiModel: process.env.GEMINI_DOUBT_MODEL || 'gemini-3.8-flash',
-    globalDailyCap: parseInt(process.env.GLOBAL_DAILY_AI_REQUEST_CAP || '40', 10),
-    stats,
+    uptime: Math.floor(process.uptime()),
     timestamp: new Date().toISOString(),
+    service: 'as-maths-educator-backend',
   });
 });
 
